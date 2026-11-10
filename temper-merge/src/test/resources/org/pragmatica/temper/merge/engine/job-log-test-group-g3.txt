@@ -1,0 +1,19 @@
+2026-11-07T22:38:04.8971060Z 22:38:04.801 [docker-java-stream--441371231] INFO  t.m.g.i.8.onStart() - Starting to pull image
+2026-11-07T22:38:04.8972339Z 22:38:04.803 [docker-java-stream--441371231] INFO  t.m.g.i.8.onNext() - Pulling image layers:  0 pending,  0 downloaded,  0 extracted, (0 bytes/0 bytes)
+2026-11-07T22:38:04.9249924Z 22:38:04.915 [] INFO  o.p.s.SwimProtocol.recordConfirmer() - SWIM dogpile confirmation (Wave-6 Lifeguard): suspect node-a confirmed by node-self (C=3, K=1); suspicion window 300ms -> 300ms
+2026-11-07T22:38:04.9273947Z 22:38:04.918 [] WARN  o.p.s.SwimProtocol.detectSelfIsolation() - SWIM self-isolation detected: all 1 tracked peers FAULTY simultaneously — treating as local isolation; isolation-era FAULTY verdicts will be expired on rejoin
+2026-11-07T22:38:04.9275987Z [ERROR] Tests run: 42, Failures: 0, Errors: 1, Skipped: 0, Time elapsed: 1.314 s <<< FAILURE! -- in org.pragmatica.storage.AppendLogTest$Ordering
+2026-11-07T22:38:04.9280191Z [ERROR] org.pragmatica.storage.AppendLogTest.append_writesFrameBeforeReturning -- Time elapsed: 0.024 s <<< ERROR!
+2026-11-07T22:38:04.9281857Z org.junit.platform.commons.JUnitException: Failed to close extension context
+2026-11-07T22:38:04.9282740Z 	at java.base/java.util.ArrayList.forEach(ArrayList.java:1604)
+2026-11-07T22:39:38.0387494Z 22:39:38.018 [] INFO  o.p.s.SwimProtocol.lhmIncrement() - SWIM LHM (Wave-6 Lifeguard): local health score 1 -> 2 (cause: probe cycle for node-a timed out with no ack)
+2026-11-07T22:39:38.1257213Z [INFO] 
+2026-11-07T22:39:38.1257633Z [INFO] Results:
+2026-11-07T22:39:38.1257835Z [INFO] 
+2026-11-07T22:39:38.1258009Z [ERROR] Errors: 
+2026-11-07T22:39:38.1258740Z [ERROR]   AppendLogTest.append_writesFrameBeforeReturning » JUnit Failed to close extension context
+2026-11-07T22:39:38.1259162Z [INFO] 
+2026-11-07T22:39:38.1259398Z [ERROR] Tests run: 1136, Failures: 0, Errors: 1, Skipped: 0
+2026-11-07T22:39:38.1259661Z [INFO] 
+2026-11-07T22:39:38.1378298Z 22:39:38.068 [] INFO  o.p.s.SwimProtocol.lhmIncrement() - SWIM LHM (Wave-6 Lifeguard): local health score 2 -> 3 (cause: probe cycle for node-a timed out with no ack)
+2026-11-07T22:39:38.1379555Z 22:39:38.118 [] INFO  o.p.s.SwimProtocol.lhmIncrement() - SWIM LHM (Wave-6 Lifeguard): local health score 3 -> 4 (cause: probe cycle for node-a timed out with no ack)

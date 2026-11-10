@@ -1,0 +1,91 @@
+# ~/.config/temper/controller.toml (m0-design §6.1). `~` expands to the controller user's home.
+# No `version` key: the controller's version is its build's ${project.version} (m0-design §12.7), which is also the
+# expected worker version and the runner version (dedup key, handshake, runner image tag). A `version` key is refused.
+
+[server]
+bind = "0.0.0.0"                                  # recorded only: rc4 http-server binds every interface (Q-1)
+port = 7070
+tokenFile = "~/.config/temper/token"             # 0600; the same file the CLI reads
+# readTokenFile = "~/.config/temper/read-token"  # optional, 0600: a token for the READ routes only (403 elsewhere)
+instance = "temper"                              # the default; labels unit containers, reconcile ignores other instances'
+
+[db]
+host = "127.0.0.1"
+port = 55432                                     # ops/pg-up.sh
+name = "temper"
+user = "temper"
+passwordFile = "~/.config/temper/pg-password"    # 0600; the same file the container mounts
+
+[repo]
+origin = "git@github.com:pragmaticalabs/pragmatica.git"
+mirror = "~/.temper/controller-mirror.git"       # created with `git clone --mirror` on first use
+
+[github]
+# The controller reads GitHub (the fork check, the merged flag) as its own GitHub App. A
+# controller built from WP-3 REFUSES TO START (exit 78) with neither [github.app] nor `anonymous = true`, so write this
+# before deploying it. `anonymous = true` reads unauthenticated (60 requests/h per address): tests and dev only.
+# anonymous = true
+
+[github.app]
+clientId = "Iv23liREPLACEME"                      # the App's client ID (the JWT `iss`), not secret
+installationId = 12345678                        # the installation on pragmaticalabs, not secret
+keyFile = "~/.config/temper/gh-app-key.pem"      # 0600, in a 0700 directory, a regular file; read at each mint
+
+[scheduler]
+intervalSeconds = 2
+starvationSeconds = 1200
+leaseSeconds = 30
+# How long a host's link may stay down before the host is LOST and its units are settled (m4-design §2.1).
+hostLostSeconds = 600
+
+[units]
+memoryMb = 6144
+gateMemoryMb = 16384                             # the Gate unit's limit until the sizing report exists (Q-M1-13)
+cpuShares = 1024
+diskFloorGiB = 50
+mavenOpts = ""
+tcHubPrefix = ""
+rerunInstallSeconds = 300                        # the rerun bound's allowance for `-pl <modules> -am install`
+
+[portGroup]
+modules = ["aether/ember", "aether/forge/forge-tests"]   # Q-4: units whose reactor includes these hold the port group
+owner = "temper"                                 # bb-hold owner tag (Q-M1-12)
+maxHolding = 1                                   # temper units waiting for or holding the group, per host
+
+[evidence]
+root = "~/.local/share/temper/evidence"          # tarballs, result.json, pg_dump files (not under ~/.temper)
+maxSmallMiB = 256
+maxFullMiB = 1024
+minFreeGiB = 20                                  # below this the `full` pull is skipped; `small` is always tried
+
+[retention]
+intervalMinutes = 60                             # retention GC and the result.json sweep
+
+[pgDump]
+at = "03:30"                                     # local time of the daily pg_dump
+container = "temper-pg"                          # ops/pg-up.sh
+
+[fleet]
+# The kiln the fleet stream pulls every 5 s (omit to switch the pull off), and where the epoch's
+# high-water file lives (default: temper-state beside the evidence root).
+kilnUrl = "http://127.0.0.1:7171"
+stateDir = "~/.temper/state"
+# Bb hosts beyond [[hosts]]. "<host>" is a bb host temper has no link to (NOT-COLLECTED);
+# "<host>=<user>@<address>" is read over the kiln scan key (the `tickets` verb of kiln-scan). The `=` form needs both
+# paths. A name may not repeat or equal a [[hosts]] name.
+# bbHosts = ["oldbox", "buildbox=builder@192.0.2.72"]
+# bbScanKey = "~/.temper/kiln_scan"
+# bbKnownHosts = "~/.temper/known_hosts"
+
+[worker]
+jar = "~/.temper/dist/temper-worker.jar"         # deployed to hosts through the `install` verb
+
+[[hosts]]
+name = "bigboy"
+address = "localhost"
+user = "builder"
+key = "~/.temper/temper_worker"                  # private key; the host's authorized_keys forces worker-launch
+knownHosts = "~/.temper/known_hosts"             # StrictHostKeyChecking=yes
+cap = 5
+memoryBudgetMb = 20480
+portIsolated = false

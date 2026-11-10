@@ -1,0 +1,5 @@
+rc=0 wall=5640s
+[INFO] BUILD SUCCESS
+reactor SUCCESS lines: 2  FAILURE: 0  SKIPPED: 0
+report XML newer than marker: 26 files (older, excluded:        0)
+<testcase> elements: 293  failures: 0  errors: 0  skipped: 0  (testsuite tests= attribute sum: 177, known @Nested undercount)

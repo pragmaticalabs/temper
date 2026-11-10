@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# preflight -- the machine and tree checks that, when they fail, fail a build in a way that looks like a code defect:
+# a full disk (2026-10-19: 100%, builds broken machine-wide), docker down (colima after a restart: 81 spurious IT
+# errors), a .m2-local that hard-links the shared repository (cp -al: Maven writes through the link into the seed), a
+# build still running in the tree.
+#
+# Usage: ops/dev/preflight [<tree>]
+#   disk   at least TEMPER_MIN_FREE_GIB (default 20) GiB free on the volume holding <tree>, or ${TEMPER_WT_ROOT:-$HOME/temper-wt}
+#   docker the docker CLI on PATH and `docker info` answering (temper's tests exec docker; Testcontainers alone would
+#          need only the socket). Without the CLI the line also says whether the unix socket of DOCKER_HOST (or
+#          colima's, or /var/run/docker.sock) answers _ping
+#   docker-host the host Testcontainers will use (tc.host, else DOCKER_HOST, else docker.host in
+#          ~/.testcontainers.properties, else a default socket), and, with the CLI on PATH, that it is the one `docker
+#          info` used (DOCKER_HOST, else the current docker context): otherwise the ITs talk to another daemon, or none
+#   with a <tree>: <tree>/.m2-local is a directory, not a symlink, and `find .m2-local -type f -links +1` is empty;
+#          <tree>/.wp-logs/build.lock is not held: no pid it lists is alive, and it is not a pid-less directory younger
+#          than 10 s
+#
+# Every check runs and prints one line, `ok: ...` or `FAILED: ...`. Exit codes: 0 all ok, 1 a check failed, 2 usage.
+set -euo pipefail
+
+. "$(cd "$(dirname "$0")" && pwd)/lib.sh"
+
+[ $# -le 1 ] || { echo "usage: $0 [<tree>]" >&2; exit 2; }
+if [ $# -eq 1 ]; then
+  [ -d "$1" ] || { echo "usage: $0 [<tree>]: $1 is not a directory" >&2; exit 2; }
+  tree=$(cd "$1" && pwd)
+fi
+
+failed=0
+disk_ok "${tree:-${TEMPER_WT_ROOT:-$HOME/temper-wt}}" || failed=1
+docker_ok || failed=1
+docker_host_ok || failed=1
+if [ -n "${tree:-}" ]; then
+  m2_ok "$tree" || failed=1
+  lock_ok "$tree" || failed=1
+fi
+exit $failed

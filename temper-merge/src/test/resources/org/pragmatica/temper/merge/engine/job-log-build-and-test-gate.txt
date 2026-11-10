@@ -1,0 +1,12 @@
+2026-11-07T23:02:05.9643368Z Download action repository 'actions/checkout@v5' (SHA:fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09)
+2026-11-07T23:02:06.0537721Z Download action repository 'actions/download-artifact@v5' (SHA:634f93cb2916e3fdff6788551b99b062d0335ce0)
+2026-11-07T23:02:06.4746877Z Download action repository 'actions/upload-artifact@v6' (SHA:b7c566a772e6b6bfb58ed0dc250532a479d7789f)
+2026-11-07T23:02:06.9078020Z Complete job name: build-and-test
+2026-11-07T23:02:06.9737605Z ##[group]Run echo "static-gates: success, test-group: failure"
+2026-11-07T23:02:06.9738489Z echo "static-gates: success, test-group: failure"
+2026-11-07T23:02:06.9739512Z [ "success" = success ] && [ "failure" = success ]
+2026-11-07T23:02:06.9761756Z shell: /usr/bin/bash -e {0}
+2026-11-07T23:02:06.9762513Z ##[endgroup]
+2026-11-07T23:02:06.9861755Z static-gates: success, test-group: failure
+2026-11-07T23:02:06.9873413Z ##[error]Process completed with exit code 1.
+2026-11-07T23:02:07.0025362Z Cleaning up orphan processes

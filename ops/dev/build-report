@@ -1,0 +1,678 @@
+#!/usr/bin/env python3
+"""build-report -- the verdict of ONE maven run in a tree, from evidence that cannot be older than the run.
+
+Usage: ops/dev/build-report --tree <root> --marker <file> --log <file> [--expect mod1,mod2] [--mvn-exit N]
+       ops/dev/build-report --tree-state <root>     prints the hash of the tree's working state (see below)
+
+Per module of the reactor (the root pom's <modules> and every profile's, recursively through each aggregator), from the log: whether this run built it (a
+`--- plugin @ <artifactId> ---` header or a reactor-summary row), its reactor status, the jbct
+`Check results (checked N file(s))` count and whether its tests were skipped; from the surefire/failsafe
+TEST-*.xml under <module>/target/{surefire,failsafe}-reports* NEWER than the marker: the <testcase> elements (not the tests= attribute) and
+those with a <failure>, <error> or <skipped> child, and any <flakyFailure>, <flakyError>, <rerunFailure> or
+<rerunError> child (a rerun, however configured: RED). A class ran nothing when, in one reports directory, no testcase
+has its classname and either the log says `Tests run: N ... in <class>` with N > 0 (surefire counts an outer class's own
+testcases into one @Nested class's line, so a @Nested class whose @BeforeAll assumption failed can show N > 0), or the
+log says N = 0 or its report has no <testcase>, and no testcase of its @Nested classes ran there either. Each report's
+<properties> (the test JVM's system properties) are judged by build_rules.py, the lists build-args uses, except a
+selecting name the poms' own systemPropertyVariables / argLine set (its value is interpolated; the command line is judged). A report older than the marker is a previous run's and is
+ignored; a fresh report in a module this log did not build means another build wrote into the tree.
+Per surefire `test` / failsafe `integration-test` execution, from the log (`--- surefire:...:test (<id>) @ <module>`)
+and from the executions the module's pom declares or inherits from its parent root pom: whether it ran, whether it
+said `Tests are skipped.`, and the fresh testcases in its reportsDirectory (default target/surefire-reports,
+target/failsafe-reports). Two executions sharing one reportsDirectory share its count. A module without src/test
+(the root pom) is not judged by its executions.
+From the marker (written by ops/dev/build): `head`, `tree` (the tree state at the start: the hash of
+`git status --porcelain`, `git diff HEAD` and the untracked files' contents, .wp-logs left out), and `select_modules` /
+`select_tests` (what ops/dev/build-args found selecting a subset).
+
+Verdict:
+  GREEN         mvn exit 0 and BUILD SUCCESS; every built module SUCCESS; no failure or error; every built module
+                with src/test has >= 1 fresh testcase and not all of them skipped; so has every test execution its
+                pom declares; jbct checked >= 1 file in every built module with src/main/java; every --expect module
+                built and ran >= 1 non-skipped testcase; HEAD and the tree state unchanged since the marker; every
+                module of the default reactor built; no module or test selection.
+  RED           a failure: mvn exit, a failed module, test failure or error, a testcase rerun after failing, jbct
+                examined nothing, an --expect module without a non-skipped testcase, HEAD or the tree changed, fresh
+                reports in a module not built, a marker field missing, provenance, a refused property in a test JVM's
+                XML; and missing tests (0 fresh testcases, all skipped) unless the run selected tests.
+  COMPILE-ONLY  no RED reason, but tests this run skipped (-DskipTests, -Dmaven.test.skip).
+  PARTIAL       no RED or COMPILE-ONLY reason, but a subset: module or test selection (on the command line or its
+                channels, or in a test JVM's XML), a -D/-P outside the allowlist, a default-reactor module not built,
+                a declared test execution that did not run (its phase not reached), a skipped testcase or a class that
+                ran nothing which ops/dev/known-skips does not list.
+Writes <log without .log>.json next to the log and a <= 20-line summary on stdout.
+Exit codes: 0 GREEN, 1 RED, COMPILE-ONLY or PARTIAL, 2 invalid input (missing tree/pom/marker/log, log older than the marker,
+an --expect module the root pom does not name, a malformed ops/dev/known-skips).
+"""
+import argparse
+import glob
+import hashlib
+import json
+import os
+import platform
+import re
+import subprocess
+import sys
+import xml.etree.ElementTree as ET
+
+sys.dont_write_bytecode = True  # no __pycache__ in ops/dev
+from build_rules import Reactor, judge  # noqa: E402 (this directory)
+
+ANSI = re.compile(r"\x1b\[[0-9;]*m")
+HEADER = re.compile(r"^\[INFO\] --- (\S+)(?: \(([^)]*)\))? @ (\S+) ---\s*$")
+BUILDING = re.compile(r"^\[INFO\] Building (.+?) \S+(\s+\[\d+/\d+\])?\s*$")
+JBCT_CHECKED = re.compile(r"Check results \(checked (\d+) file")
+JBCT_NOTHING = re.compile(r"JBCT .* examined NOTHING")
+TESTS_SKIPPED = re.compile(r"^\[INFO\] Tests are skipped\.\s*$")
+# a test class's line: `Tests run: 0` is a class that ran nothing (a failed assumption in @BeforeAll leaves no testcase
+# at all) or an outer @Nested class; surefire counts the outer class's own testcases into the line of one of its @Nested
+# classes (PlannerTest$RerunUnits: 42 = its 8 + PlannerTest's 34), so N > 0 is checked only for a testcase of the class
+CLASS_RUN = re.compile(r"^\[(?:INFO|WARNING|ERROR)\] Tests run: (\d+), .* -+ in (\S+)\s*$")
+TESTS_TOTAL = re.compile(r"^\[(?:INFO|WARNING|ERROR)\] Tests run: (\d+), Failures: (\d+), Errors: (\d+), Skipped: (\d+)\s*$")
+# a testcase surefire/failsafe reran (rerunFailingTestsCount): flaky* when a rerun passed, rerun* when none did
+RERUN_KINDS = ("flakyFailure", "flakyError", "rerunFailure", "rerunError")
+# every field ops/dev/build writes into the marker; a marker without one was not written by it
+MARKER_FIELDS = ("head", "dirty", "tree", "start", "args", "wrapper", "wrapper_lstart", "mvn", "maven_version",
+                 "java_home", "select_modules", "select_tests", "select_other")
+KNOWN_SKIPS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "known-skips")
+SUMMARY_ROW = re.compile(r"^\[INFO\] (.+?) \.+ (SUCCESS|FAILURE|SKIPPED)\b")
+
+
+def invalid(message):
+    print("build-report: invalid input: " + message, file=sys.stderr)
+    sys.exit(2)
+
+
+def local(tag):
+    return tag.rsplit("}", 1)[-1]
+
+
+def child_text(element, name):
+    for child in element:
+        if local(child.tag) == name:
+            return (child.text or "").strip()
+    return None
+
+
+def pom_of(directory):
+    path = os.path.join(directory, "pom.xml")
+    try:
+        return ET.parse(path).getroot()
+    except (OSError, ET.ParseError) as cause:
+        invalid("cannot read %s: %s" % (path, cause))
+
+
+def module_dirs(tree):
+    """(module dir relative to `tree`, profile id or None, aggregator dir) for every <module> of the root pom and its
+    profiles, and recursively of each aggregator they name: a module inherits its aggregator's profile unless a profile
+    of the aggregator names it."""
+    found, pending = [], [(".", None)]
+    while pending:
+        aggregator, inherited = pending.pop(0)
+        for element in pom_of(os.path.join(tree, aggregator)):
+            if local(element.tag) == "modules":
+                entries = [(element, inherited)]
+            elif local(element.tag) == "profiles":
+                entries = [(part, child_text(profile, "id")) for profile in element for part in profile
+                           if local(part.tag) == "modules"]
+            else:
+                continue
+            for modules, profile in entries:
+                for m in (m for m in modules if local(m.tag) == "module" and m.text):
+                    directory = os.path.normpath(os.path.join(aggregator, m.text.strip()))
+                    if directory != "." and all(directory != d for d, _, _ in found):
+                        found.append((directory, profile, aggregator))
+                        pending.append((directory, profile))
+    return found
+
+
+def has_files(directory):
+    for _, _, files in os.walk(directory):
+        if files:
+            return True
+    return False
+
+
+def test_goal(plugin, goal):
+    """'surefire' or 'failsafe' when `plugin`:`goal` runs tests, else None."""
+    for kind, test in (("surefire", "test"), ("failsafe", "integration-test")):
+        if kind in plugin and goal == test:
+            return kind
+    return None
+
+
+def execution(kind, execution_id, directory, declared):
+    return {"plugin": kind, "id": execution_id, "dir": directory, "declared": declared, "ran": False,
+            "tests_skipped": False, "testcases": 0, "skipped": 0}
+
+
+def reports_dir(*configurations):
+    """The reportsDirectory the first configuration setting one sets, else None (the plugin's default)."""
+    for configuration in configurations:
+        for child in configuration if configuration is not None else ():
+            if local(child.tag) == "reportsDirectory" and child.text:
+                value = child.text.strip().replace("${project.build.directory}", "target")
+                return os.path.normpath(value.replace("${project.basedir}", ".").replace("${basedir}", "."))
+    return None
+
+
+def declared_executions(pom, inherited=None):
+    """The surefire `test` and failsafe `integration-test` executions the module's pom declares, over those it
+    inherits from its parent root pom (`inherited`): an execution it redeclares keeps the inherited reportsDirectory
+    unless it sets its own."""
+    found = dict((key, dict(run)) for key, run in (inherited or {}).items())
+    for build in (e for e in pom if local(e.tag) == "build"):
+        for plugins in (e for e in build if local(e.tag) == "plugins"):
+            for plugin in plugins:
+                artifact = child_text(plugin, "artifactId") or ""
+                kind = "surefire" if "surefire" in artifact else "failsafe" if "failsafe" in artifact else None
+                if kind is None:
+                    continue
+                configuration = next((e for e in plugin if local(e.tag) == "configuration"), None)
+                for executions in (e for e in plugin if local(e.tag) == "executions"):
+                    for declared in executions:
+                        execution_id = child_text(declared, "id") or "default"
+                        goals = [g.text.strip() for e in declared if local(e.tag) == "goals" for g in e if g.text]
+                        if not any(test_goal(kind, goal) for goal in goals) and execution_id != "default-test":
+                            continue
+                        own = next((e for e in declared if local(e.tag) == "configuration"), None)
+                        key = "%s:%s" % (kind, execution_id)
+                        directory = (reports_dir(own) or found.get(key, {}).get("dir") or reports_dir(configuration)
+                                     or os.path.join("target", kind + "-reports"))
+                        found[key] = execution(kind, execution_id, directory, True)
+    return found
+
+
+def modules_of(tree):
+    executions = {".": declared_executions(pom_of(tree))}
+    modules = {}
+    for directory, profile, aggregator in [(".", None, None)] + module_dirs(tree):
+        path = os.path.normpath(os.path.join(tree, directory))
+        pom = pom_of(path)
+        artifact = child_text(pom, "artifactId")
+        # a module with a <parent> inherits its aggregator's executions (the root's, over any of its own)
+        inherits = directory != "." and any(local(e.tag) == "parent" for e in pom)
+        executions[directory] = (executions[directory] if directory == "." else
+                                 declared_executions(pom, executions[aggregator] if inherits else None))
+        modules[artifact] = {
+            "executions": executions[directory],
+            "dir": directory,
+            "name": child_text(pom, "name") or artifact,
+            "profile": profile,
+            "has_tests": has_files(os.path.join(path, "src", "test")),
+            "has_sources": has_files(os.path.join(path, "src", "main", "java")),
+            "built": False,
+            "status": None,
+            "jbct_checked": None,
+            "tests_skipped": False,
+            "log_tests_run": None,
+            "report_files": 0,
+            "stale_report_files": 0,
+            "testcases": 0,
+            "failures": 0,
+            "errors": 0,
+            "skipped": 0,
+            "skipped_unlisted": {},
+            "class_lines": {},
+            "classes": set(),
+            "jvm_properties": {},
+            "rerun": {},
+            "dirs": {},
+        }
+    return modules
+
+
+def read_log(path, modules):
+    by_name = dict((m["name"], a) for a, m in modules.items())
+    current = None
+    running = None
+    in_summary = False
+    build_success = False
+    build_failure = False
+    with open(path, encoding="utf-8", errors="replace") as log:
+        for raw in log:
+            line = ANSI.sub("", raw.rstrip("\n"))
+            header = HEADER.match(line)
+            if header:
+                current = header.group(3)
+                running = None
+                if current in modules:
+                    modules[current]["built"] = True
+                    plugin_goal = header.group(1).split(":")
+                    kind = test_goal(plugin_goal[0], plugin_goal[-1])
+                    if kind:
+                        execution_id = header.group(2) or "default"
+                        running = modules[current]["executions"].setdefault(
+                            "%s:%s" % (kind, execution_id),
+                            execution(kind, execution_id, os.path.join("target", kind + "-reports"), False))
+                        running["ran"] = True
+                continue
+            building = BUILDING.match(line)
+            if building and building.group(1) in by_name:
+                current = by_name[building.group(1)]
+                modules[current]["built"] = True
+                continue
+            if "Reactor Summary" in line:
+                in_summary = True
+                continue
+            if in_summary:
+                row = SUMMARY_ROW.match(line)
+                if row and row.group(1) in by_name:
+                    module = modules[by_name[row.group(1)]]
+                    module["status"] = row.group(2)
+                    module["built"] = module["built"] or row.group(2) != "SKIPPED"
+                    continue
+            if "BUILD SUCCESS" in line:
+                build_success = True
+            if "BUILD FAILURE" in line:
+                build_failure = True
+            if current not in modules:
+                continue
+            module = modules[current]
+            checked = JBCT_CHECKED.search(line)
+            if checked:
+                module["jbct_checked"] = (module["jbct_checked"] or 0) + int(checked.group(1))
+            elif JBCT_NOTHING.search(line):
+                module["jbct_checked"] = module["jbct_checked"] or 0
+            elif TESTS_SKIPPED.match(line):
+                module["tests_skipped"] = True
+                if running is not None:
+                    running["tests_skipped"] = True
+            else:
+                ran = CLASS_RUN.match(line)
+                if ran:  # by the reports directory of the execution printing it (one class can run in two)
+                    lines = module["class_lines"].setdefault(running["dir"] if running is not None else "", {})
+                    lines[ran.group(2)] = lines.get(ran.group(2), 0) + int(ran.group(1))
+                total = TESTS_TOTAL.match(line)
+                if total:
+                    module["log_tests_run"] = (module["log_tests_run"] or 0) + int(total.group(1))
+    single_status = "SUCCESS" if build_success and not build_failure else "FAILURE"
+    for module in modules.values():
+        if module["built"] and module["status"] is None:
+            module["status"] = single_status  # one-module build: maven prints no reactor summary
+    return build_success and not build_failure
+
+
+def known_skips(path=KNOWN_SKIPS):
+    """{(module, class, method or None): reason} of ops/dev/known-skips for this platform; a malformed line (a bare
+    class without its module among them) is invalid input. An entry for a module this reactor lacks matches nothing:
+    a misspelt module leaves its skips counted (PARTIAL), never hides one."""
+    known = {}
+    with open(path, encoding="utf-8") as source:
+        for number, line in enumerate(source, 1):
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            words = line.split(None, 3)
+            if len(words) < 4 or words[2] not in ("any", "Linux", "Darwin"):
+                invalid("%s:%d: want `<module> <class>[#method] <any|Linux|Darwin> <reason>`, got %r"
+                        % (path, number, line.rstrip("\n")))
+            if words[2] in ("any", platform.system()):
+                cls, _, method = words[1].partition("#")
+                known[(words[0], cls, method or None)] = words[3].strip()
+    return known
+
+
+def known(skips, artifact, cls, method=None):
+    """A whole-class entry covers each of its methods; a method entry only that method, never the class."""
+    return (artifact, cls, None) in skips or method is not None and (artifact, cls, method) in skips
+
+
+def read_reports(tree, modules, marker_mtime, reasons, skips):
+    for artifact, module in modules.items():
+        target = os.path.join(tree, module["dir"], "target")
+        for kind in ("surefire-reports*", "failsafe-reports*"):  # also an execution's own dir (-one-carrier)
+            for path in sorted(glob.glob(os.path.join(target, kind, "TEST-*.xml"))):
+                if os.stat(path).st_mtime_ns < marker_mtime:
+                    module["stale_report_files"] += 1
+                    continue
+                module["report_files"] += 1
+                try:
+                    root = ET.parse(path).getroot()
+                except ET.ParseError as cause:
+                    reasons.append("%s: unreadable report %s (%s)" % (artifact, os.path.basename(path), cause))
+                    continue
+                for prop in root.iter():
+                    if local(prop.tag) == "property" and prop.get("name"):
+                        module["jvm_properties"][prop.get("name")] = prop.get("value")
+                cases = [case for case in root.iter() if local(case.tag) == "testcase"]
+                directory = os.path.relpath(os.path.dirname(path), os.path.join(tree, module["dir"]))
+                if not cases:  # a class whose @BeforeAll assumption failed: a report, and no testcase
+                    module["class_lines"].setdefault(directory, {}).setdefault(
+                        root.get("name") or os.path.basename(path)[5:-4], 0)
+                counts = module["dirs"].setdefault(directory, {"testcases": 0, "skipped": 0, "classes": set()})
+                for case in root.iter():
+                    if local(case.tag) != "testcase":
+                        continue
+                    kinds = set(local(child.tag) for child in case)
+                    for into in (module, counts):
+                        into["testcases"] += 1
+                        into["skipped"] += "skipped" in kinds
+                    module["failures"] += "failure" in kinds
+                    module["errors"] += "error" in kinds
+                    module["classes"].add(case.get("classname"))
+                    counts["classes"].add(case.get("classname"))
+                    if "skipped" in kinds and not known(skips, artifact, case.get("classname"), case.get("name")):
+                        name = case.get("classname") or "?"
+                        module["skipped_unlisted"][name] = module["skipped_unlisted"].get(name, 0) + 1
+                    for kind in kinds.intersection(RERUN_KINDS):
+                        module["rerun"][kind] = module["rerun"].get(kind, 0) + 1
+        module["skipped_classes"] = sorted(set(
+            c for directory, lines in module["class_lines"].items() for c, n in lines.items()
+            if skipped_class(c, n, module["dirs"].get(directory, {}).get("classes", set()) if directory
+                             else module["classes"])
+            and not known(skips, artifact, c)))
+        for run in module["executions"].values():
+            counts = module["dirs"].get(run["dir"], {})
+            run["testcases"] = counts.get("testcases", 0)
+            run["skipped"] = counts.get("skipped", 0)
+
+
+def skipped_class(cls, logged, classes):
+    """A class the log or a report names, judged against the testcases of the same reports directory: it ran nothing
+    when none has its classname, unless it is an outer @Nested class (logged 0) whose @Nested classes' testcases ran."""
+    if cls in classes:
+        return False
+    return logged > 0 or not any((n or "").startswith(cls + "$") for n in classes)
+
+
+def git(tree, *args):
+    try:
+        return subprocess.run(("git", "-C", tree) + args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                              universal_newlines=True, check=True).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+
+def marker_fields(path):
+    fields = {}
+    with open(path, encoding="utf-8", errors="replace") as marker:
+        for line in marker:
+            if "=" in line:
+                key, value = line.rstrip("\n").split("=", 1)
+                fields[key] = value
+    return fields
+
+
+def git_output(tree, *args):
+    try:
+        return subprocess.run(("git", "-C", tree) + args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                              check=True).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return b"<git failed>"
+
+
+def ignored_sources(tree):
+    """The gitignored files under a module's src/ and the ignored poms (root and modules): the build reads them, git
+    status does not show them."""
+    dirs = ["."] + [directory for directory, _, _ in module_dirs(tree)]
+    specs = [os.path.normpath(os.path.join(d, part)) for d in dirs for part in ("src", "pom.xml")]
+    listed = git_output(tree, "ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--", *specs)
+    return [name for name in listed.split(b"\0") if name]
+
+
+def tree_state(tree):
+    """A hash of what the build reads from the working tree beyond HEAD: status, the diff against HEAD, every
+    untracked file's content (not ignored, or ignored under a module's src/ or a pom), and .mvn/maven.config's content
+    (skip-worktree by convention, so its edits show nowhere else); the tooling's own .wp-logs is left out."""
+    def output(*args):
+        return git_output(tree, *args)
+    outside = ":(exclude).wp-logs"
+    digest = hashlib.sha1()
+    digest.update(output("status", "--porcelain", "--", ".", outside))
+    digest.update(output("diff", "HEAD", "--", ".", outside))
+    untracked = output("ls-files", "-z", "--others", "--exclude-standard", "--", ".", outside).split(b"\0")
+    for name in untracked + ignored_sources(tree) + [b".mvn/maven.config"]:
+        if name:
+            digest.update(name)
+            try:
+                with open(os.path.join(tree, name.decode("utf-8", "surrogateescape")), "rb") as untracked:
+                    digest.update(untracked.read())
+            except OSError:
+                digest.update(b"<unreadable>")
+    return digest.hexdigest()
+
+
+def alive(pid):
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except PermissionError:
+        return True
+    except (OSError, ValueError, OverflowError):
+        return False
+
+
+def provenance(tree, marker, log, reasons):
+    """Who ran this report: the wrapper the marker names must hold the tree's build lock (its first entry, same start)
+    and be this process's parent. A hand-run build-report, or one after the lock was released, fails here."""
+    lock = os.path.join(tree, ".wp-logs", "build.lock")
+    def first(name):
+        try:
+            with open(os.path.join(lock, name), encoding="utf-8", errors="replace", newline="") as source:
+                return source.read().split("\n")[0]
+        except OSError:
+            return None
+    wrapper, wrapper_start = marker.get("wrapper"), marker.get("wrapper_lstart")
+    entry = {"pid": first("pid"), "lstart": first("lstart")}
+    with open(log, "rb") as source:
+        log_sha256 = hashlib.sha256(source.read()).hexdigest()
+    found = {"wrapper_pid": wrapper, "wrapper_lstart": wrapper_start, "lock_entry": entry,
+             "report_parent_pid": str(os.getppid()), "log_sha256": log_sha256}
+    if not wrapper or entry["pid"] != wrapper or entry["lstart"] != wrapper_start:
+        reasons.append("provenance: the build lock (%s) is not held by the marker's wrapper (pid %s, started %s): "
+                       "build-report not run by ops/dev/build, or the lock was released or lost before it"
+                       % (entry, wrapper, wrapper_start))
+    elif not alive(wrapper) or found["report_parent_pid"] != wrapper:
+        reasons.append("provenance: build-report's parent is pid %s, not the marker's live wrapper pid %s"
+                       % (found["report_parent_pid"], wrapper))
+    return found
+
+
+def jvm_properties(tree, modules, reasons):
+    """The system properties each test JVM recorded in its XML, judged by the lists build-args uses: whatever channel
+    set them (a launcher script, a wrapper, an mvn first on PATH), a refused one is RED and a selecting one PARTIAL."""
+    reactor = Reactor(tree)
+    selecting = []
+    for artifact, module in modules.items():
+        for name, value in sorted(module["jvm_properties"].items()):
+            kind, why = judge(name, value, tree, reactor)
+            shown = "%s: its test JVM had -D%s=%s" % (artifact, name, value)
+            if kind == "refused":
+                reasons.append("%s (%s)" % (shown, why))
+            elif kind == "tests" and name not in reactor.jvm_set:  # the poms' own, interpolated: the CLI is judged
+                selecting.append(shown + (" (%s)" % why if why else ""))
+    return selecting
+
+
+def verdict_of(modules, expect, mvn_exit, log_success, head, marker, state, jvm_selection=()):
+    """(verdict, reasons): RED on any failure; COMPILE-ONLY when tests were skipped; PARTIAL when a subset ran."""
+    hard, skips, partial = [], [], []
+    tests_selected = bool(marker.get("select_tests"))
+    shortfall = partial if tests_selected else hard  # missing tests are what a test selection is expected to cause
+    if marker.get("select_modules"):
+        partial.append("module selection: " + marker["select_modules"])
+    if tests_selected:
+        partial.append("test selection: " + marker["select_tests"])
+    if jvm_selection:
+        partial.append("test selection in the test JVMs' XML properties: " + "; ".join(jvm_selection))
+    if marker.get("select_other"):
+        partial.append("outside the allowlist of ops/dev/build-args: " + marker["select_other"])
+    for field in MARKER_FIELDS:
+        if field not in marker or field in ("head", "tree", "wrapper") and not marker[field]:
+            hard.append("marker has no %s (not written by ops/dev/build?)" % field)
+    gone = ["%s %s" % (a, c) for a, m in modules.items() if m["built"] for c in m["skipped_classes"]]
+    if gone:
+        partial.append("%d test classes ran no testcase (a failed assumption in @BeforeAll?), not in ops/dev/known-skips: %s"
+                       % (len(gone), ", ".join(gone)))
+    unlisted = dict((c, n) for m in modules.values() if m["built"] for c, n in m["skipped_unlisted"].items())
+    if unlisted:
+        partial.append("%d testcases skipped, not in ops/dev/known-skips: %s" % (
+            sum(unlisted.values()), ", ".join("%s %d" % (c, n) for c, n in sorted(unlisted.items()))))
+    if mvn_exit is None:
+        hard.append("mvn exit code not given")
+    elif mvn_exit != 0:
+        hard.append("mvn exited %d" % mvn_exit)
+    if not log_success:
+        hard.append("the log has no BUILD SUCCESS")
+    start_head = marker.get("head")
+    if start_head and head and start_head != head:
+        hard.append("HEAD moved during the build (%s -> %s)" % (start_head[:12], head[:12]))
+    if marker.get("tree") and marker["tree"] != state:
+        hard.append("tree changed during build (git status, diff or untracked files differ from the start)")
+    built = [a for a, m in modules.items() if m["built"]]
+    if not built:
+        hard.append("the log built no module of the root pom")
+    for artifact, module in modules.items():
+        if not module["built"]:
+            if module["report_files"]:
+                hard.append("%s: %d fresh report(s) but this log did not build it (another build in this tree?)"
+                            % (artifact, module["report_files"]))
+            elif module["profile"] is None:
+                partial.append("%s: in the default reactor but not built" % artifact)
+            continue
+        if module["status"] != "SUCCESS":
+            hard.append("%s: %s" % (artifact, module["status"]))
+        if module["failures"] or module["errors"]:
+            hard.append("%s: %d failure(s), %d error(s)" % (artifact, module["failures"], module["errors"]))
+        if module["rerun"]:
+            reruns = ", ".join("%d <%s>" % (n, kind) for kind, n in sorted(module["rerun"].items()))
+            hard.append("%s: testcases rerun after failing (%s): a rerun turns a failure into a pass; run without "
+                        "rerunFailingTestsCount" % (artifact, reruns))
+        if module["has_sources"] and not module["jbct_checked"]:
+            hard.append("%s: jbct examined %s files" % (artifact, module["jbct_checked"] or 0)
+                        + ("" if module["jbct_checked"] is not None else " (no jbct check in the log)"))
+        if module["has_tests"] and module["testcases"] == 0:
+            if module["tests_skipped"]:
+                skips.append("%s: tests skipped" % artifact)
+            else:
+                shortfall.append("%s: 0 fresh testcases" % artifact)
+        elif module["has_tests"] and module["skipped"] == module["testcases"]:
+            shortfall.append("%s: all %d fresh testcases skipped" % (artifact, module["testcases"]))
+        for run in module["executions"].values():
+            name = "%s: %s execution %s" % (artifact, run["plugin"], run["id"])
+            if not run["declared"] or not module["has_tests"] or module["tests_skipped"] and not run["ran"]:
+                continue  # a module without src/test (the root pom declaring executions for its modules) runs none
+            if not run["ran"]:
+                partial.append("%s did not run (its phase not reached)" % name)
+            elif run["tests_skipped"]:
+                skips.append("%s: tests skipped" % name)
+            elif run["testcases"] == 0:
+                shortfall.append("%s: 0 fresh testcases in %s" % (name, run["dir"]))
+            elif run["skipped"] == run["testcases"]:
+                shortfall.append("%s: all %d fresh testcases skipped" % (name, run["testcases"]))
+    for artifact in expect:
+        module = modules[artifact]
+        if not module["built"]:
+            hard.append("%s: expected but not built" % artifact)
+        elif not module["has_tests"]:
+            hard.append("%s: expected to run tests but has no src/test" % artifact)
+        elif module["testcases"] - module["skipped"] < 1:
+            hard.append("%s: expected but ran no non-skipped testcase" % artifact)
+    if hard:
+        return "RED", hard + skips + partial
+    if skips:
+        return "COMPILE-ONLY", skips + partial
+    if partial:
+        return "PARTIAL", partial
+    return "GREEN", []
+
+
+def summary(report):
+    lines = ["%s  %s" % (report["verdict"], report["log"]),
+             "head %s%s  mvn exit %s" % ((report["head"] or "unknown")[:12], " (dirty)" if report["dirty"] else "",
+                                         report["mvn_exit"])]
+    for artifact, m in report["modules"].items():
+        if not m["built"]:
+            continue
+        lines.append("  %-20s %-8s tests %d, SKIPPED %d (F%d E%d)%s  jbct %s" % (
+            artifact, m["status"], m["testcases"], m["skipped"], m["failures"], m["errors"],
+            " tests skipped" if m["tests_skipped"] else "",
+            "-" if not m["has_sources"] else "none" if m["jbct_checked"] is None else m["jbct_checked"]))
+    skipped = [(a, m["skipped"]) for a, m in report["modules"].items() if m["skipped"]]
+    if skipped:
+        lines.append("SKIPPED testcases: %d (%s)" % (sum(n for _, n in skipped),
+                                                     ", ".join("%s %d" % entry for entry in skipped)))
+    if report["not_built"]:
+        lines.append("not built: " + ", ".join(report["not_built"]))
+    room = 19 - len(lines)
+    reasons = report["reasons"]
+    shown = reasons if len(reasons) <= room else reasons[:room - 1] + ["... %d more in the json" % (len(reasons) - room + 1)]
+    lines += ["  - " + r for r in shown]
+    lines.append("json " + report["json"])
+    return "\n".join(lines[:20])
+
+
+def main():
+    if sys.argv[1:2] == ["--tree-state"] and len(sys.argv) == 3:
+        print(tree_state(sys.argv[2]))
+        sys.exit(0)
+    if sys.argv[1:2] == ["--ignored-sources"] and len(sys.argv) == 3:
+        for name in ignored_sources(sys.argv[2]):
+            print(name.decode("utf-8", "surrogateescape"))
+        sys.exit(0)
+    parser = argparse.ArgumentParser(prog="build-report")
+    parser.add_argument("--tree", required=True)
+    parser.add_argument("--marker", required=True)
+    parser.add_argument("--log", required=True)
+    parser.add_argument("--expect", default="")
+    parser.add_argument("--mvn-exit", type=int)
+    try:
+        args = parser.parse_args()
+    except SystemExit:
+        sys.exit(2)
+    tree = os.path.abspath(args.tree)
+    if not os.path.isfile(os.path.join(tree, "pom.xml")):
+        invalid("%s has no pom.xml" % tree)
+    for label, path in (("marker", args.marker), ("log", args.log)):
+        if not os.path.isfile(path):
+            invalid("%s %s is not a file" % (label, path))
+    marker_mtime = os.stat(args.marker).st_mtime_ns
+    if os.stat(args.log).st_mtime_ns < marker_mtime:
+        invalid("log %s is older than marker %s: not this run's log" % (args.log, args.marker))
+    modules = modules_of(tree)
+    expect = [e.strip().rstrip("/") for e in args.expect.split(",") if e.strip()]
+    for artifact in expect:
+        if artifact not in modules:
+            invalid("--expect %s is not a module of %s/pom.xml (%s)" % (artifact, tree, ", ".join(sorted(modules))))
+    skips = known_skips()
+    reasons = []
+    log_success = read_log(args.log, modules)
+    read_reports(tree, modules, marker_mtime, reasons, skips)
+    jvm_selection = jvm_properties(tree, modules, reasons)
+    head = git(tree, "rev-parse", "HEAD")
+    status = git(tree, "status", "--porcelain")
+    marker = marker_fields(args.marker)
+    found = provenance(tree, marker, args.log, reasons)
+    verdict, why = verdict_of(modules, expect, args.mvn_exit, log_success, head, marker, tree_state(tree),
+                              jvm_selection)
+    if reasons:
+        verdict, why = "RED", reasons + why
+    log = os.path.abspath(args.log)
+    report = {
+        "verdict": verdict,
+        "reasons": why,
+        "mvn_exit": args.mvn_exit,
+        "head": head,
+        "head_at_start": marker.get("head"),
+        "selection": dict((k, marker[k]) for k in ("select_modules", "select_tests", "select_other") if marker.get(k)),
+        "provenance": found,
+        "launcher": dict((k, marker.get(k)) for k in ("mvn", "maven_version", "java_home")),
+        "dirty": bool(status) or bool(ignored_sources(tree)),
+        "tree": tree,
+        "log": log,
+        "marker": os.path.abspath(args.marker),
+        "json": (log[:-4] if log.endswith(".log") else log) + ".json",
+        "expect": expect,
+        "modules": modules,
+        "not_built": ["%s%s" % (a, " (profile %s)" % m["profile"] if m["profile"] else "")
+                      for a, m in modules.items() if not m["built"]],
+    }
+    with open(report["json"], "w", encoding="utf-8") as out:
+        json.dump(report, out, indent=2, sort_keys=True, default=sorted)
+        out.write("\n")
+    print(summary(report))
+    sys.exit(0 if verdict == "GREEN" else 1)
+
+
+if __name__ == "__main__":
+    main()

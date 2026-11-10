@@ -1,0 +1,6 @@
+rc=1 wall=5640s
+[INFO] BUILD FAILURE
+reactor SUCCESS lines: 1  FAILURE: 1  SKIPPED: 0
+WARNING: 2 dependency-resolution failure line(s) in the log: some modules were never built or tested (a fresh checkout's .m2-local has no upstream artifacts; install them first)
+report XML newer than marker: 2 files (older, excluded:        0)
+<testcase> elements: 11  failures: 0  errors: 0  skipped: 0  (testsuite tests= attribute sum: 11, known @Nested undercount)

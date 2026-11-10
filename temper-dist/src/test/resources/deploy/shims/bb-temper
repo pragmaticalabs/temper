@@ -1,0 +1,15 @@
+#!/bin/sh
+# DeployLibIT shim: logs; `checkout <name> <ref>` clones the current repo to $HOME/work/co/<name>; `wait` rc from a file.
+echo "bb-temper $*" >> "$HOME/shim.log"
+echo "$1 ${BB_HOST-UNSET}" >> "$HOME/shim-bbhost.log"
+verb=$1
+case "$verb" in
+  checkout)
+    mkdir -p "$HOME/work/co"
+    git clone -q . "$HOME/work/co/$2" && git -C "$HOME/work/co/$2" checkout -q "$3"
+    ;;
+  wait) exit "$(cat "$HOME/shim/bb-wait-rc" 2> /dev/null || echo 0)" ;;
+  report) echo "report for $2" ;;
+  rm) rm -rf "$HOME/work/co/$2" ;;
+esac
+exit 0

@@ -1,0 +1,13 @@
+# known-skips -- the skipped tests ops/dev/build-report does not count against GREEN. Any other skipped testcase (an
+# assumption that failed, @Disabled, Docker down for the Postgres ITs), and any test class that ran no testcase at all
+# (an assumption failing in @BeforeAll), makes a run PARTIAL, naming the module, the class and the count.
+#
+# One entry per line: <module> <class>[#method] <platform> <reason>
+#   module    the artifactId of a module of the root pom (temper-worker); the entry holds only there
+#   class     the testcase's classname as surefire/failsafe write it (fully qualified, nested classes as Outer$Inner)
+#   #method   optional: only that testcase (its name in the report); without it, every testcase of the class and the
+#             class running none at all
+#   platform  where the skip is expected: Linux, Darwin (macOS) or any; as Python's platform.system() names it
+#   reason    free text, to the end of the line: what skips, and why that is not a gap
+# Blank lines and lines starting with # are ignored; any other malformed line is invalid input (exit 2).
+temper-worker org.pragmatica.temper.worker.gc.JobGcTest#aDeleteFailingMidway_keepsTheJob_asPartiallyDeleted Linux needs macOS uchg (assumeTrue os.name Mac)

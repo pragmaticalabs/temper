@@ -1,0 +1,15 @@
+#!/bin/sh
+# DeployLibIT shim: `exec [-i] <container> psql|pg_dump|pg_restore ...`
+echo "docker $*" >> "$HOME/shim.log"
+[ "$1" = exec ] && shift
+[ "$1" = -i ] && shift
+shift
+case "$1" in
+  psql)
+    [ -f "$HOME/shim/schema-fails" ] && exit 1
+    cat "$HOME/shim/schema" 2> /dev/null || echo 4
+    ;;
+  pg_dump) echo "pg_dump bytes" ;;
+  pg_restore) cat > /dev/null; echo ";  TABLE public x" ;;
+  *) exit 1 ;;
+esac

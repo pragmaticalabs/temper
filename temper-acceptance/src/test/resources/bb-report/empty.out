@@ -1,0 +1,5 @@
+rc=0 wall=5640s
+[INFO] BUILD SUCCESS
+reactor SUCCESS lines: 2  FAILURE: 0  SKIPPED: 0
+report XML newer than marker: 0 files (older, excluded:        1)
+EMPTY RUN (0 testcases): not a pass -- the run requested tests (args: clean install) but no <testcase> was reported

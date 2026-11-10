@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+# wt-new -- a new temper worktree, set up the one way that does not hurt the machine: disk checked first, .m2-local
+# seeded by copy (never cp -al: a hard-linked seed lets Maven write into ~/.m2 or a sibling tree), the agent's
+# state file and logs excluded from git, and the commit hooks of ops/dev/hooks on.
+#
+# Usage: ops/dev/wt-new <name> [--base <ref>] [--branch <b> | --detach]
+#   <tree>   ${TEMPER_WT_ROOT:-$HOME/temper-wt}/<name>, refused when it exists or is a registered worktree
+#   --base   the start point, default origin/main, resolved after `git fetch origin`
+#   --branch the new branch, default <name>; refused when it exists (check it out with --detach --base <it> instead)
+#   --detach no branch: a detached HEAD at the base (a review tree)
+# The seed is ${TEMPER_M2_SEED}, else the most recently modified complete .m2-local among this repository's worktrees:
+# a directory, not a symlink, holding `.seed-complete`, in a tree whose build lock is not held (trees made before wt-new wrote the marker lack it; name one in
+# TEMPER_M2_SEED). Refused when there is none, when TEMPER_M2_SEED is a symlink, or when the seed holds a hard-linked
+# file. The copy goes to <tree>/.m2-local.partial, must hold no hard-linked file, and only then becomes .m2-local with
+# `.seed-complete` written last, so an interrupted copy is never taken for a seed. The new branch has no upstream
+# (--no-track: a push must name its remote branch). Then <tree>/.wp-logs/ is created, `.wp-state.md` and `.wp-logs/`
+# are added to .git/info/exclude, and core.hooksPath is set to `ops/dev/hooks`, relative, so every tree runs the hooks
+# of its own checkout -- only when none is set: core.hooksPath lives in the shared repository config, so an existing
+# value (the owner's wrapper that runs the format check on a build host) is left alone and one line names it. The last
+# line printed is the tree's path.
+#
+# Exit codes: 0 created, 2 usage, 3 refused (name or branch taken, too little disk, no seed, a symlinked or hard-linked
+# one; nothing created), 4 failed (fetch, worktree add, copy, hard links in the copy, or interrupted; what wt-new
+# created, the tree and its branch, is removed again).
+set -euo pipefail
+
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/lib.sh"
+
+usage() { echo "usage: $0 <name> [--base <ref>] [--branch <b> | --detach]" >&2; exit 2; }
+refused() { echo "refused: $*" >&2; exit 3; }
+failed() { echo "FAILED: $*" >&2; exit 4; }
+
+[ $# -ge 1 ] || usage
+name=$1
+shift
+base=origin/main
+branch=
+detach=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --base) [ $# -ge 2 ] || usage; base=$2; shift 2 ;;
+    --branch) [ $# -ge 2 ] || usage; branch=$2; shift 2 ;;
+    --detach) detach=1; shift ;;
+    *) usage ;;
+  esac
+done
+[[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { echo "usage: name '$name' must match [A-Za-z0-9][A-Za-z0-9._-]*" >&2; exit 2; }
+[ "$detach" -eq 0 ] || [ -z "$branch" ] || { echo "usage: --branch and --detach exclude each other" >&2; exit 2; }
+[ "$detach" -eq 1 ] || branch=${branch:-$name}
+
+repo=$(git -C "$here" rev-parse --show-toplevel)
+root=${TEMPER_WT_ROOT:-$HOME/temper-wt}
+[ ! -d "$root" ] || root=$(cd "$root" && pwd -P)  # git lists worktrees by their physical path
+tree=$root/$name
+
+[ ! -e "$tree" ] || refused "$tree exists"
+if git -C "$repo" worktree list --porcelain | grep -Fqx "worktree $tree"; then
+  refused "$tree is a registered worktree (missing on disk? git worktree prune)"
+fi
+if [ -n "$branch" ] && git -C "$repo" show-ref --verify --quiet "refs/heads/$branch"; then
+  refused "branch $branch exists; use --branch <other>, or --detach --base $branch"
+fi
+disk_ok "$root" >&2 || refused "too little disk for a tree (each .m2-local is a few GiB)"
+
+seed=${TEMPER_M2_SEED:-}
+if [ -n "$seed" ]; then
+  while [ "$seed" != / ] && [ "${seed%/}" != "$seed" ]; do seed=${seed%/}; done  # a trailing / would follow a symlink
+  [ ! -L "$seed" ] || refused "seed $seed is a symlink (to $(readlink "$seed")); name the directory itself"
+else
+  newest=0
+  while read -r key path; do
+    [ "$key" = worktree ] && [ ! -L "$path/.m2-local" ] && [ -f "$path/.m2-local/.seed-complete" ] || continue
+    ! lock_held "$path" > /dev/null || continue  # a build is writing into it
+    modified=$(mtime_of "$path/.m2-local")
+    [ "$modified" -le "$newest" ] || { newest=$modified; seed=$path/.m2-local; }
+  done < <(git -C "$repo" worktree list --porcelain)
+  [ -n "$seed" ] || refused "no seed: no worktree has a complete .m2-local (one holding .seed-complete; trees made" \
+    "before wt-new wrote it lack it); set TEMPER_M2_SEED to one, e.g. TEMPER_M2_SEED=<tree>/.m2-local"
+fi
+[ -d "$seed" ] || refused "seed $seed is not a directory"
+linked=$({ hardlinks_of "$seed" || true; } | head -n 3)
+[ -z "$linked" ] || refused "seed $seed has hard-linked files (a cp -al copy?), e.g. $(printf '%s' "$linked" | head -n 1)"
+
+git -C "$repo" fetch --quiet origin || failed "git fetch origin"
+git -C "$repo" rev-parse --verify --quiet "$base^{commit}" > /dev/null || refused "base $base is not a commit"
+
+# From here on a failure, or an interrupt, removes what wt-new created: the tree once `worktree add` made it, and the
+# branch once `worktree add -b` ran (it did not exist before: refused above).
+stage=none
+rollback() {
+  [ "$stage" != none ] && [ "$stage" != done ] || return 0
+  if [ "$stage" = created ]; then
+    git -C "$repo" worktree remove --force "$tree" > /dev/null 2>&1 || true
+    rm -rf "$tree"
+    git -C "$repo" worktree prune
+  fi
+  if [ -n "$branch" ] && git -C "$repo" show-ref --verify --quiet "refs/heads/$branch"; then
+    git -C "$repo" branch -D --quiet "$branch" || true
+  fi
+  echo "rolled back: removed what wt-new created ($tree${branch:+, branch $branch})" >&2
+  exit 4
+}
+trap rollback EXIT
+trap 'exit 4' INT TERM HUP
+
+mkdir -p "$root"
+stage=adding
+if [ "$detach" -eq 1 ]; then
+  git -C "$repo" worktree add --quiet --detach "$tree" "$base" || failed "git worktree add $tree"
+else
+  git -C "$repo" worktree add --quiet --no-track -b "$branch" "$tree" "$base" || failed "git worktree add $tree"
+fi
+stage=created
+
+echo "seeding $tree/.m2-local from $seed (cp -a)" >&2
+partial=$tree/.m2-local.partial
+mkdir "$partial"
+cp -a "$seed/." "$partial/" || failed "cp -a $seed $partial"
+linked=$({ hardlinks_of "$partial" || true; } | head -n 3)
+[ -z "$linked" ] || failed "the copy in $partial had hard-linked files: $(printf '%s' "$linked" | head -n 1)"
+mv "$partial" "$tree/.m2-local"
+date -u +%Y-%m-%dT%H:%M:%SZ > "$tree/.m2-local/.seed-complete"
+
+mkdir -p "$tree/.wp-logs"
+exclude=$(cd "$repo" && cd "$(git rev-parse --git-common-dir)" && pwd)/info/exclude
+mkdir -p "$(dirname "$exclude")"
+touch "$exclude"
+for pattern in .wp-state.md .wp-logs/; do
+  grep -Fqx "$pattern" "$exclude" || echo "$pattern" >> "$exclude"
+done
+existing_hooks=$(git -C "$tree" config --get core.hooksPath || true)
+if [ -n "$existing_hooks" ]; then
+  echo "note: core.hooksPath is already set to $existing_hooks; left unchanged" >&2
+else
+  git -C "$tree" config core.hooksPath ops/dev/hooks
+fi
+
+stage=done
+echo "$tree"

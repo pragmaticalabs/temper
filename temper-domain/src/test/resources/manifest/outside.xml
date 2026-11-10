@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <groupId>org.acme</groupId>
+  <artifactId>solo</artifactId>
+  <build>
+    <testSourceDirectory>/ws/src/test/java</testSourceDirectory>
+    <outputDirectory>/ws/target/classes</outputDirectory>
+    <testOutputDirectory>/elsewhere/target/test-classes</testOutputDirectory>
+    <directory>/ws/target</directory>
+    <plugins>
+      <plugin>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>default-test</id>
+            <phase>test</phase>
+            <goals><goal>test</goal></goals>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>

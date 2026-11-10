@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="org.example.MixedTest" tests="9" failures="2" errors="2" skipped="1" time="1,234.5">
+  <testcase name="passes" classname="org.example.MixedTest" time="1,234.5"/>
+  <testcase name="fails" classname="org.example.MixedTest" time="0.1"><failure message="boom" type="java.lang.AssertionError">trace</failure></testcase>
+  <testcase name="errors" classname="org.example.MixedTest" time="0.1"><error message="npe" type="java.lang.NullPointerException"/></testcase>
+  <testcase name="skips" classname="org.example.MixedTest" time="0"><skipped message="disabled"/></testcase>
+  <testcase name="flakyThenPassed" classname="org.example.MixedTest" time="0.2"><flakyFailure message="once"/><flakyError message="twice"/></testcase>
+  <testcase name="rerunFailedOnly" classname="org.example.MixedTest" time="0.2"><rerunFailure message="again"/></testcase>
+  <testcase name="rerunErrorOnly" classname="org.example.MixedTest" time="0.2"><rerunError message="again"/></testcase>
+  <testcase name="firstChildWins" classname="org.example.MixedTest" time="0.2"><error message="e"/><failure message="f"/></testcase>
+  <testcase name="noClassNoTime"/>
+</testsuite>

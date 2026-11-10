@@ -1,0 +1,29 @@
+{
+  "total_count": 2,
+  "workflow_runs": [
+    {
+      "id": 42401449580,
+      "name": "Changelog fragment",
+      "status": "completed",
+      "conclusion": "success",
+      "head_sha": "d7506c1b882bebc295fbe2d8b529c990679a8c18",
+      "html_url": "https://github.com/pragmaticalabs/pragmatica/actions/runs/42401449580",
+      "created_at": "2026-11-07T18:28:20Z",
+      "event": "merge_group",
+      "head_branch": "gh-readonly-queue/release-1.0.0-rc5/pr-2830-24b28f7c4bd3ab1d35d13e652f0baebbdfea2ab9",
+      "run_attempt": 1
+    },
+    {
+      "id": 42401449596,
+      "name": "CI",
+      "status": "completed",
+      "conclusion": "success",
+      "head_sha": "d7506c1b882bebc295fbe2d8b529c990679a8c18",
+      "html_url": "https://github.com/pragmaticalabs/pragmatica/actions/runs/42401449596",
+      "created_at": "2026-11-07T18:28:20Z",
+      "event": "merge_group",
+      "head_branch": "gh-readonly-queue/release-1.0.0-rc5/pr-2830-24b28f7c4bd3ab1d35d13e652f0baebbdfea2ab9",
+      "run_attempt": 1
+    }
+  ]
+}

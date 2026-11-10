@@ -1,0 +1,108 @@
+{
+  "name": "main",
+  "commit": {
+    "sha": "96a3eb3e3abec6333f4e628912c011f331e19a7c",
+    "node_id": "C_kwDORG6hR9oAKDk2YTNlYjNlM2FiZWM2MzMzZjRlNjI4OTEyYzAxMWYzMzFlMTlhN2M",
+    "commit": {
+      "author": {
+        "name": "Sergiy Yevtushenko",
+        "email": "256875783+pragmaticalabs@users.noreply.github.com",
+        "date": "2026-10-17T20:04:49Z"
+      },
+      "committer": {
+        "name": "Sergiy Yevtushenko",
+        "email": "256875783+pragmaticalabs@users.noreply.github.com",
+        "date": "2026-10-17T20:04:49Z"
+      },
+      "message": "Merge release-1.0.0-rc4 into main",
+      "tree": {
+        "sha": "f135a03c2d492af545b365b7572f3f0f333f109f",
+        "url": "https://api.github.com/repos/pragmaticalabs/pragmatica/git/trees/f135a03c2d492af545b365b7572f3f0f333f109f"
+      },
+      "url": "https://api.github.com/repos/pragmaticalabs/pragmatica/git/commits/96a3eb3e3abec6333f4e628912c011f331e19a7c",
+      "comment_count": 0,
+      "verification": {
+        "verified": false,
+        "reason": "unsigned",
+        "signature": null,
+        "payload": null,
+        "verified_at": null
+      }
+    },
+    "url": "https://api.github.com/repos/pragmaticalabs/pragmatica/commits/96a3eb3e3abec6333f4e628912c011f331e19a7c",
+    "html_url": "https://github.com/pragmaticalabs/pragmatica/commit/96a3eb3e3abec6333f4e628912c011f331e19a7c",
+    "comments_url": "https://api.github.com/repos/pragmaticalabs/pragmatica/commits/96a3eb3e3abec6333f4e628912c011f331e19a7c/comments",
+    "author": {
+      "login": "siy",
+      "id": 423390,
+      "node_id": "MDQ6VXNlcjQyMzM5MA==",
+      "avatar_url": "https://avatars.githubusercontent.com/u/423390?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/siy",
+      "html_url": "https://github.com/siy",
+      "followers_url": "https://api.github.com/users/siy/followers",
+      "following_url": "https://api.github.com/users/siy/following{/other_user}",
+      "gists_url": "https://api.github.com/users/siy/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/siy/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/siy/subscriptions",
+      "organizations_url": "https://api.github.com/users/siy/orgs",
+      "repos_url": "https://api.github.com/users/siy/repos",
+      "events_url": "https://api.github.com/users/siy/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/siy/received_events",
+      "type": "User",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "committer": {
+      "login": "siy",
+      "id": 423390,
+      "node_id": "MDQ6VXNlcjQyMzM5MA==",
+      "avatar_url": "https://avatars.githubusercontent.com/u/423390?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/siy",
+      "html_url": "https://github.com/siy",
+      "followers_url": "https://api.github.com/users/siy/followers",
+      "following_url": "https://api.github.com/users/siy/following{/other_user}",
+      "gists_url": "https://api.github.com/users/siy/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/siy/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/siy/subscriptions",
+      "organizations_url": "https://api.github.com/users/siy/orgs",
+      "repos_url": "https://api.github.com/users/siy/repos",
+      "events_url": "https://api.github.com/users/siy/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/siy/received_events",
+      "type": "User",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "parents": [
+      {
+        "sha": "51beb648bf5a84c31ca9fe74bfa23c0b799c37a9",
+        "url": "https://api.github.com/repos/pragmaticalabs/pragmatica/commits/51beb648bf5a84c31ca9fe74bfa23c0b799c37a9",
+        "html_url": "https://github.com/pragmaticalabs/pragmatica/commit/51beb648bf5a84c31ca9fe74bfa23c0b799c37a9"
+      },
+      {
+        "sha": "1644a779bb2fbb710fbfd58f825629968390ff6a",
+        "url": "https://api.github.com/repos/pragmaticalabs/pragmatica/commits/1644a779bb2fbb710fbfd58f825629968390ff6a",
+        "html_url": "https://github.com/pragmaticalabs/pragmatica/commit/1644a779bb2fbb710fbfd58f825629968390ff6a"
+      }
+    ]
+  },
+  "_links": {
+    "self": "https://api.github.com/repos/pragmaticalabs/pragmatica/branches/main",
+    "html": "https://github.com/pragmaticalabs/pragmatica/tree/main"
+  },
+  "protected": true,
+  "protection": {
+    "enabled": true,
+    "required_status_checks": {
+      "enforcement_level": "off",
+      "contexts": [
+
+      ],
+      "checks": [
+
+      ]
+    }
+  },
+  "protection_url": "https://api.github.com/repos/pragmaticalabs/pragmatica/branches/main/protection"
+}

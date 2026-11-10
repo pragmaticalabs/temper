@@ -1,0 +1,8 @@
+RUNNING (reactors on host: 0; cap 3 unless a ticket overrides; port group held by: )
+TICKET                       OWNER    PRIO AGE           CHECKOUT  ARGS
+
+WAITING (grant order: priority desc, then FIFO; a [port-group] ticket is skipped while the group is held; a ticket its own cap blocks is passed by backfill until blocked 1200s, then the host drains for it)
+POS  TICKET                       OWNER    PRIO WAITED        CHECKOUT  ARGS
+
+FINISHED (most recent 0)
+STATE      RC     TICKET                       OWNER    WALL ENDED         CHECKOUT  ARGS

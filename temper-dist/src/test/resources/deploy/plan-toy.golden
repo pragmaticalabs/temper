@@ -1,0 +1,42 @@
+plan-header v1 unit=toy commit=1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d host=bigboy current=f955902de8104d643d1f2f4a6579dd5dfbe5b1a1db83f9da8a96fc579dbe07a7 new=b8692df2e4c1d01acc27d2ab83f5c7a8941760b1ddf02e6a25eee10a4a97b407
+plan 001 check staged-copy @HOME@/.deploy/stage/toy/1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d
+plan 002 check manifest b150f5ef894650c5c2898110b72f03a50a0d9b9601a01042aab7a797d4d3d012
+plan 003 check expect-new b8692df2e4c1d01acc27d2ab83f5c7a8941760b1ddf02e6a25eee10a4a97b407
+plan 004 check expect-current f955902de8104d643d1f2f4a6579dd5dfbe5b1a1db83f9da8a96fc579dbe07a7
+plan 005 check lock free
+plan 006 check schema V4
+plan 007 check alarm-timer inactive
+plan 008 prepare mkdir <B> 0700
+plan 009 prepare write <B>/MANIFEST.old 51c978bbe4d60fa3a7d8ac47bf2f4dc51e061f7783d8332da9add6252e6b5b00
+plan 010 prepare stop toy
+plan 011 prepare dump toy-pg toy <B>/toy-pg.dump
+plan 012 prepare verify-dump <B>/toy-pg.dump TABLE
+plan 013 backup backup @HOME@/.toy/dist/toy.bin @HOME@/.toy/dist/toy.bin.bak-f955902de8104d643d1f2f4a6579dd5dfbe5b1a1db83f9da8a96fc579dbe07a7
+plan 014 swap copy @HOME@/.deploy/stage/toy/1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d/files/toy.bin @HOME@/.toy/dist/toy.bin.partial
+plan 015 swap chmod 0644 @HOME@/.toy/dist/toy.bin.partial
+plan 016 swap rename @HOME@/.toy/dist/toy.bin.partial @HOME@/.toy/dist/toy.bin f955902de8104d643d1f2f4a6579dd5dfbe5b1a1db83f9da8a96fc579dbe07a7 b8692df2e4c1d01acc27d2ab83f5c7a8941760b1ddf02e6a25eee10a4a97b407
+plan 017 swap verify @HOME@/.toy/dist/toy.bin b8692df2e4c1d01acc27d2ab83f5c7a8941760b1ddf02e6a25eee10a4a97b407
+plan 018 restart restart toy
+plan 019 health timeout 6 interval 1
+plan 020 health probe H1 fresh-active,toy
+plan 021 health probe H2 200,/health,body~^ok,header~Toy-Version:^b8692df2e4c1$
+plan 022 health probe H3 200,/hosts,token-file
+plan 023 health settle toy 1
+plan 024 health reprobe H1,H2,H3
+plan 025 after start toy-timer.timer
+plan 026 record record <time> event=install unit=toy commit=1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d sha256=b8692df2e4c1d01acc27d2ab83f5c7a8941760b1ddf02e6a25eee10a4a97b407 outcome=installed rollback=f955902de8104d643d1f2f4a6579dd5dfbe5b1a1db83f9da8a96fc579dbe07a7 schema=<s> dir=<B>
+plan 027 on-unhealthy record <time> event=install unit=toy commit=1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d sha256=b8692df2e4c1d01acc27d2ab83f5c7a8941760b1ddf02e6a25eee10a4a97b407 outcome=health-failed rollback=f955902de8104d643d1f2f4a6579dd5dfbe5b1a1db83f9da8a96fc579dbe07a7 schema=<s> dir=<B>
+plan 028 on-unhealthy forward-only-if schema>V<before>
+plan 029 rollback restore @HOME@/.toy/dist/toy.bin.bak-f955902de8104d643d1f2f4a6579dd5dfbe5b1a1db83f9da8a96fc579dbe07a7 @HOME@/.toy/dist/toy.bin f955902de8104d643d1f2f4a6579dd5dfbe5b1a1db83f9da8a96fc579dbe07a7
+plan 030 rollback verify @HOME@/.toy/dist/toy.bin f955902de8104d643d1f2f4a6579dd5dfbe5b1a1db83f9da8a96fc579dbe07a7
+plan 031 rollback restart toy
+plan 032 rollback timeout 6 interval 1
+plan 033 rollback probe H1 fresh-active,toy
+plan 034 rollback probe H2 200,/health,body~^ok,header~Toy-Version:^f955902de810$
+plan 035 rollback probe H3 200,/hosts,token-file
+plan 036 rollback settle toy 1
+plan 037 rollback reprobe H1,H2,H3
+plan 038 rollback start toy-timer.timer
+plan 039 rollback record <time> event=rollback unit=toy commit=1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d sha256=b8692df2e4c1d01acc27d2ab83f5c7a8941760b1ddf02e6a25eee10a4a97b407 outcome=rolled-back rollback=f955902de8104d643d1f2f4a6579dd5dfbe5b1a1db83f9da8a96fc579dbe07a7 schema=<s> dir=<B>
+plan 040 rollback else-record <time> event=rollback unit=toy commit=1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d sha256=b8692df2e4c1d01acc27d2ab83f5c7a8941760b1ddf02e6a25eee10a4a97b407 outcome=rollback-failed rollback=f955902de8104d643d1f2f4a6579dd5dfbe5b1a1db83f9da8a96fc579dbe07a7 schema=<s> dir=<B> exit 6 banner
+plan-sha256 @SHA@

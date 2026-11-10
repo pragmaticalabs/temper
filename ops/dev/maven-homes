@@ -1,0 +1,5 @@
+# Maven installations ops/dev/build runs: the realpath of the mvn on PATH must lie under one of these directories,
+# else build-args refuses the run. `<directory> <host: how it was read>`, one per line; read on each host with
+# `readlink -f $(command -v mvn)` (macOS: python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' $(command -v mvn)).
+/opt/homebrew/Cellar/maven Mac (Homebrew): /opt/homebrew/bin/mvn -> /opt/homebrew/Cellar/maven/3.10.0/bin/mvn, 2026-10-26
+/home/builder/apache-maven-3.9.12 bigboy: no mvn on a login shell's PATH; ~/tools/maven -> /home/builder/apache-maven-3.9.12, 2026-10-26

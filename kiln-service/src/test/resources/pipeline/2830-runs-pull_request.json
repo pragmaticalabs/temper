@@ -1,0 +1,65 @@
+{
+  "total_count": 5,
+  "workflow_runs": [
+    {
+      "id": 42399112403,
+      "name": "Changelog fragment",
+      "status": "completed",
+      "conclusion": "success",
+      "head_sha": "917f09e7be89af5f3b9c1a6385cedb9c34e34907",
+      "html_url": "https://github.com/pragmaticalabs/pragmatica/actions/runs/42399112403",
+      "created_at": "2026-11-07T18:00:49Z",
+      "event": "pull_request",
+      "head_branch": "streams/7c-topic-preflight",
+      "run_attempt": 1
+    },
+    {
+      "id": 42399112484,
+      "name": "Hierarchy runtime acceptance",
+      "status": "completed",
+      "conclusion": "success",
+      "head_sha": "917f09e7be89af5f3b9c1a6385cedb9c34e34907",
+      "html_url": "https://github.com/pragmaticalabs/pragmatica/actions/runs/42399112484",
+      "created_at": "2026-11-07T18:00:49Z",
+      "event": "pull_request",
+      "head_branch": "streams/7c-topic-preflight",
+      "run_attempt": 1
+    },
+    {
+      "id": 42399112531,
+      "name": "S3 tests",
+      "status": "completed",
+      "conclusion": "success",
+      "head_sha": "917f09e7be89af5f3b9c1a6385cedb9c34e34907",
+      "html_url": "https://github.com/pragmaticalabs/pragmatica/actions/runs/42399112531",
+      "created_at": "2026-11-07T18:00:49Z",
+      "event": "pull_request",
+      "head_branch": "streams/7c-topic-preflight",
+      "run_attempt": 1
+    },
+    {
+      "id": 42399112242,
+      "name": "Hierarchy review acceptance",
+      "status": "completed",
+      "conclusion": "success",
+      "head_sha": "917f09e7be89af5f3b9c1a6385cedb9c34e34907",
+      "html_url": "https://github.com/pragmaticalabs/pragmatica/actions/runs/42399112242",
+      "created_at": "2026-11-07T18:00:49Z",
+      "event": "pull_request",
+      "head_branch": "streams/7c-topic-preflight",
+      "run_attempt": 1
+    },
+    {
+      "id": 42399112378,
+      "name": "CI",
+      "status": "completed",
+      "conclusion": "success",
+      "head_sha": "917f09e7be89af5f3b9c1a6385cedb9c34e34907",
+      "html_url": "https://github.com/pragmaticalabs/pragmatica/actions/runs/42399112378",
+      "created_at": "2026-11-07T18:00:49Z",
+      "event": "pull_request",
+      "head_branch": "streams/7c-topic-preflight",
+      "run_attempt": 1
+    }
+  ]
+}

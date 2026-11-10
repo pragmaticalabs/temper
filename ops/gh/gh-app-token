@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# gh-app-token <ids-file> <key-file> -- mint one GitHub App installation token and print it on stdout.
+# Installed OFF PATH in ~/.local/libexec/temper-gh/; run it only through
+# with-kiln-app / with-temper-app, which set TEMPER_GH_WRAPPER=1. The marker is an accident guard for a typed call, not
+# a barrier: anyone can set it.
+#
+# <ids-file> holds CLIENT_ID= and INSTALLATION_ID= lines (not secret; read as text, never sourced). <key-file> is the
+# App's RSA private key (PKCS#1 or PKCS#8 PEM), refused (exit 64) when it is group- or other-readable, a symbolic
+# link, not RSA, or in a directory (or below one, up to $HOME) that group or others can write.
+# The JWT is signed with openssl and sent to curl on stdin (--config -): neither the JWT nor the token is ever on a
+# command line, in a file, or in a log. TEMPER_GH_API overrides https://api.github.com (tests only).
+# The token carries what the installation grants; narrowing to the contract's §3.1 set is the App's own permission set.
+# Exit: 0 token on stdout; 64 refused (marker, usage, ids, key mode); 1 the mint failed.
+set -euo pipefail
+
+die() { echo "gh-app-token: $2" >&2; exit "$1"; }
+
+[ "${TEMPER_GH_WRAPPER:-}" = 1 ] || die 64 "refused: run it through with-kiln-app or with-temper-app (TEMPER_GH_WRAPPER=1 is not set)"
+[ $# -eq 2 ] || die 64 "usage: gh-app-token <ids-file> <key-file>"
+ids=$1 key=$2
+[ -r "$ids" ] || die 64 "cannot read ids file $ids"
+[ -r "$key" ] || die 64 "cannot read key file $key"
+
+# a link, or a directory others can write, lets another user swap the key between this check and the read. Like ssh
+# StrictModes: the key's real directory and every directory above it up to and including $HOME must not be group- or
+# other-writable (a key outside $HOME has only its own directory checked). Links among the directories are resolved
+# first (cd -P), then the real directories are checked; stat -L follows a link the same way. Same rule as AppKey.java.
+[ ! -L "$key" ] || die 64 "key file $key is a symbolic link; use a regular file"
+# GNU stat takes -c %a, BSD/macOS stat takes -f %Lp (and fails on -c): detect which once
+if stat -c %a / > /dev/null 2>&1; then
+  modeof() { stat -L -c %a "$1"; }
+else
+  modeof() { stat -L -f %Lp "$1"; }
+fi
+realdir=$(cd -P "$(dirname "$key")" && pwd -P) || die 64 "cannot resolve the directory of key file $key"
+homedir=$(cd -P "$HOME" && pwd -P) || die 64 "cannot resolve HOME"
+d=$realdir
+while :; do
+  dirmode=$(modeof "$d") || die 64 "cannot stat directory $d"
+  (( (8#$dirmode & 8#022) == 0 )) || die 64 "directory $d of key file $key is group- or other-writable (mode $dirmode); chmod 700"
+  case $realdir in "$homedir" | "$homedir"/*) ;; *) break ;; esac
+  [ "$d" != "$homedir" ] && [ "$d" != / ] || break
+  d=$(dirname "$d")
+done
+mode=$(modeof "$key")
+case $mode in
+  *00) ;;
+  *) die 64 "key file $key is group- or other-readable (mode $mode); chmod 600" ;;
+esac
+# the JWT is RS256: refuse any other key type instead of signing with it under that label
+info=$(openssl pkey -in "$key" -noout -text_pub 2> /dev/null) || die 64 "key file $key is not a readable private key"
+[[ $info == *Modulus:* ]] || die 64 "key file $key is not an RSA private key"
+
+# the last assignment wins; a value is what follows the first '='
+field() { sed -n "s/^$1=//p" "$ids" | tail -n 1 | tr -d '[:space:]'; }
+client_id=$(field CLIENT_ID)
+installation_id=$(field INSTALLATION_ID)
+[[ $client_id =~ ^[A-Za-z0-9_.-]+$ ]] || die 64 "no valid CLIENT_ID in $ids"
+[[ $installation_id =~ ^[0-9]+$ ]] || die 64 "no valid INSTALLATION_ID in $ids"
+api=${TEMPER_GH_API:-https://api.github.com}
+
+b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+
+now=$(date +%s)
+unsigned=$(printf '%s' '{"alg":"RS256","typ":"JWT"}' | b64url).$(printf '{"iat":%d,"exp":%d,"iss":"%s"}' $((now - 60)) $((now + 540)) "$client_id" | b64url)
+signature=$(printf '%s' "$unsigned" | openssl dgst -sha256 -sign "$key" -binary | b64url)
+[ -n "$signature" ] || die 1 "signing failed (is $key an RSA private key?)"
+jwt=$unsigned.$signature
+
+# printf is a shell builtin: the JWT is in the config on curl's stdin, not in any argv
+reply=$(printf '%s\n' \
+  "url = \"$api/app/installations/$installation_id/access_tokens\"" \
+  'request = "POST"' \
+  "header = \"Authorization: Bearer $jwt\"" \
+  'header = "Accept: application/vnd.github+json"' \
+  'header = "X-GitHub-Api-Version: 2022-11-28"' \
+  'header = "User-Agent: temper-gh-app-token"' \
+  'silent' 'show-error' 'max-time = 30' \
+  'write-out = "\n%{http_code}"' | curl --config -) || die 1 "mint failed: no answer from $api"
+
+status=${reply##*$'\n'}
+body=${reply%$'\n'*}
+if [ "$status" != 201 ]; then
+  message=$(printf '%s' "$body" | tr -d '\n' | sed -n 's/.*"message"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | cut -c 1-200)
+  die 1 "mint failed: HTTP $status $message"
+fi
+token=$(printf '%s' "$body" | tr -d '\n' | sed -n 's/.*"token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+[ -n "$token" ] || die 1 "mint failed: the answer holds no token"
+printf '%s\n' "$token"

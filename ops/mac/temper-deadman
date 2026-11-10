@@ -1,0 +1,202 @@
+#!/bin/bash
+# temper-deadman -- the Mac's dead-man check on bigboy (L2, design §3). launchd runs it every 60 s
+# while the Mac is awake (com.pragmatica.temper-deadman.plist); it alarms with no agent session running.
+#
+# Each run:
+#   1. banner    ssh-keyscan -T 5 <host> must print a key line: the LAN ssh banner, independent of temper (the 11-02
+#                hang: bigboy answered ping and TCP 22 but stalled at the banner).
+#   2. heartbeat GET <url>/api/v1/fleet/heartbeat with the read token must answer 200 with a heartbeat line within 10 s.
+#   3. selfcheck that heartbeat's selfCheck.ok must be true (the controller's own L0 probe).
+#   4. after a sleep: when the previous run is more than 5 min ago, the controller's heartbeat log since the last asOf
+#      seen (GET /api/v1/fleet/heartbeat/history?since=<ISO>, {"ticks":[{"at":"<ISO>"}…]}) is read, and every gap over 15 min in it is reported
+#      once as "bigboy silent <from>..<to>": a hang that started and ended while the Mac slept.
+# A failing condition notifies (osascript display notification) at most once per hour per condition; every failing
+# run writes a line to the log. The first passing run after a notified failure notifies the recovery once.
+#
+# The residual, stated because it can contradict the ruling later: with the Mac asleep and the owner away, nothing
+# alarms until the Mac wakes.
+#
+# Settings (environment; the defaults are the Mac's):
+#   TEMPER_DEADMAN_HOST    the banner probe's host                      (bigboy's address in the bb host config:
+#                          ~/.config/bb-temper/hosts or BB_TEMPER_HOSTS, ops/bb/hosts.example)
+#   TEMPER_DEADMAN_URL     the controller's base URL                    (TEMPER_URL, else url = "…" in ~/.config/temper/config)
+#   TEMPER_DEADMAN_TOKEN   the token file                               (~/.config/temper/read-token: a READ route)
+#   TEMPER_DEADMAN_STATE   the state directory                          (~/Library/Application Support/temper-deadman)
+#   TEMPER_DEADMAN_LOG     the log file                                 (~/Library/Logs/temper-deadman.log)
+#   TEMPER_DEADMAN_NOW     the time, epoch seconds (tests only)         (date +%s)
+# State: <state dir>/state holds "asOf=<ISO>" (the last heartbeat asOf seen) and "run=<epoch s>" (the last run);
+# <state dir>/notified-<condition> holds the epoch second of that condition's last notification.
+#
+# Install (the owner, from the root of a temper checkout; one `!` command per line in Claude Code):
+#   ! mkdir -p ~/.local/bin ~/Library/LaunchAgents && install -m 0755 ops/mac/temper-deadman ~/.local/bin/temper-deadman
+#   ! sed "s|__HOME__|$HOME|g" ops/mac/com.pragmatica.temper-deadman.plist > ~/Library/LaunchAgents/com.pragmatica.temper-deadman.plist
+#   ! launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.pragmatica.temper-deadman.plist
+#   ! launchctl print gui/$UID/com.pragmatica.temper-deadman | grep -E 'state|last exit'
+#   ! tail -5 ~/Library/Logs/temper-deadman.log
+# The first notification needs Script Editor (osascript) allowed in System Settings > Notifications.
+# Uninstall:
+#   ! launchctl bootout gui/$UID/com.pragmatica.temper-deadman
+#   ! rm -f ~/Library/LaunchAgents/com.pragmatica.temper-deadman.plist ~/.local/bin/temper-deadman
+#   ! rm -rf ~/Library/Application\ Support/temper-deadman
+#
+# Exit codes: 0 every condition passed, 1 a condition failed (launchd records it; the next run is unaffected),
+# 2 a setting is missing (no probe host, no URL, no token file): notified as condition "config", throttled like the others.
+# A throttle file that does not hold a number is reset and logged, never fatal.
+# bash 3.2 and BSD tools (macOS), also GNU (the tests run on Linux).
+set -euo pipefail
+umask 077
+
+configured_host() {  # TEMPER_DEADMAN_HOST, else the address part of bigboy's user@address in the bb host config
+  local hosts=${BB_TEMPER_HOSTS:-$HOME/.config/bb-temper/hosts}
+  if [ -n "${TEMPER_DEADMAN_HOST:-}" ]; then echo "$TEMPER_DEADMAN_HOST"; return; fi
+  [ -r "$hosts" ] || return 0
+  sed 's/#.*//' "$hosts" | awk '$1 == "host" && $2 == "bigboy" { a = $3; sub(/^.*@/, "", a); print a; exit }'
+}
+readonly STATE_DIR=${TEMPER_DEADMAN_STATE:-$HOME/Library/Application Support/temper-deadman}
+readonly LOG=${TEMPER_DEADMAN_LOG:-$HOME/Library/Logs/temper-deadman.log}
+readonly TOKEN_FILE=${TEMPER_DEADMAN_TOKEN:-$HOME/.config/temper/read-token}
+readonly NOW=${TEMPER_DEADMAN_NOW:-$(date +%s)}
+readonly STATE=$STATE_DIR/state
+readonly THROTTLE_S=3600
+readonly SLEPT_S=300
+readonly GAP_S=900
+
+configured_url() {  # TEMPER_DEADMAN_URL, TEMPER_URL, else the url line of ~/.config/temper/config
+  if [ -n "${TEMPER_DEADMAN_URL:-}" ]; then echo "$TEMPER_DEADMAN_URL"; return; fi
+  if [ -n "${TEMPER_URL:-}" ]; then echo "$TEMPER_URL"; return; fi
+  [ -r "$HOME/.config/temper/config" ] || return 0
+  sed -n 's/^[[:space:]]*url[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$HOME/.config/temper/config" | head -n 1
+}
+
+iso() {  # iso <epoch s>: UTC ISO-8601
+  date -u -r "$1" +%Y-%m-%dT%H:%M:%SZ 2> /dev/null || date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ
+}
+
+epoch_of() {  # epoch_of <ISO>: epoch seconds (fractional seconds dropped); empty when it does not parse
+  local plain
+  plain=$(printf '%s' "$1" | sed -e 's/\.[0-9]*Z$/Z/' -e 's/+00:00$/Z/')
+  date -u -j -f %Y-%m-%dT%H:%M:%SZ "$plain" +%s 2> /dev/null || date -u -d "$plain" +%s 2> /dev/null || true
+}
+
+log() {
+  mkdir -p "$(dirname "$LOG")"
+  printf '%s %s\n' "$(iso "$NOW")" "$*" >> "$LOG"
+}
+
+notify() {  # notify <text>: one macOS notification
+  local text=${1//\\/\\\\}
+  text=${text//\"/\\\"}
+  osascript -e "display notification \"$text\" with title \"temper dead-man\"" > /dev/null 2>&1 || log "notification failed: $1"
+}
+
+state_value() {  # state_value <key>: its value in the state file, empty when absent
+  [ -f "$STATE" ] || return 0
+  sed -n "s/^$1=//p" "$STATE" | head -n 1
+}
+
+failed() {  # failed <condition> <text>: log; notify unless notified within the hour
+  local marker=$STATE_DIR/notified-$1 last
+  log "FAIL $1: $2"
+  last=$(cat "$marker" 2> /dev/null || echo 0)
+  case $last in
+    '' | *[!0-9]*) log "throttle file $marker held '$last'; reset"; last=0 ;;
+  esac
+  if [ $((NOW - last)) -ge "$THROTTLE_S" ]; then
+    notify "bigboy $1: $2"
+    echo "$NOW" > "$marker"
+  fi
+  FAILED=1
+}
+
+passed() {  # passed <condition>: after a notified failure, notify the recovery once
+  local marker=$STATE_DIR/notified-$1
+  [ -f "$marker" ] || return 0
+  rm -f "$marker"
+  log "RECOVERED $1"
+  notify "bigboy $1 recovered"
+}
+
+banner() {
+  local keys
+  keys=$(ssh-keyscan -T 5 "$HOST" 2> /dev/null | grep -v '^#' | grep -c '[^[:space:]]' || true)
+  if [ "${keys:-0}" -gt 0 ]; then passed banner; else failed banner "no ssh banner from $HOST within 5 s"; fi
+}
+
+get() {  # get <path>: the body of a 200 answer within 10 s, else fails; the token goes on stdin, never on argv (ps),
+  # \ and " escaped as curl's config syntax reads a quoted value
+  local quoted
+  quoted=$(printf '%s' "$TOKEN" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')
+  printf 'header = "Authorization: Bearer %s"\n' "$quoted" | curl -sS -f --max-time 10 --config - "$URL$1"
+}
+
+field() {  # field <json> <name>: a top-level string field's value
+  printf '%s' "$1" | sed -n "s/.*\"$2\":[[:space:]]*\"\([^\"]*\)\".*/\1/p" | head -n 1
+}
+
+heartbeat() {  # sets AS_OF; checks heartbeat, and selfcheck when a heartbeat arrived (no heartbeat: selfcheck unknown)
+  local body ok
+  if ! body=$(get /api/v1/fleet/heartbeat 2>&1); then
+    failed heartbeat "no heartbeat from $URL within 10 s (${body:-no answer})"
+    return 0
+  fi
+  AS_OF=$(field "$body" asOf)
+  if [ -z "$AS_OF" ]; then
+    failed heartbeat "the answer is not a heartbeat line"
+    return 0
+  fi
+  passed heartbeat
+  ok=$(printf '%s' "$body" | sed -n 's/.*"selfCheck":[[:space:]]*{[^}]*"ok":[[:space:]]*\([a-z]*\).*/\1/p' | head -n 1)
+  if [ "$ok" = true ]; then
+    passed selfcheck
+  else
+    failed selfcheck "selfCheck.ok=${ok:-missing} failed=$(printf '%s' "$body" | sed -n 's/.*"failed":\[\([^]]*\)\].*/\1/p' | tr -d '"')"
+  fi
+}
+
+silences() {  # after a sleep: report every gap over 15 min in the heartbeat log since the last asOf seen
+  local last_run since body ticks previous tick from
+  last_run=$(state_value run)
+  [ -n "$last_run" ] && [ $((NOW - last_run)) -gt "$SLEPT_S" ] || return 0
+  since=$(state_value asOf)
+  [ -n "$since" ] || since=$(iso "$last_run")
+  if ! body=$(get "/api/v1/fleet/heartbeat/history?since=${since//+/%2B}" 2>&1); then
+    log "history since $since unreadable (${body:-no answer}); sleep gaps not checked"
+    return 0
+  fi
+  # no tick at all is a gap too (grep finding nothing must not end the run under set -e)
+  ticks=$(printf '%s' "$body" | { grep -oE '"at":"[^"]+"' || true; } | sed -E 's/^"at":"([^"]+)"$/\1/' | sort)
+  previous=$(epoch_of "$since")
+  from=$since
+  for tick in $ticks $(iso "$NOW"); do
+    local at
+    at=$(epoch_of "$tick")
+    [ -n "$at" ] || continue
+    if [ -n "$previous" ] && [ $((at - previous)) -gt "$GAP_S" ]; then
+      log "SILENT bigboy silent $from..$tick"
+      notify "bigboy silent $from..$tick"
+    fi
+    previous=$at
+    from=$tick
+  done
+}
+
+FAILED=0
+mkdir -p "$STATE_DIR"
+HOST=$(configured_host)
+[ -n "$HOST" ] || { failed config "no probe host (TEMPER_DEADMAN_HOST or a bigboy line in ~/.config/bb-temper/hosts)"; exit 2; }
+readonly HOST
+URL=$(configured_url)
+[ -n "$URL" ] || { failed config "no controller URL (TEMPER_DEADMAN_URL, TEMPER_URL or ~/.config/temper/config)"; exit 2; }
+URL=${URL%/}
+[ -r "$TOKEN_FILE" ] || { failed config "no token file $TOKEN_FILE"; exit 2; }
+TOKEN=$(tr -d '[:space:]' < "$TOKEN_FILE")
+readonly URL TOKEN
+passed config
+AS_OF=
+
+banner
+heartbeat
+silences
+[ -n "$AS_OF" ] || AS_OF=$(state_value asOf)
+printf 'asOf=%s\nrun=%s\n' "$AS_OF" "$NOW" > "$STATE.partial" && mv -f "$STATE.partial" "$STATE"
+exit "$FAILED"

@@ -1,0 +1,39 @@
+# temper maintenance alarm, systemd USER unit: one `temper alarm-check` run, started by temper-alarm.timer.
+#
+# Install: as the controller's user on the build host (an owner-visible step), copy this unit and temper-alarm.timer to
+# ~/.config/systemd/user/, run `systemctl --user daemon-reload`, then enable the timer: `systemctl --user enable --now temper-alarm.timer`.
+#
+# Needs: Java 25 on PATH (as temper-controller.service), the CLI jar at ~/.local/lib/temper/temper-cli.jar (the one CLI install),
+# and ~/.config/temper/config (`url` and the [alarm] section),
+# ~/.config/temper/token (the controller's token) and ~/.config/temper/alarm-token (the GitHub token), both 0600.
+#
+# Exit codes (`temper alarm-check`): 0 every condition clear; 3 a condition fires and its issue was updated, which is
+# the alarm working, so it counts as success here; 2 the GitHub sink failed; 64 a configuration error or a condition
+# that could not be evaluated (`check-blind` is then delivered too). Anything else, the JVM's own 1 included (a missing
+# jar, a crash, an OutOfMemoryError), leaves the unit failed like 2 and 64: the local signal
+# (`systemctl --user --failed`, the journal) when GitHub may not have been told.
+#
+# No network-online ordering: a user manager has no network-online.target to wait for.
+[Unit]
+Description=temper maintenance alarm check
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/env java -XX:TieredStopAtLevel=1 -XX:+UseSerialGC -Xmx256m -jar %h/.local/lib/temper/temper-cli.jar alarm-check
+SuccessExitStatus=3
+# The longest run, from the deadlines in the code:
+#   controller: 3 attempts x 20 s (both reads, bodies included; AlarmCheck.READ_DEADLINE) + 2 x 15 s pauses =  90 s
+#   GitHub, the whole delivery (AlarmCommand.DELIVERY_DEADLINE, cut there: exit 2): at worst 50 list pages,
+#           then per condition (concurrently) 50 comment pages and 2 writes, 102 requests in a row       = 120 s
+#   JVM start, configuration and the disk measurement                                                      ~  10 s
+#   total                                                                                                  ~ 220 s
+# A controller that hits its read deadline at every attempt is `controller-down`: delivered, exit 3. A GitHub delivery
+# cut by its deadline is undelivered: exit 2 (a write already sent may still land). This limit sits well above the
+# total and well under the 10-minute timer, so it stops only a run that is wedged outside those deadlines.
+TimeoutStartSec=420
+# -Xmx256m: the largest answers GitHub can send are read whole (GithubApi): one open-list page of at most 19 MiB,
+# read alone, or up to 7 comment pages (one per condition) of at most 10 MiB each, 70 MiB raw at once, plus their
+# parsing (the chunks read, then the decoded text). Measured with these flags, that worst case passes at 168 MiB
+# and fails at 160 MiB; 256 MiB leaves about half again.
+# The alarm never needs cloud credentials (money guard).
+UnsetEnvironment=HCLOUD_TOKEN

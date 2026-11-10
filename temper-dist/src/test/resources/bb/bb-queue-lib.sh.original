@@ -1,0 +1,101 @@
+# bb-queue-lib.sh -- shared by bb-build and bb-queue (2026-09-28). Sourced, not executed.
+# Queue layout under $Q: waiting/<id>, running/<id>, done/<id> (key=value lines; the LAST value of a key wins),
+# .lock (flock; every state change happens under it). A ticket's liveness is its waiter process, found by
+# cmdline ("bb-build __run <id>"), so no pid bookkeeping and no pid-reuse hazard.
+# BB_TEST_* variables exist only so the mechanism can be tested in isolation; never set them for a real build.
+Q=${BB_TEST_QUEUE_ROOT:-$HOME/work/queue}
+PRIO=${BB_TEST_PRIORITIES:-$HOME/work/priorities}
+PAT=${BB_TEST_REACTOR_PATTERN:-[c]lassworlds.launcher.Launcher}
+PGM=${BB_TEST_PORT_MODULES:-$HOME/work/port-group-modules}
+# backfill starvation bound (2026-09-29, "backfill"): a ticket blocked by its own cap for this long stops all backfill
+STARVE=${BB_STARVE_SECS:-1200}
+mkdir -p "$Q/waiting" "$Q/running" "$Q/done"
+
+field() { sed -n "s/^$2=//p" "$1" 2>/dev/null | tail -1; }
+reactors() { pgrep -u "$USER" -fc "$PAT" || true; }
+waiter_alive() { pgrep -u "$USER" -f -- "bb-build __run $1( |\$)" > /dev/null; }
+# co_reactor_alive <co>: a maven reactor is running with its cwd in <co> (it outlives a kill -9 of its waiter).
+co_reactor_alive() { local p; for p in $(pgrep -u "$USER" -f "$PAT"); do [ "$(readlink "/proc/$p/cwd" 2>/dev/null)" = "$1" ] && return 0; done; return 1; }
+
+# prio <owner> <sha>: highest matching line of $PRIO. A key matches if it equals the owner exactly, or if it is
+# 7-40 lowercase hex chars and a prefix of the SHA. No match (or no file) = 0.
+prio() {
+  awk -v o="$1" -v s="$2" '
+    /^[[:space:]]*(#|$)/ { next }
+    NF >= 2 && $2 ~ /^-?[0-9]+$/ {
+      m = ($1 == o) || ($1 ~ /^[0-9a-f]+$/ && length($1) >= 7 && length($1) <= 40 && index(s, $1) == 1)
+      if (m && (best == "" || $2 + 0 > best + 0)) best = $2
+    }
+    END { print (best == "" ? 0 : best) }' "$PRIO" 2>/dev/null || echo 0
+}
+
+# order: waiting ticket ids, grant order first (priority desc, then enqueue time asc).
+order() {
+  local f
+  for f in "$Q"/waiting/*; do
+    [ -f "$f" ] || continue
+    printf '%s %s %s\n' "$(prio "$(field "$f" owner)" "$(field "$f" sha)")" "$(field "$f" created | grep -x '[0-9][0-9]*' || echo 0)" "${f##*/}"
+  done | sort -k1,1nr -k2,2n -k3,3 | awk '{print $3}'
+}
+
+# Port group (2026-09-29): tickets with group=1 bind FIXED test ports, so at most one of them runs at a time; other
+# tickets are unaffected. The group is held by any running/ ticket with group=1 -- and reap keeps a ticket in running/
+# while its waiter OR its maven reactor lives, so a kill -9 releases the group exactly when the ports are free.
+group_holder() { local f; for f in "$Q"/running/*; do [ -f "$f" ] && [ "$(field "$f" group)" = 1 ] && { echo "${f##*/}"; return 0; }; done; return 0; }
+# grantable (under lock, after reap): order, minus group tickets while the group is held. Tickets written before the
+# group existed have no group= line and count as non-group.
+grantable() {
+  local id held; held=$(group_holder)
+  for id in $(order); do
+    [ -n "$held" ] && [ "$(field "$Q/waiting/$id" group)" = 1 ] && continue
+    echo "$id"
+  done
+}
+
+# never_started <co> <rc> <reason>: make .bb describe a run that never reached maven, so pollers of .bb/rc wake
+# and bb-report counts nothing (run.marker is touched, so no older XML is "newer than marker").
+never_started() {
+  local B=$1/.bb now; now=$(date +%s)
+  mkdir -p "$B"; touch "$B/run.marker"; echo "$now" > "$B/start"; echo "$now" > "$B/end"
+  echo "bb-build: maven never started: $3" > "$B/build.log"; rm -f "$B/queued"; echo "$2" > "$B/rc"
+}
+
+# reap (under lock): tickets whose waiter is gone. Waiting -> abandoned (rc 9 written for the poller).
+# Running -> finished if maven wrote rc, else orphaned. A running ticket whose waiter died but whose maven still runs in
+# its checkout stays running (it still holds its reactor slot and, if group=1, the port group) until maven exits.
+reap() {
+  local f id co
+  for f in "$Q"/waiting/*; do
+    [ -f "$f" ] || continue; id=${f##*/}; waiter_alive "$id" && continue
+    co=$(field "$f" co)
+    [ "$(cat "$co/.bb/queued" 2>/dev/null)" = "$id" ] && never_started "$co" 9 "ticket $id abandoned (waiter process gone)"
+    printf 'state=abandoned\nended=%s\n' "$(date +%s)" >> "$f"; mv "$f" "$Q/done/$id"
+  done
+  for f in "$Q"/running/*; do
+    [ -f "$f" ] || continue; id=${f##*/}; waiter_alive "$id" && continue
+    co=$(field "$f" co); co_reactor_alive "$co" && continue
+    if [ -f "$co/.bb/rc" ] && [ "$(cat "$co/.bb/start" 2>/dev/null)" = "$(field "$f" started)" ]; then
+      printf 'state=finished\nrc=%s\nended=%s\n' "$(cat "$co/.bb/rc")" "$(cat "$co/.bb/end" 2>/dev/null)" >> "$f"
+    else
+      printf 'state=orphaned\nended=%s\n' "$(date +%s)" >> "$f"
+    fi
+    mv "$f" "$Q/done/$id"
+  done
+}
+
+# pick (under lock, after reap): the ONE waiting ticket to grant now, or nothing. BACKFILL (2026-09-29): walk the
+# grantable order (priority desc, FIFO; port-group tickets already filtered while the group is held) and grant the
+# first ticket whose OWN cap is satisfied, so a head that cannot start (e.g. BB_MAX_REACTORS=1 waiting for an empty
+# host) no longer blocks everything behind it. STARVATION BOUND: each ticket skipped for its cap gets blocked_since=
+# (first time only); once any skipped ticket has been blocked for STARVE seconds, nothing behind it is granted, so the
+# host drains and it runs.
+pick() {
+  local r id f c bs now; r=$(reactors); now=$(date +%s)
+  for id in $(grantable); do
+    f=$Q/waiting/$id; c=$(field "$f" cap); case "$c" in ''|*[!0-9]*) c=3;; esac
+    [ "$r" -lt "$c" ] && { echo "$id"; return 0; }
+    bs=$(field "$f" blocked_since); case "$bs" in ''|*[!0-9]*) bs=$now; echo "blocked_since=$now" >> "$f";; esac
+    [ $((now - bs)) -ge "$STARVE" ] && return 0
+  done
+  return 0
+}

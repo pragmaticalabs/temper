@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="color-scheme" content="light dark">
+<meta http-equiv="refresh" content="30">
+<title>kiln: dashboard</title>
+<style>:root{--paper:#f4f3f0;--paper-raised:#fbfaf7;--ink:#1a2840;--ink-soft:#4a5468;--ink-faint:#b6b1a5;--line:#c9c5bc;--code-bg:#eceae4;--amber:#f59e0b;--amber-dark:#d97706;--amber-light:#fbbf24;--ui:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;--mono:'JetBrains Mono','Fira Code',ui-monospace,SFMono-Regular,Menlo,monospace;--ok:#126b33;--warn:#9a4507;--error:#b91c1c}@media (prefers-color-scheme:dark){:root{--paper:#14181f;--paper-raised:#1a1f28;--ink:#e8ecf5;--ink-soft:#9aa5bd;--ink-faint:#5a6478;--line:#2c3341;--code-bg:#1e2530;--ok:#4ade80;--warn:#fb923c;--error:#f87171}}*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--ui);font-size:14px;line-height:1.45}a{color:var(--ink);text-decoration-color:var(--line);text-underline-offset:2px}header.top{position:sticky;top:0;z-index:2;background:var(--paper);border-bottom:1px solid var(--line);padding:8px 16px}h1{font-size:16px;margin:0 0 6px}h2{font-size:17px;margin:6px 0}h3{font-size:15px;margin:8px 0 4px}main{padding:4px 16px 16px}.strip,.tabs{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0;align-items:center}.chip{border:1.5px solid var(--ink);border-radius:22px;padding:4px 12px;font-size:13.5px;text-decoration:none;background:transparent;color:var(--ink)}.chip .count{margin-left:6px;font-size:12px;color:var(--ink-soft)}.chip .count.warn{color:var(--warn)}.chip.red{border-color:var(--error)}.badge{border:1.5px solid currentColor;border-radius:22px;padding:2px 10px;font-size:12.5px;background:var(--paper-raised)}.ok{color:var(--ok)}.warn{color:var(--warn)}.error{color:var(--error)}.panel{background:var(--paper-raised);border:1px solid var(--line);border-radius:8px;margin:8px 0;padding:6px 14px}.host{border:1px solid var(--line);border-radius:6px;padding:4px 10px;margin:8px 0}.panel.red,.host.red{border:2px solid var(--error)}.flag{color:var(--paper-raised);background:var(--error);padding:0 5px;border-radius:4px;font-size:11.5px;font-weight:600}.stale{color:var(--error)}.grey,.asof,small{color:var(--ink-soft)}.asof{font-size:12px;margin:2px 0 6px}table{width:100%;border-collapse:collapse;margin:0 0 14px;font-size:13.5px}th,td{text-align:left;padding:6px 8px;border:1px solid var(--line);vertical-align:top}th{background:var(--paper);font-weight:600}td.red{border-left:4px solid var(--error)}.cells{margin-top:4px}.cell{display:inline-block;border:1px solid var(--line);border-radius:10px;padding:0 6px;margin:1px;font-size:12.5px;white-space:nowrap}.cell.ok{border-color:var(--ok)}.cell.fail{color:var(--error)}.cell.stale{color:var(--error);border-color:var(--error)}pre{white-space:pre-wrap;font-family:var(--mono);font-size:12.5px;background:var(--code-bg);padding:8px;border-radius:6px;color:var(--ink)}main.tabbed>section.panel{display:none}main.tabbed[data-tab="prs"]>section#prs,main.tabbed[data-tab="work"]>section#work,main.tabbed[data-tab="bases"]>section#bases,main.tabbed[data-tab="checkouts"]>section#checkouts,main.tabbed[data-tab="temper"]>section#temper,main.tabbed[data-tab="pipeline"]>section#pipeline,main.tabbed[data-tab="conflicts"]>section#conflicts,main.tabbed[data-tab="questions"]>section#questions,main.tabbed[data-tab="sources"]>section#sources{display:block}.chip.active{box-shadow:0 0 0 2px var(--amber) inset;font-weight:600;text-decoration:underline 2px var(--ink);text-underline-offset:4px}.board{display:grid;grid-template-columns:repeat(9,minmax(150px,1fr));gap:8px;overflow-x:auto;margin:6px 0 14px}.column{background:var(--paper);border:1px solid var(--line);border-radius:6px;padding:4px 6px;min-height:60px}.column h3{font-size:13.5px;margin:2px 0 6px}.card{background:var(--paper-raised);border:1px solid var(--line);border-radius:6px;padding:4px 6px;margin:0 0 6px;font-size:12.5px;overflow-wrap:anywhere}.card p{margin:2px 0}.card .round{font-family:var(--mono);font-weight:600}</style>
+</head>
+<body>
+<header class="top">
+<h1>kiln: dashboard</h1>
+<nav class="strip" aria-label="sources"><span class="badge ok"><b>github</b> OK · 30s ago</span> <span class="badge ok"><b>mirror</b> OK · 40s ago</span> <span class="badge ok"><b>temper</b> OK · 50s ago</span> <span class="badge ok"><b>hosts</b> OK · 55s ago</span> <span class="badge ok"><b>host:bigboy</b> OK · 1m ago</span> <span class="badge ok"><b>host:cloudbb-3</b> OK · 1m ago</span> <span class="badge ok"><b>mac</b> OK · 1h 0m ago</span></nav>
+<nav class="tabs" aria-label="panels"><a class="chip active red" href="/?tab=prs">Open PRs<span class="count">4</span> <span class="flag">STALE</span></a> <a class="chip" href="/?tab=work">Work<span class="count">0</span></a> <a class="chip" href="/?tab=bases">Base branches<span class="count warn">1 issues</span></a> <a class="chip" href="/?tab=checkouts">Checkouts<span class="count warn">≥2 salvage</span></a> <a class="chip" href="/?tab=temper">temper</a> <a class="chip" href="/?tab=pipeline">Pipeline<span class="count">0 / 0</span></a> <a class="chip" href="/?tab=conflicts">Conflicts<span class="count">0</span></a> <a class="chip" href="/?tab=questions">Questions</a> <a class="chip" href="/?tab=sources">Sources</a></nav>
+</header>
+<main class="tabbed" data-tab="prs">
+<section id="sources" class="panel">
+<h2>Sources</h2>
+<p class="asof">as of 2026-10-30T11:00:00Z (1h 0m ago)</p>
+<ul>
+<li><b>github</b>: OK; last success 2026-10-30T11:59:30Z (30s ago); <span class="fact">rate budget 4990 left, resets 2026-10-30T12:40:00Z (in 40m) <small>(observed 30s ago)</small></span>
+<ul>
+<li><span class="fact">skipped #77: <bdi>base: invalid branch</bdi> <small>(observed 30s ago)</small></span></li>
+</ul></li>
+<li><b>mirror</b>: OK; last success 2026-10-30T11:59:20Z (40s ago)</li>
+<li><b>temper</b>: OK; last success 2026-10-30T11:59:10Z (50s ago)</li>
+<li><b>hosts</b>: OK; last success 2026-10-30T11:59:05Z (55s ago)</li>
+<li><b>host:bigboy</b>: OK; last success 2026-10-30T11:58:20Z (1m ago); hot pass: COMPLETE, 181 of 181 rows, finished 2026-10-30T11:58:20Z (1m ago); full pass: RUNNING 3 of 10, started 2026-10-30T11:00:00Z (1h 0m ago)</li>
+<li><b>host:cloudbb-3</b>: OK; last success 2026-10-30T11:58:10Z (1m ago); hot pass: none recorded; full pass: none recorded</li>
+<li><b>mac</b>: OK; last success 2026-10-30T11:00:00Z (1h 0m ago); push: COMPLETE, 3 of 3 rows, finished 2026-10-30T11:00:00Z (1h 0m ago)</li>
+</ul>
+</section>
+<section id="prs" class="panel">
+<h2>Open PRs</h2>
+<p class="asof">as of 2026-10-30T11:59:30Z (30s ago)</p>
+<table>
+<tr><th>PR</th><th>head</th><th>behind</th><th>required checks</th><th>mergeable_state</th><th>temper gate</th><th>checkouts</th><th>closing keywords</th></tr>
+<tr><td><span class="fact">#102 <bdi>Stacked follow-up</bdi> <span class="grey">[draft]</span><br>base <bdi>kiln-101</bdi> <span class="grey">(stacked)</span> <small>(observed 30s ago)</small></span></td><td>bbbbbbb, commit time unknown</td><td>behind not read</td><td><span class="fact"><span class="grey">NONE-REQUIRED(<bdi>no checks</bdi>)</span> stacked base: CI may not run <small>(observed 30s ago)</small></span></td><td>not read</td><td><span class="fact">TEMPER-SCHEMA(<bdi>answer</bdi>) <small>(observed 50s ago)</small></span></td><td>none linked</td><td>none</td></tr>
+<tr><td><span class="fact">#101 <bdi>Add the kiln dashboard</bdi><br>base <bdi>main</bdi> <small>(observed 30s ago)</small></span></td><td>aaaaaaa, committed 2026-10-30T10:00:00Z (2h 0m ago)</td><td><span class="fact">behind 3, tree-equal <small>(observed 40s ago)</small></span></td><td><span class="fact">REQUIRED(3, <bdi>non_admins</bdi>) <small>(observed 30s ago)</small></span><div class="cells"><span class="cell ok" title="ci: success · shown: success · observed 30s ago">✓ <bdi>ci</bdi></span> <span class="cell" title="ci@15368: success* · shown: success · observed 30s ago">… <bdi>ci@15368</bdi> <bdi>success*</bdi></span> <span class="cell fail" title="lint: failure (foreign 1) · shown: failure, success · observed 30s ago">✗ <bdi>lint</bdi> <bdi>failure</bdi> (foreign 1)</span></div></td><td><span class="fact"><bdi>clean</bdi>, mergeable true <small>(observed 30s ago)</small></span></td><td><span class="fact"><bdi>PASS</bdi>, job 42, judge <bdi>temper</bdi> <small>(observed 50s ago)</small></span></td><td><span class="fact"><bdi>bigboy:/home/builder/work/co/kiln-wp10</bdi> (ACTIVE) <small>(observed 1m ago)</small></span></td><td>closes #90; part of #80</td></tr>
+<tr><td><span class="fact">#103 <bdi>Checks unreadable</bdi><br>base <bdi>release-1.0.0-rc5</bdi> <small>(observed 30s ago)</small></span></td><td>ccccccc, commit time unknown</td><td><span class="fact">behind UNKNOWN, tree UNKNOWN <small>(observed 40s ago)</small></span></td><td><span class="fact"><span class="grey">UNKNOWN(<bdi>403</bdi>)</span> <small>(observed 30s ago)</small></span><div class="cells"><span class="cell" title="ci: success · observed 30s ago">? <bdi>ci</bdi> <bdi>success</bdi></span></div></td><td>not read</td><td>none read</td><td>none linked</td><td>none</td></tr>
+<tr><td><span class="fact">#104 <bdi>Base never read</bdi><br>base <bdi>release-1.0.0-rc5</bdi> <small>(observed 30s ago)</small></span></td><td>ddddddd, commit time unknown</td><td><span class="fact">behind 0, tree differs <small>(observed 40s ago)</small></span></td><td class="red"><span class="grey">UNKNOWN(not read)</span><div class="cells"><span class="cell" title="ci: success · observed 30s ago">? <bdi>ci</bdi> <bdi>success</bdi></span></div></td><td>not read</td><td>none read</td><td>none linked</td><td>none</td></tr>
+</table>
+</section>
+<section id="work" class="panel">
+<h2>Work</h2>
+<p class="asof">as of never: no ledger event recorded</p>
+<div class="board">
+<div class="column" data-phase="design">
+<h3>design <span class="count">0</span></h3>
+</div>
+<div class="column" data-phase="coding">
+<h3>coding <span class="count">0</span></h3>
+</div>
+<div class="column" data-phase="verify">
+<h3>verify <span class="count">0</span></h3>
+</div>
+<div class="column" data-phase="fixing">
+<h3>fixing <span class="count">0</span></h3>
+</div>
+<div class="column" data-phase="accepted">
+<h3>accepted <span class="count">0</span></h3>
+</div>
+<div class="column" data-phase="integrated">
+<h3>integrated <span class="count">0</span></h3>
+</div>
+<div class="column" data-phase="in-pr">
+<h3>in-pr <span class="count">0</span></h3>
+</div>
+<div class="column" data-phase="merged">
+<h3>merged <span class="count">0</span></h3>
+</div>
+<div class="column" data-phase="parked">
+<h3>parked <span class="count">0</span></h3>
+</div>
+</div>
+</section>
+<section id="bases" class="panel">
+<h2>Base branches</h2>
+<p class="asof">as of 2026-10-30T11:59:30Z (30s ago)</p>
+<h3>runs on <bdi>release-1.0.0-rc5</bdi></h3>
+<ul>
+<li><span class="fact"><a href="https://github.com/pragmaticalabs/pragmatica/actions/runs/9001"><bdi>CI</bdi></a>: <bdi>completed</bdi> / <bdi>success</bdi>, head <bdi>eeeeeee</bdi>, created 2026-10-30T11:00:00Z (1h 0m ago) <small>(observed 30s ago)</small></span></li>
+</ul>
+<h3>runs on <bdi>main</bdi></h3>
+<p>no runs observed</p>
+<h3>scheduled runs</h3>
+<ul>
+<li><span class="fact"><a href="https://github.com/pragmaticalabs/pragmatica/actions/runs/9002"><bdi>nightly</bdi></a>: <bdi>completed</bdi> / <bdi>failure</bdi>, head <bdi>fffffff</bdi>, created 2026-10-30T03:40:00Z (8h 20m ago) <small>(observed 30s ago)</small></span></li>
+</ul>
+<h3>open github-actions issues</h3>
+<ul>
+<li><span class="fact"><a href="https://github.com/pragmaticalabs/pragmatica/issues/200">#200</a> <bdi>Nightly failed</bdi>, created 2026-10-30T03:56:40Z (8h 3m ago) <small>(observed 30s ago)</small></span></li>
+</ul>
+</section>
+<section id="checkouts" class="panel">
+<h2>Checkouts</h2>
+<p class="asof">as of 2026-10-30T11:00:00Z (1h 0m ago)</p>
+<div class="host">
+<h3>bigboy</h3>
+<p class="asof">as of 2026-10-30T11:58:20Z (1m ago)</p>
+<p class="counts">ACTIVE 1 · IN-USE 1 · REMOVABLE 120 · BASE-CLEAN 3 · NEEDS-SALVAGE 1 · STALE-UNOWNED 0 · UNOWNED 0 · UNSCANNED 1 · total 127 · known size ≥4.8 GiB (125 of 127 measured) · oldest fact 2026-10-29T16:00:00Z (20h 0m ago)</p>
+<p>drill down: <a href="/checkouts?status=REMOVABLE&amp;host=bigboy&amp;page=1">REMOVABLE 120</a> · <a href="/checkouts?status=BASE_CLEAN&amp;host=bigboy&amp;page=1">BASE-CLEAN 3</a> · <a href="/checkouts?status=STALE_UNOWNED&amp;host=bigboy&amp;page=1">STALE-UNOWNED 0</a> · <a href="/checkouts?status=UNOWNED&amp;host=bigboy&amp;page=1">UNOWNED 0</a></p>
+<p>2 non-git directories under <bdi>/home/builder/work/co</bdi> <a href="/non-git?host=bigboy&amp;root=%2Fhome%2Fbuilder%2Fwork%2Fco">list</a></p>
+<p>1 non-git directories under <bdi>/tmp/scratch</bdi> <a href="/non-git?host=bigboy&amp;root=%2Ftmp%2Fscratch">list</a></p>
+<table>
+<tr><th>checkout</th><th>status</th><th>last activity</th><th>head</th><th>preservation</th><th>linked PRs</th><th>salvage refs</th><th>last observed</th><th>size</th></tr>
+<tr><td><bdi>bigboy:/home/builder/work/co/old-fix</bdi></td><td>NEEDS-SALVAGE <small>(derived 1m ago)</small></td><td>2026-10-25T20:53:20Z (4d 15h ago)</td><td><bdi>fix-x</bdi> aaaaaaa</td><td>unpreserved: <bdi>unpushed:fix-x, dirty:2</bdi></td><td>none</td><td>2</td><td>hot 2026-10-30T11:58:20Z (1m ago)</td><td>2.9 GiB <small>(measured 50m ago)</small></td></tr>
+<tr><td><bdi>bigboy:/home/builder/work/co/bb-temper</bdi></td><td>IN-USE <small>(derived 1m ago)</small></td><td>2026-10-30T10:00:00Z (2h 0m ago)</td><td>detached aaaaaaa</td><td>host bare only</td><td>none</td><td>unknown</td><td>hot 2026-10-30T11:58:20Z (1m ago)</td><td>unmeasured</td></tr>
+<tr><td><bdi>bigboy:/home/builder/work/co/kiln-wp10</bdi></td><td>ACTIVE <small>(derived 1m ago)</small></td><td>2026-10-30T11:59:00Z (1m ago)</td><td><bdi>kiln-101</bdi> aaaaaaa</td><td>preserved</td><td>#101 (BRANCH)</td><td>0</td><td>hot 2026-10-30T11:58:20Z (1m ago)</td><td>1.0 MiB <small>(measured 50m ago)</small></td></tr>
+<tr><td><bdi>bigboy:/home/builder/work/co/new-one</bdi></td><td>UNSCANNED</td><td>2026-10-30T11:59:30Z (30s ago)</td><td>no facts</td><td>not derived</td><td>not derived</td><td>unknown</td><td>listed 2026-10-30T11:58:20Z (1m ago), no full facts</td><td>unmeasured</td></tr>
+</table>
+</div>
+<div class="host">
+<h3>cloudbb-3</h3>
+<p class="asof">as of 2026-10-30T11:58:10Z (1m ago)</p>
+<p class="counts">no rows observed</p>
+<p>drill down: <a href="/checkouts?status=REMOVABLE&amp;host=cloudbb-3&amp;page=1">REMOVABLE ?</a> · <a href="/checkouts?status=BASE_CLEAN&amp;host=cloudbb-3&amp;page=1">BASE-CLEAN ?</a> · <a href="/checkouts?status=STALE_UNOWNED&amp;host=cloudbb-3&amp;page=1">STALE-UNOWNED ?</a> · <a href="/checkouts?status=UNOWNED&amp;host=cloudbb-3&amp;page=1">UNOWNED ?</a></p>
+<p>no non-git directory listed</p>
+<p>no rows</p>
+</div>
+<div class="host mac">
+<h3>mac</h3>
+<p class="asof">as of 2026-10-30T11:00:00Z (1h 0m ago)</p>
+<p>pushed 2026-10-30T11:00:00Z (1h 0m ago)</p>
+<p>131 copies held only on the Mac (salvage refs in 1 repositories)</p>
+<p class="counts">ACTIVE 1 · IN-USE 0 · REMOVABLE 1 · BASE-CLEAN 0 · NEEDS-SALVAGE 1 · STALE-UNOWNED 0 · UNOWNED 0 · UNSCANNED 0 · total 3 · size not measured · oldest fact 2026-10-30T11:00:00Z (1h 0m ago)</p>
+<p>no non-git directory listed</p>
+<table>
+<tr><th>checkout</th><th>status</th><th>last activity</th><th>head</th><th>preservation</th><th>linked PRs</th><th>salvage refs</th><th>last observed</th><th>size</th></tr>
+<tr><td><bdi>mac:/Users/s/src/ticketing</bdi></td><td>REMOVABLE <small>(derived 1m ago)</small></td><td>2026-10-20T02:00:00Z (10d 10h ago)</td><td><bdi>main</bdi> aaaaaaa</td><td>preserved</td><td>none</td><td>0</td><td>push 2026-10-30T11:58:20Z (1m ago)</td><td>unmeasured</td></tr>
+<tr><td><bdi>mac:/private/tmp/scratch-501/a/b/work/wt</bdi></td><td>NEEDS-SALVAGE <small>(derived 1m ago)</small></td><td>2026-10-29T11:00:00Z (25h 0m ago)</td><td><bdi>wip</bdi> aaaaaaa</td><td>unpreserved: <bdi>unpushed:wip</bdi></td><td>none</td><td>131</td><td>push 2026-10-30T11:58:20Z (1m ago)</td><td>unmeasured</td></tr>
+<tr><td><bdi>mac:/Users/s/src/pragmatica</bdi></td><td>ACTIVE <small>(derived 1m ago)</small></td><td>2026-10-30T11:50:00Z (10m ago)</td><td><bdi>main</bdi> aaaaaaa</td><td>preserved</td><td>none</td><td>131</td><td>push 2026-10-30T11:58:20Z (1m ago)</td><td>unmeasured</td></tr>
+</table>
+</div>
+</section>
+<section id="temper" class="panel">
+<h2>temper</h2>
+<p class="asof">as of 2026-10-30T11:59:40Z (20s ago)</p>
+<pre><bdi>temper digest
+  jobs: 3 &lt;running&gt; &amp; 1 queued
+</bdi></pre>
+<div id="hosts" class="hosts">
+<h3>Hosts</h3>
+<p class="asof">as of never</p><p>no fleet alarms read yet</p>
+</div>
+</section>
+<section id="pipeline" class="panel">
+<h2>Pipeline baseline</h2>
+<p class="asof">as of never</p>
+<p><bdi>-</bdi> PRs merged into <code><bdi>release-1.0.0-rc5</bdi></code> since 2026-10-28T00:00:00Z; 0 of 0 PRs measured. JSON: <a href="/api/v1/pipeline/baseline">/api/v1/pipeline/baseline</a>. A base sync is a merge commit whose headline names the base (headline rule); base-sync h are the PR runs on such merges. INCOMPLETE: runs that never completed within 3 days of the merge.</p>
+<p>state NEVER: <bdi>no cycle yet</bdi></p>
+<p>no merged PR listed yet</p>
+</section>
+<section id="conflicts" class="panel">
+<h2>Conflicts</h2>
+<p class="asof">as of never</p>
+<p><strong>Limit:</strong> merge-tree finds textual conflicts only: a clean textual merge can still break compilation, for example a new caller of a signature another PR changes. A pair is checked only when the two PRs touch a common path, one adds a file where the other has a directory, or one moves a directory the other adds into; a rename git does not detect reads as a delete and an add.</p>
+<p>the conflict watch is off (no <code>[conflicts]</code>)</p>
+</section>
+<section id="questions" class="panel">
+<h2>Questions</h2>
+<p class="asof">as of 2026-10-30T12:00:00Z (0s ago): no source in F1</p>
+<p class="grey">Open questions arrive in F3.</p>
+</section>
+</main>
+</body>
+</html>

@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- A12 oracle fixture (m1-design §9.2): ManifestOracleIT and CrashedForkIT build it as a Gate (`clean install`) in the
+     runner image through the real controller and worker, and require manifest == reported classnames.
+     Sources: ~/temper-wt/scratch-archive-2026-10-13/ca3422b0-b96f-416f-84ea-33655b51f6db/vm1int/oracle/ (fixture,
+     fixture3, fixture3b, fixture6, fixture7) and 4d4552c4-e892-4abb-8746-fbe3687860a6/vm1wp2-oracle/ (the WP2 26-class
+     surefire 3.5.4 oracle); see README.md for the class-by-class mapping. Jupiter only (ruling R-11): no Vintage
+     engine, no JUnit 3/4 classes here; those are the `junit3`/`junit4` overlays, expected Unsupported. -->
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+    <modelVersion>4.0.0</modelVersion>
+    <groupId>fx</groupId>
+    <artifactId>manifest-fixture</artifactId>
+    <version>1</version>
+    <packaging>pom</packaging>
+
+    <modules>
+        <module>includes</module>
+        <module>groups</module>
+        <module>nested</module>
+        <module>failsafe</module>
+        <module>skip</module>
+        <module>inherit</module>
+        <module>meta</module>
+        <module>disabled</module>
+        <module>display</module>
+        <module>display352</module>
+        <module>display353</module>
+    </modules>
+
+    <properties>
+        <maven.compiler.release>25</maven.compiler.release>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <!-- Overridden per module the way pragmatica's jbct pins surefire 3.5.2 (T1 2026-10-14 run 2). -->
+        <maven-surefire-plugin.version>3.5.4</maven-surefire-plugin.version>
+        <maven-failsafe-plugin.version>3.5.4</maven-failsafe-plugin.version>
+        <junit.version>5.13.4</junit.version>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>${junit.version}</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <pluginManagement>
+            <plugins>
+                <plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-clean-plugin</artifactId><version>3.2.0</version></plugin>
+                <plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-resources-plugin</artifactId><version>3.3.1</version></plugin>
+                <plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-compiler-plugin</artifactId><version>3.15.0</version></plugin>
+                <plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-surefire-plugin</artifactId><version>${maven-surefire-plugin.version}</version></plugin>
+                <plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-failsafe-plugin</artifactId><version>${maven-failsafe-plugin.version}</version></plugin>
+                <plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-jar-plugin</artifactId><version>3.5.0</version></plugin>
+                <plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-install-plugin</artifactId><version>3.1.2</version></plugin>
+            </plugins>
+        </pluginManagement>
+    </build>
+</project>

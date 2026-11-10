@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+# worker-launch -- the ONLY command a temper controller key may run on a worker host (m0-design §6.4, Q-13).
+#
+# Installed as ~/.temper/bin/worker-launch and bound to the key by a forced command in ~/.ssh/authorized_keys:
+#   restrict,from="127.0.0.1,::1",command="exec ~/.temper/bin/worker-launch" ssh-ed25519 AAAA... temper-controller
+#
+# The requested command arrives in $SSH_ORIGINAL_COMMAND and must be EXACTLY one of (single spaces, nothing else):
+#   run <ver>               copy ~/.temper/worker-<ver>.jar to a private ~/.temper/run/worker-<ver>.<pid>.jar, and
+#                           exec that copy only if ITS sha256 equals the one recorded at install in
+#                           ~/.temper/worker-<ver>.jar.sha256 (the file executed is the file hashed; a concurrent
+#                           install cannot swap it). Copies of workers that are no longer running are removed.
+#   install <ver> <sha256>  read the jar from stdin, verify its sha256 BEFORE anything is renamed into place, record
+#                           the hash, then rename both atomically into ~/.temper
+# <ver> matches ^[0-9A-Za-z.+-]{1,40}$, <sha256> is 64 lowercase hex. Everything else is refused.
+#
+# Writes only under ~/.temper. No shell evaluation of the request: it is split into words and compared literally.
+# The java used is "$(cat ~/.temper/java-home)/bin/java" when that file exists, else the first java on PATH.
+#
+# Exit codes: 64 refused (bad or missing command), 65 integrity (sha256 mismatch, missing or bad record),
+# 66 jar not installed, 69 no usable java, 70 install I/O failure; `run` otherwise becomes the worker's own exit code.
+set -euo pipefail
+umask 077
+
+readonly TEMPER_HOME="$HOME/.temper"
+readonly VERSION_RE='^[0-9A-Za-z.+-]{1,40}$'
+readonly SHA_RE='^[0-9a-f]{64}$'
+readonly MAX_JAR_BYTES=$((256 * 1024 * 1024))
+
+die() {  # die <exit code> <message...>
+  local code=$1
+  shift
+  echo "worker-launch: $*" >&2
+  exit "$code"
+}
+
+sha256_of() {  # sha256_of <file> -> lowercase hex on stdout
+  if command -v sha256sum > /dev/null 2>&1; then
+    sha256sum < "$1" | cut -d' ' -f1
+  else
+    shasum -a 256 < "$1" | cut -d' ' -f1
+  fi
+}
+
+java_bin() {
+  local home_file=$TEMPER_HOME/java-home
+  if [ -f "$home_file" ]; then
+    local java_home
+    java_home=$(head -n 1 "$home_file")
+    [ -x "$java_home/bin/java" ] || die 69 "java-home $java_home has no executable bin/java"
+    echo "$java_home/bin/java"
+  else
+    command -v java || die 69 "no java on PATH and no $home_file"
+  fi
+}
+
+regular_file() {  # a regular file that is not a symbolic link
+  [ -f "$1" ] && [ ! -L "$1" ]
+}
+
+reap_copies() {  # reap_copies <dir>: remove run copies whose worker process is gone
+  local copy base pid
+  for copy in "$1"/worker-*.jar; do
+    [ -e "$copy" ] || continue
+    base=${copy%.jar}
+    pid=${base##*.}
+    [[ $pid =~ ^[0-9]+$ ]] || continue
+    kill -0 "$pid" 2> /dev/null || rm -f -- "$copy"
+  done
+}
+
+run_worker() {  # run_worker <ver>
+  local jar=$TEMPER_HOME/worker-$1.jar
+  local record=$jar.sha256
+  regular_file "$jar" || die 66 "worker-$1.jar is not installed"
+  regular_file "$record" || die 65 "no recorded sha256 for worker-$1.jar"
+  local expected actual
+  expected=$(head -n 1 "$record")
+  [[ $expected =~ $SHA_RE ]] || die 65 "recorded sha256 for worker-$1.jar is malformed"
+  local java
+  java=$(java_bin)
+  local runs=$TEMPER_HOME/run
+  mkdir -p "$runs" || die 70 "cannot create $runs"
+  reap_copies "$runs"
+  # The JVM gets this shell's pid on exec, so the copy is named after the worker that runs it.
+  local copy=$runs/worker-$1.$$.jar
+  cp -- "$jar" "$copy" || die 70 "cannot copy worker-$1.jar"
+  actual=$(sha256_of "$copy")
+  if [ "$actual" != "$expected" ]; then
+    rm -f -- "$copy"
+    die 65 "sha256 of worker-$1.jar does not match the recorded one; refusing to run it"
+  fi
+  exec "$java" -XX:+ExitOnOutOfMemoryError -jar "$copy"
+}
+
+install_worker() {  # install_worker <ver> <sha256>; the jar arrives on stdin
+  local version=$1 expected=$2
+  local jar=$TEMPER_HOME/worker-$version.jar
+  mkdir -p "$TEMPER_HOME" || die 70 "cannot create $TEMPER_HOME"
+  [ ! -d "$jar" ] && [ ! -d "$jar.sha256" ] || die 70 "a directory is in the way of worker-$version.jar"
+  local partial
+  partial=$(mktemp "$TEMPER_HOME/.worker-$version.jar.XXXXXX") || die 70 "cannot create a temporary file"
+  # shellcheck disable=SC2064  # expand now: the trap must remove exactly these files
+  trap "rm -f -- '$partial' '$partial.sha256'" EXIT
+  head -c $((MAX_JAR_BYTES + 1)) > "$partial" || die 70 "reading the jar from stdin failed"
+  local size
+  size=$(wc -c < "$partial" | tr -d ' ')
+  [ "$size" -gt 0 ] || die 65 "empty jar on stdin"
+  [ "$size" -le "$MAX_JAR_BYTES" ] || die 65 "jar larger than $MAX_JAR_BYTES bytes"
+  local actual
+  actual=$(sha256_of "$partial")
+  [ "$actual" = "$expected" ] || die 65 "sha256 mismatch: got $actual, expected $expected; nothing installed"
+  printf '%s\n' "$expected" > "$partial.sha256" || die 70 "cannot write the hash record"
+  chmod 600 "$partial" "$partial.sha256"
+  # Record first, jar second: between the two renames `run` sees a mismatch and refuses (fails safe), never a jar
+  # whose hash was not recorded.
+  mv -f -- "$partial.sha256" "$jar.sha256" || die 70 "cannot rename the hash record into place"
+  mv -f -- "$partial" "$jar" || die 70 "cannot rename the jar into place"
+  trap - EXIT
+  echo "worker-launch: installed worker-$version.jar sha256=$expected" >&2
+}
+
+main() {
+  local request=${SSH_ORIGINAL_COMMAND:-}
+  [ -n "$request" ] || die 64 "no command: this key only runs 'run <ver>' or 'install <ver> <sha256>'"
+  case "$request" in
+    *$'\n'* | *$'\r'* | *$'\t'*) die 64 "refused: control characters in the command" ;;
+  esac
+  local -a words
+  read -r -a words <<< "$request"
+  # Exactness: the words joined by single spaces must give back the request unchanged.
+  [ "${words[*]}" = "$request" ] || die 64 "refused: the command must be single-space separated"
+  case "${words[0]}" in
+    run)
+      [ "${#words[@]}" -eq 2 ] || die 64 "usage: run <ver>"
+      [[ ${words[1]} =~ $VERSION_RE ]] || die 64 "refused: bad version"
+      run_worker "${words[1]}"
+      ;;
+    install)
+      [ "${#words[@]}" -eq 3 ] || die 64 "usage: install <ver> <sha256>"
+      [[ ${words[1]} =~ $VERSION_RE ]] || die 64 "refused: bad version"
+      [[ ${words[2]} =~ $SHA_RE ]] || die 64 "refused: sha256 must be 64 lowercase hex"
+      install_worker "${words[1]}" "${words[2]}"
+      ;;
+    *)
+      die 64 "refused: only 'run <ver>' and 'install <ver> <sha256>' are allowed"
+      ;;
+  esac
+}
+
+main

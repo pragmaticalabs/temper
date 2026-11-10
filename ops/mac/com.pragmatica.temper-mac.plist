@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- The Mac's Claude session liveness post: ops/mac/temper-mac post every 60 s while the Mac is awake,
+     and once at load. __HOME__ is replaced by $HOME at install (launchd does not expand ~ or $HOME); the install and
+     uninstall commands are in temper-mac's header. -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.pragmatica.temper-mac</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>__HOME__/.local/bin/temper-mac</string>
+        <string>post</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>60</integer>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>StandardOutPath</key>
+    <string>__HOME__/Library/Logs/temper-mac.launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>__HOME__/Library/Logs/temper-mac.launchd.log</string>
+</dict>
+</plist>

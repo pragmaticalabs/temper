@@ -1,0 +1,146 @@
+{
+  "name": "release-1.0.0-rc5",
+  "commit": {
+    "sha": "7301880a2be6909bc9918cba8367c6f90a1b0e6e",
+    "node_id": "C_kwDORG6hR9oAKDczMDE4ODBhMmJlNjkwOWJjOTkxOGNiYTgzNjdjNmY5MGExYjBlNmU",
+    "commit": {
+      "author": {
+        "name": "Sergiy Yevtushenko",
+        "email": "256875783+pragmaticalabs@users.noreply.github.com",
+        "date": "2026-10-30T02:12:12Z"
+      },
+      "committer": {
+        "name": "GitHub",
+        "email": "noreply@github.com",
+        "date": "2026-10-30T02:12:12Z"
+      },
+      "message": "feat: worker cutover to the replica feed and governor relay (W-OBS W4) (#2494)\n\n* test: ember harness allows up to 64 additional worker slots (W-OBS W4)\n\n* feat: worker cutover to the replica feed and governor relay (W-OBS W4)\n\n* test: weigh EmberReplicaRelayTest for the ember shards (W-OBS W4)\n\n* fix: restore ClusterBootstrapConfigParser swept into the previous commit by an unrelated stash pop (W-OBS W4)\n\n* fix: follow the 30 s freshness bound across a re-parent, fall back from a governor that cannot verify, pin the serve-gate wires (W-OBS W4 review)\n\n* test: pin a governor's heartbeat behind the member (W-OBS W4 review)",
+      "tree": {
+        "sha": "ef1a8f63b501e11580cff11a45a4129fb78aa829",
+        "url": "https://api.github.com/repos/pragmaticalabs/pragmatica/git/trees/ef1a8f63b501e11580cff11a45a4129fb78aa829"
+      },
+      "url": "https://api.github.com/repos/pragmaticalabs/pragmatica/git/commits/7301880a2be6909bc9918cba8367c6f90a1b0e6e",
+      "comment_count": 0,
+      "verification": {
+        "verified": true,
+        "reason": "valid",
+        "signature": "-----BEGIN PGP SIGNATURE-----\n\nwsFcBAABCAAQBQJq4/z8CRC1aQ7uu5UhlAAAa6oQACwzKj0uH/QbCplI9ggbof3e\nXqIupTqLKHQgZYOMNbQnumHfS1fh2cQtqzSQGBg8euCtWh9ATli9XGy+bjsJi/St\nJv66KAaCUZCaHZ8YBeBfapNBwjZxrbb/XQg38qLN53yDCsMoWXY+LIy8gT5fEW6Z\nSqgCzmyplilcHUDkgDP98QVeFVBUtRUn8sANHveULCDfZztzfdDk5Kx/j/WhXEOc\n1cMMMH4b0Eok/QVdphxH4LgUyFt8TKjEVTXv+ZZkcIE1Gb2Gra6vBc9j7i5HGWG2\nJIDghfNUIuxylwyjF7snCUvc1azVtvlup5qxQN7bqHzcYEJwYt4hNRgadvv76o0O\n8r1oQWQp2cabHiRlC0J9Ea+IzgRVLmEQYdtX8pHTO4g0s966933FyfYeEcXmbEK+\nqt6vUSUlAaNQ7sBO7rN8yErYNxej3JOlZ0RAuagC2TG+YTQH8M01trWVpxWHLfXe\n1ae5WNgFmPkwXiPc2GfQx+2bb02cV1QaYexYfqozDUKqURvz82eFf7Pu899cMjQg\n/Pdh2OmQOG0hKN3pYxGR2mBLQEqiCm25zZhRPK0oDgnnXnnrxmCq8QZWGJKVW22T\nuZpK6H1WIbY87AqaiYoqrVyIRscxo7rUmr1qIi9lShCvNuGjDBuCAWfJSrPWjS7n\nAajz9pFBCyYzn/jdbTvV\n=jTs9\n-----END PGP SIGNATURE-----\n",
+        "payload": "tree ef1a8f63b501e11580cff11a45a4129fb78aa829\nparent c396d4aef38fca95ba1cd328447d2247c8b9c55d\nauthor Sergiy Yevtushenko <256875783+pragmaticalabs@users.noreply.github.com> 1793326332 +0100\ncommitter GitHub <noreply@github.com> 1793326332 +0100\n\nfeat: worker cutover to the replica feed and governor relay (W-OBS W4) (#2494)\n\n* test: ember harness allows up to 64 additional worker slots (W-OBS W4)\n\n* feat: worker cutover to the replica feed and governor relay (W-OBS W4)\n\n* test: weigh EmberReplicaRelayTest for the ember shards (W-OBS W4)\n\n* fix: restore ClusterBootstrapConfigParser swept into the previous commit by an unrelated stash pop (W-OBS W4)\n\n* fix: follow the 30 s freshness bound across a re-parent, fall back from a governor that cannot verify, pin the serve-gate wires (W-OBS W4 review)\n\n* test: pin a governor's heartbeat behind the member (W-OBS W4 review)",
+        "verified_at": "2026-10-30T02:12:12Z"
+      }
+    },
+    "url": "https://api.github.com/repos/pragmaticalabs/pragmatica/commits/7301880a2be6909bc9918cba8367c6f90a1b0e6e",
+    "html_url": "https://github.com/pragmaticalabs/pragmatica/commit/7301880a2be6909bc9918cba8367c6f90a1b0e6e",
+    "comments_url": "https://api.github.com/repos/pragmaticalabs/pragmatica/commits/7301880a2be6909bc9918cba8367c6f90a1b0e6e/comments",
+    "author": {
+      "login": "siy",
+      "id": 423390,
+      "node_id": "MDQ6VXNlcjQyMzM5MA==",
+      "avatar_url": "https://avatars.githubusercontent.com/u/423390?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/siy",
+      "html_url": "https://github.com/siy",
+      "followers_url": "https://api.github.com/users/siy/followers",
+      "following_url": "https://api.github.com/users/siy/following{/other_user}",
+      "gists_url": "https://api.github.com/users/siy/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/siy/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/siy/subscriptions",
+      "organizations_url": "https://api.github.com/users/siy/orgs",
+      "repos_url": "https://api.github.com/users/siy/repos",
+      "events_url": "https://api.github.com/users/siy/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/siy/received_events",
+      "type": "User",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "committer": {
+      "login": "web-flow",
+      "id": 19864447,
+      "node_id": "MDQ6VXNlcjE5ODY0NDQ3",
+      "avatar_url": "https://avatars.githubusercontent.com/u/19864447?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/web-flow",
+      "html_url": "https://github.com/web-flow",
+      "followers_url": "https://api.github.com/users/web-flow/followers",
+      "following_url": "https://api.github.com/users/web-flow/following{/other_user}",
+      "gists_url": "https://api.github.com/users/web-flow/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/web-flow/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/web-flow/subscriptions",
+      "organizations_url": "https://api.github.com/users/web-flow/orgs",
+      "repos_url": "https://api.github.com/users/web-flow/repos",
+      "events_url": "https://api.github.com/users/web-flow/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/web-flow/received_events",
+      "type": "User",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "parents": [
+      {
+        "sha": "c396d4aef38fca95ba1cd328447d2247c8b9c55d",
+        "url": "https://api.github.com/repos/pragmaticalabs/pragmatica/commits/c396d4aef38fca95ba1cd328447d2247c8b9c55d",
+        "html_url": "https://github.com/pragmaticalabs/pragmatica/commit/c396d4aef38fca95ba1cd328447d2247c8b9c55d"
+      }
+    ]
+  },
+  "_links": {
+    "self": "https://api.github.com/repos/pragmaticalabs/pragmatica/branches/release-1.0.0-rc5",
+    "html": "https://github.com/pragmaticalabs/pragmatica/tree/release-1.0.0-rc5"
+  },
+  "protected": true,
+  "protection": {
+    "enabled": true,
+    "required_status_checks": {
+      "enforcement_level": "non_admins",
+      "contexts": [
+        "build-and-test",
+        "forge-tests",
+        "fragment",
+        "ember-shard-1",
+        "ember-shard-2",
+        "stub-suites",
+        "ember-shard-3",
+        "consensus-shard-1",
+        "consensus-shard-2"
+      ],
+      "checks": [
+        {
+          "context": "build-and-test",
+          "app_id": 15368
+        },
+        {
+          "context": "forge-tests",
+          "app_id": 15368
+        },
+        {
+          "context": "fragment",
+          "app_id": 15368
+        },
+        {
+          "context": "ember-shard-1",
+          "app_id": 15368
+        },
+        {
+          "context": "ember-shard-2",
+          "app_id": 15368
+        },
+        {
+          "context": "stub-suites",
+          "app_id": 15368
+        },
+        {
+          "context": "ember-shard-3",
+          "app_id": 15368
+        },
+        {
+          "context": "consensus-shard-1",
+          "app_id": 15368
+        },
+        {
+          "context": "consensus-shard-2",
+          "app_id": 15368
+        }
+      ]
+    }
+  },
+  "protection_url": "https://api.github.com/repos/pragmaticalabs/pragmatica/branches/release-1.0.0-rc5/protection"
+}

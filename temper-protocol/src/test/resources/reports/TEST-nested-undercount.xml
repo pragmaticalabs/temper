@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- @Nested classes: surefire's tests= counts 3, but 5 testcases are reported. Counts must use 5. -->
+<testsuite name="org.example.EmberConfigBasePortTest" tests="3" failures="0" errors="0" skipped="0" time="0.1">
+  <testcase name="outerTest" classname="org.example.EmberConfigBasePortTest" time="0.01"/>
+  <testcase name="defaultsA" classname="org.example.EmberConfigBasePortTest$Defaults" time="0.01"/>
+  <testcase name="defaultsB" classname="org.example.EmberConfigBasePortTest$Defaults" time="0.01"/>
+  <testcase name="overrideA" classname="org.example.EmberConfigBasePortTest$Overrides" time="0.01"/>
+  <testcase name="overrideB" classname="org.example.EmberConfigBasePortTest$Overrides" time="0.01"/>
+</testsuite>

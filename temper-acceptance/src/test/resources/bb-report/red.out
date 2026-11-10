@@ -1,0 +1,7 @@
+rc=1 wall=5640s
+[INFO] BUILD FAILURE
+reactor SUCCESS lines: 1  FAILURE: 1  SKIPPED: 0
+report XML newer than marker: 26 files (older, excluded:        0)
+<testcase> elements: 293  failures: 1  errors: 1  skipped: 0  (testsuite tests= attribute sum: 177, known @Nested undercount)
+FAILED: org.pragmatica.postgres.CrossTypeConversionTest
+FAILED: org.pragmatica.postgres.PipelineTest

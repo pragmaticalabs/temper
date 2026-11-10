@@ -1,0 +1,20 @@
+# Host config of the bb tools (bb-temper, bb-drift, bb-submit, install-bb-fields.sh) and of the Mac-side scripts that reach
+# the build host (ops/deploy/lib.sh, ops/kiln/kiln-work, ops/mac/temper-deadman). Copy to ~/.config/bb-temper/hosts
+# (or name another file in BB_TEMPER_HOSTS) and replace every value: the addresses below are documentation addresses
+# (TEST-NET, RFC 5737) and reach nothing. Without this file the tools stop with exit 78 (a missing host is never guessed).
+#
+# One directive per line; '#' starts a comment.
+#   key  <path>                                     the ssh private key for every host below (~/ is $HOME)
+#   host <name> <user@address> <jump> <known_hosts> <pick>
+#     name         [a-z0-9][a-z0-9-]*, not "auto" or "mac"; BB_HOST=<name> and bb-drift's places use it
+#     user@address what ssh connects to
+#     jump         - (direct) or user@address of the host ssh goes THROUGH (ProxyCommand ssh -W)
+#     known_hosts  - (ssh's own) or the file pinning this host's key, StrictHostKeyChecking=yes; set exactly when jump is set
+#     pick         auto: bb-temper's automatic pick may choose it (config order breaks ties); explicit: only BB_HOST=<name>
+# The first auto host is the home host: bb-temper reads the controller's host list through it and falls back to it, and
+# the deploy library, kiln-work and temper-deadman reach the host named bigboy.
+key ~/.ssh/id_ed25519
+host bigboy     builder@192.0.2.10     -                    -                                 auto
+host cloudbb-3  builder@198.51.100.3   builder@192.0.2.10   ~/.config/bb-temper/known_hosts   auto
+host cloudbb-4  builder@198.51.100.4   builder@192.0.2.10   ~/.config/bb-temper/known_hosts   auto
+host cloudbb-d1 builder@198.51.100.11  builder@192.0.2.10   ~/.config/bb-temper/known_hosts   explicit

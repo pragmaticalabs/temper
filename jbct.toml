@@ -1,0 +1,95 @@
+# JBCT lint layering for temper (m0-design §1.2). Explicit globs instead of package-name conventions:
+# temper-domain is pure (no I/O imports, no lift); temper-protocol is the adapter boundary (JSON, frames,
+# process execution, report XML parsing, hashing), where lift(...) is the defining operation.
+# WP2..WP5 add their own module packages here when they need them classified.
+#
+# temper-cli (WP5a) is one adapter as a whole: a client of the controller's API (protocol.api DTOs), whose
+# every command is I/O against the controller, the local files and the terminal. Splitting it into
+# application/bootstrap layers would make each command "depend on an adapter" by construction.
+#
+# temper-domain's manifest/read (WP2, M1) is the manifest engine's parsing boundary: StAX over the effective
+# POM and java.lang.classfile over test classes can fail only by exception, so it lifts; the more specific glob
+# wins over domain.**. The rules (domain/manifest) stay pure.
+#
+# temper-domain's mvn/read (WP1, M1) is the same kind of boundary for the reactor: StAX over the tree's pom.xml
+# files (m1-design §1.6). ReactorModules and the rules that use it (domain/mvn, refusal, plan) stay pure.
+#
+# temper-controller, temper-store and temper-worker (R-4, M1), one line per package below, decided by what each
+# package imports and does. The application layer is the controller's use cases and policies: they see domain and
+# store-port types only, never a wire type (protocol.*) or an adapter; wire input is read by the adapter that receives
+# it. temper-worker is adapters throughout, because every package drives a process, a file, docker or the frame link.
+#
+# store.api (ruling R-10) is the store port the application layer imports, so it is application: it names domain types
+# and its own models only. Its wire forms (EventKind, the result record, counts) are mapped in store.pg (WireRecords),
+# and the store is opened by store.pg's Postgres.connect, no longer by a factory on the port (m0-design §5.3).
+# Fail closed (R-4/R-10 F3): `org.pragmatica.temper.**` is the least specific glob, so every entry below wins over it, and
+# a package listed nowhere is judged as domain, the strictest layer; the census stays at 0 unclassified by construction.
+# For an unlisted package the lint fails the build on what it matches: an import of a JDK I/O package (JBCT-MIX-01), an
+# import of store, protocol or adapter code (JBCT-ARCH-01), and a textual `lift(` call (JBCT-ARCH-02). It does not see
+# I/O that needs none of these: `ProcessBuilder` (java.lang, never imported), a fully-qualified `java.nio.file.Files`
+# with no import, and a `Result::lift` method reference all build green (verification F-5).
+#
+# kiln (F1): kiln-core is pure, so it is domain as a whole: its decoders use JsonMapper.readString, which answers a
+# Result, so they need no lift. `org.pragmatica.kiln.**` fails closed as temper's glob does. kiln-service is adapters
+# throughout (config, store, HTTP clients, git, ssh, the server); its root package (Main, Kiln) is wiring only.
+[lint.layers]
+domain = ["org.pragmatica.temper.domain.**", "org.pragmatica.temper.**", "org.pragmatica.kiln.core.**",
+          "org.pragmatica.kiln.**"]
+application = [
+    "org.pragmatica.temper.store.api.**", # the store port: repositories, rows and models over domain types only
+    "org.pragmatica.temper.controller.cancel.**", # CancelJob use case over the store port, Wake and the UnitCanceller step
+    "org.pragmatica.temper.controller.digest.**", # the agent digest: fork-join of the store's snapshot and the links' state
+    "org.pragmatica.temper.controller.flow.**", # Promise combinators (batches, fork-join, serial); no I/O, no lift
+    "org.pragmatica.temper.controller.policy.**", # grant and reconcile policies, pure over domain and store-port types
+    "org.pragmatica.temper.controller.result.**", # JobDecision: the verdict closure the store calls, pure
+    "org.pragmatica.temper.controller.signal.**", # the in-process wake signal; no I/O
+    "org.pragmatica.temper.controller.submit.**", # SubmitJob use case; git, POM parsing and hashing come in as steps
+    "org.pragmatica.temper.controller.task.**", # task use cases (create, claim, close) and the sweeper over the store port (M3a WP-1)
+]
+adapter = [
+    "org.pragmatica.temper.protocol.**", "org.pragmatica.temper.cli.**",
+    "org.pragmatica.temper.domain.manifest.read.**", "org.pragmatica.temper.domain.mvn.read.**",
+    "org.pragmatica.temper.store.pg.**", # the Postgres implementation of the store port: SQL, jsonb, migrations, lift
+    "org.pragmatica.temper.controller.api.**", # HTTP routes: protocol.api DTOs in and out
+    "org.pragmatica.temper.controller.config.**", # TOML and file reading into ControllerConfig
+    "org.pragmatica.temper.controller.events.**", # event delivery rendered to the protocol.api wire form
+    "org.pragmatica.temper.controller.fleet.**", # the fleet stream: kiln pull over HTTP, the high-water file, self-check probes, routes; lifts
+    "org.pragmatica.temper.controller.evidence.**", # evidence pull over SSH, tarballs and files; lifts
+    "org.pragmatica.temper.controller.git.**", # the git CLI and the POM reading behind the submit's steps
+    "org.pragmatica.temper.controller.host.**", # worker links: SSH, frames, protocol.message; lifts
+    "org.pragmatica.temper.controller.http.**", # the HTTP server glue (pragmatica http, bearer token)
+    "org.pragmatica.temper.controller.maintenance.**", # pg_dump as a process, on a timer; lifts
+    "org.pragmatica.temper.controller.retention.**", # retention GC: deletes files and drives host links and pg_dump
+    "org.pragmatica.temper.controller.scheduler.**", # the timer loop that grants over host links; lifts
+    "org.pragmatica.temper.controller.t2.**", # the T2 merge gate: the detector loop over the fleet writer and the T2 store, jsonb payloads
+    "org.pragmatica.temper.controller.review.**", # the PR-author and review routes: GitHub client over the JDK HTTP client, the carry proof over git
+    "org.pragmatica.temper.controller.t3.**", # the T3 bb ticket owners: the Mac post route over the Mac store, a JSON body read into the store's rows
+    "org.pragmatica.temper.worker", # Main, the assembly and the worker's shared WorkerError/InFlight/Serial
+    "org.pragmatica.temper.worker.config.**", # worker config files and paths
+    "org.pragmatica.temper.worker.docker.**", # the docker CLI
+    "org.pragmatica.temper.worker.facts.**", # /proc, cgroup and bb-queue probes
+    "org.pragmatica.temper.worker.gc.**", # job directory GC on disk
+    "org.pragmatica.temper.worker.host.**", # host lock file and the state scan for Hello
+    "org.pragmatica.temper.worker.link.**", # the frame link to the controller
+    "org.pragmatica.temper.worker.manifest.**", # the manifest collector over the effective POM and test classes
+    "org.pragmatica.temper.worker.unit.**", # unit launch, watch, hold, collect: docker, files, processes
+    "org.pragmatica.temper.worker.workspace.**", # git seeding and tree preparation on disk
+    # temper-acceptance (WP7, M1): the T1/T2 trust tooling and the sizing report, like temper-cli one adapter as a whole:
+    # a client of the controller's wire API (protocol.api DTOs and ReportParser), bb-* files, git and processes.
+    "org.pragmatica.temper.acceptance.**",
+    "org.pragmatica.temper.ghapp.**", # github-app-auth: key files, the JWT signature, the mint over the JDK HTTP client
+    "org.pragmatica.temper.merge.store.**", # temper-merge (#101): the job files and the events.log, on disk; lifts
+    "org.pragmatica.temper.merge.cli.**", # temper-merge: the submit/status/serve commands and the service loop over the store
+    "org.pragmatica.kiln.service.**", # kiln-service: config, store, GitHub/temper HTTP, git mirror, ssh scan, the server
+]
+bootstrap = [
+    "org.pragmatica.temper.controller", # Main and Controller: wiring only, nothing imports them
+    "org.pragmatica.kiln.service", # kiln's Main and Kiln: wiring only
+    "org.pragmatica.temper.merge", # temper-merge's Main: wiring and the serve loop only
+]
+
+# R-4/R-10 F1: a textual `lift(` call outside adapter code fails the build (the plugin's default is a warning). It is a
+# text match: a `Result::lift` method reference is not caught, and I/O that needs no lift is caught only by JBCT-MIX-01's
+# import check, with the gaps listed in the fail-closed note above.
+[lint.rules]
+JBCT-ARCH-02 = "error"

@@ -1,0 +1,12 @@
+# Runs temper-alarm.service every 10 minutes; Persistent=true runs a check missed while the host was off at the next
+# boot. Install as the controller's user on the build host, then enable this timer.
+[Unit]
+Description=temper maintenance alarm, every 10 minutes
+
+[Timer]
+OnCalendar=*:0/10
+Persistent=true
+Unit=temper-alarm.service
+
+[Install]
+WantedBy=timers.target

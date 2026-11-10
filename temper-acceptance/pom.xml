@@ -1,0 +1,244 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>org.pragmatica.temper</groupId>
+        <artifactId>temper-parent</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+    </parent>
+
+    <!-- M1 acceptance and trust tooling (m1-design §7 "temper-acceptance", §8, §9; WP7). Built only with -Pacceptance.
+         Three tiers:
+           unit    surefire, *Test: the T1 comparison and the bb-report parser on captured outputs;
+           docker  failsafe, *IT tagged `docker`: the real controller (Postgres via Testcontainers) and the real worker
+                   (a separate JVM speaking frames over pipes, as over ssh) building the fixture project in the runner
+                   image (ManifestOracleIT, CrashedForkIT);
+           host    failsafe, *IT tagged `host`: bb-hold on a real host (BbHoldReattachIT). Excluded unless the
+                   property temper.host is set (profile host-tier below); see README.md for the exact commands. -->
+    <artifactId>temper-acceptance</artifactId>
+    <name>temper acceptance</name>
+
+    <properties>
+        <acceptance.groups/>
+        <acceptance.excludedGroups>host</acceptance.excludedGroups>
+        <kiln.live/>
+        <kiln.tokenFile/>
+        <temper.cli.jar>${project.basedir}/../temper-cli/target/temper-cli-${project.version}.jar</temper.cli.jar>
+        <temper.worker.jar>${project.basedir}/../temper-worker/target/temper-worker-${project.version}-all.jar</temper.worker.jar>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.pragmatica.temper</groupId>
+            <artifactId>temper-test-support</artifactId>
+            <type>test-jar</type>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.tngtech.archunit</groupId>
+            <artifactId>archunit-junit5</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.pragmatica.temper</groupId>
+            <artifactId>temper-domain</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.pragmatica.temper</groupId>
+            <artifactId>temper-protocol</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.pragmatica-lite</groupId>
+            <artifactId>core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.pragmatica-lite</groupId>
+            <artifactId>jackson</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>ch.qos.logback</groupId>
+            <artifactId>logback-classic</artifactId>
+        </dependency>
+
+        <!-- The real controller and worker for the docker and host tiers: their main jars are their own classes only
+             (the shaded runnable ones are attached as `-all`, F5), so temper-domain, temper-store and temper-protocol
+             come from their own jars whatever the order here. -->
+        <dependency>
+            <groupId>org.pragmatica.temper</groupId>
+            <artifactId>temper-store</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.pragmatica.temper</groupId>
+            <artifactId>temper-controller</artifactId>
+            <version>${project.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.pragmatica.temper</groupId>
+            <artifactId>temper-worker</artifactId>
+            <version>${project.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <!-- kiln's live smoke (K-15, KilnLiveSmokeIT): kiln's GitHub poller and store, in this JVM. -->
+        <dependency>
+            <groupId>org.pragmatica.temper</groupId>
+            <artifactId>kiln-service</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- Build order only: the ITs run the CLI's shaded jar as a process (temper.cli.jar), never on the classpath
+             (its slf4j-nop would compete with logback). -->
+        <dependency>
+            <groupId>org.pragmatica.temper</groupId>
+            <artifactId>temper-cli</artifactId>
+            <version>${project.version}</version>
+            <type>pom</type>
+            <scope>test</scope>
+            <exclusions>
+                <exclusion>
+                    <groupId>*</groupId>
+                    <artifactId>*</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.assertj</groupId>
+            <artifactId>assertj-core</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <testResources>
+            <!-- The fixture projects are copied verbatim: their poms carry Maven expressions of their own. -->
+            <testResource>
+                <directory>src/test/resources</directory>
+                <filtering>false</filtering>
+            </testResource>
+        </testResources>
+        <plugins>
+            <!-- One runnable jar for the T1/T2/sizing harnesses on the controller host (scripts/*.sh). -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-shade-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>shade</goal>
+                        </goals>
+                        <configuration>
+                            <!-- Attached as `-all`, never replacing the main jar: failsafe puts the main artifact first on
+                                 the test classpath, and a shaded main jar would shadow the temper-domain under test
+                                 (a stale one survives the jar plugin's up-to-date check). -->
+                            <shadedArtifactAttached>true</shadedArtifactAttached>
+                            <shadedClassifierName>all</shadedClassifierName>
+                            <createDependencyReducedPom>false</createDependencyReducedPom>
+                            <transformers>
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+                            </transformers>
+                            <filters>
+                                <filter>
+                                    <artifact>*:*</artifact>
+                                    <excludes>
+                                        <exclude>META-INF/*.SF</exclude>
+                                        <exclude>META-INF/*.DSA</exclude>
+                                        <exclude>META-INF/*.RSA</exclude>
+                                        <exclude>META-INF/MANIFEST.MF</exclude>
+                                        <exclude>module-info.class</exclude>
+                                        <exclude>META-INF/versions/*/module-info.class</exclude>
+                                    </excludes>
+                                </filter>
+                            </filters>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <!-- The unit tier checks HostSettings' derived build version (D-6) against these. -->
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <systemPropertyVariables>
+                        <project.version>${project.version}</project.version>
+                        <temper.judge>${temper.judge}</temper.judge>
+                    </systemPropertyVariables>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <version>3.5.4</version>
+                <configuration>
+                    <groups>${acceptance.groups}</groups>
+                    <excludedGroups>${acceptance.excludedGroups}</excludedGroups>
+                    <systemPropertyVariables>
+                        <temper.cli.jar>${temper.cli.jar}</temper.cli.jar>
+                        <temper.worker.jar>${temper.worker.jar}</temper.worker.jar>
+                        <temper.ops.dir>${project.basedir}/../ops</temper.ops.dir>
+                        <temper.acceptance.target>${project.build.directory}</temper.acceptance.target>
+                        <project.version>${project.version}</project.version>
+                        <temper.judge>${temper.judge}</temper.judge>
+                        <kiln.live>${kiln.live}</kiln.live>
+                        <kiln.tokenFile>${kiln.tokenFile}</kiln.tokenFile>
+                    </systemPropertyVariables>
+                </configuration>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>integration-test</goal>
+                            <goal>verify</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+
+    <profiles>
+        <!-- The host tier: -Dtemper.host=<name> runs the `host` ITs ONLY (the docker tier is excluded), on the host
+             itself. Every host IT also skips itself unless temper.host is set, so dropping these excludes runs
+             nothing by accident. -->
+        <profile>
+            <id>host-tier</id>
+            <activation>
+                <property>
+                    <name>temper.host</name>
+                </property>
+            </activation>
+            <properties>
+                <acceptance.groups>host</acceptance.groups>
+                <acceptance.excludedGroups>docker</acceptance.excludedGroups>
+            </properties>
+        </profile>
+        <!-- kiln's live smoke (K-15, kiln-f1-design §7.2): -Pacceptance -Dkiln.live runs KilnLiveSmokeIT ONLY (tags `host`
+             and `kiln-live`), against the real GitHub with the token read by path (-Dkiln.tokenFile, default
+             ~/.config/kiln/github-token); the test also skips itself unless kiln.live is set. -->
+        <profile>
+            <id>kiln-live</id>
+            <activation>
+                <property>
+                    <name>kiln.live</name>
+                </property>
+            </activation>
+            <properties>
+                <acceptance.groups>kiln-live</acceptance.groups>
+                <acceptance.excludedGroups>docker</acceptance.excludedGroups>
+            </properties>
+        </profile>
+    </profiles>
+</project>

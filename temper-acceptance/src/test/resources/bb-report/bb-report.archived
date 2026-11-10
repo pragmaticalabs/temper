@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# ARCHIVED COPY, read-only use in tests: bigboy ~/tools/bb-report as copied to the scratchpad on 2026-10-13
+# (~/temper-wt/scratch-archive-2026-10-13/4d4552c4-e892-4abb-8746-fbe3687860a6/bbtools/bb-report). It made the
+# captures of this directory (capture.sh) and is the bb-report of the docker-tier T1HarnessIT. Never edited here.
+# bb-report <checkout-dir> -- summarise the last bb-build: rc, wall time, reactor, tests from XML newer than run.marker.
+# EMPTY RUN (2026-09-29, s6): a run that REQUESTED tests (phase test|package|integration-test|verify|install|deploy,
+# without -DskipTests / -Dmaven.test.skip) but left 0 <testcase> in XML newer than the marker is NOT a pass, whatever
+# Maven's rc says: e.g. `-fn` on a fresh checkout hits DependencyResolutionException, tests nothing, and exits 0.
+# The run's args come from .bb/args (written by bb-build at launch) or, for older runs, from the matching queue ticket.
+# Exit: 0 report printed | 3 EMPTY RUN | 1 no rc yet (still running, or never started).
+set -uo pipefail
+CO=$(cd "$1" && pwd); B=$CO/.bb; L=$B/build.log
+[ -f "$B/rc" ] || { echo "no rc yet: build still running (or never started)"; exit 1; }
+echo "rc=$(cat "$B/rc") wall=$(( $(cat "$B/end") - $(cat "$B/start") ))s"
+grep -E '^\[INFO\] BUILD (SUCCESS|FAILURE)' "$L"
+echo "reactor SUCCESS lines: $(grep -cE '^\[INFO\] .* SUCCESS \[' "$L")  FAILURE: $(grep -cE '^\[INFO\] .* FAILURE \[' "$L")  SKIPPED: $(grep -cE '^\[INFO\] .* SKIPPED$' "$L")"
+DRE=$(grep -cE 'DependencyResolutionException|Could not resolve dependencies' "$L" || true)
+[ "$DRE" -gt 0 ] && echo "WARNING: $DRE dependency-resolution failure line(s) in the log: some modules were never built or tested (a fresh checkout's .m2-local has no upstream artifacts; install them first)"
+FILES=$(find "$CO" -path "$CO/.m2-local" -prune -o \( -path '*/target/surefire-reports/*.xml' -o -path '*/target/failsafe-reports/*.xml' \) -newer "$B/run.marker" -print)
+STALE=$(find "$CO" -path "$CO/.m2-local" -prune -o \( -path '*/target/surefire-reports/*.xml' -o -path '*/target/failsafe-reports/*.xml' \) ! -newer "$B/run.marker" -print | wc -l)
+N=$(printf '%s\n' "$FILES" | grep -c . || true)
+echo "report XML newer than marker: $N files (older, excluded: $STALE)"
+TC=0
+if [ "$N" -gt 0 ]; then
+  OUT=$(printf '%s\n' "$FILES" | xargs cat | python3 -c '
+import sys,re
+s=sys.stdin.read()
+tc=re.findall(r"<testcase\b[^>]*?(/>|>.*?</testcase>)", s, re.S)
+fail=sum(1 for t in tc if "<failure" in t); err=sum(1 for t in tc if "<error" in t); skip=sum(1 for t in tc if "<skipped" in t)
+attr=sum(int(x) for x in re.findall(r"<testsuite\b[^>]*?\btests=\"(\d+)\"", s))
+print(f"<testcase> elements: {len(tc)}  failures: {fail}  errors: {err}  skipped: {skip}  (testsuite tests= attribute sum: {attr}, known @Nested undercount)")')
+  echo "$OUT"; TC=$(echo "$OUT" | sed -n 's/^<testcase> elements: \([0-9]*\).*/\1/p')
+  grep -lE '<(failure|error)\b' $FILES 2>/dev/null | sed 's|.*/TEST-||; s|\.xml$||' | sed 's/^/FAILED: /'
+fi
+# did this run REQUEST tests? args from .bb/args, else from the queue ticket whose started= matches .bb/start
+ARGS=""
+if [ -f "$B/args" ]; then ARGS=$(cat "$B/args")
+else
+  Q=${BB_TEST_QUEUE_ROOT:-$HOME/work/queue}; ST=$(cat "$B/start" 2>/dev/null)
+  for t in $(grep -l "^co=$CO\$" "$Q"/done/* "$Q"/running/* 2>/dev/null); do
+    [ "$(sed -n 's/^started=//p' "$t" | tail -1)" = "$ST" ] && ARGS=$(sed -n 's/^args=//p' "$t" | tail -1)
+  done
+fi
+eval "A=($ARGS)"; [ ${#A[@]} -gt 0 ] || A=(clean install)   # bb-build's default
+WANT=0; SKIP=0
+for a in "${A[@]}"; do case "$a" in test|package|integration-test|verify|install|deploy) WANT=1;; -DskipTests|-DskipTests=true|-Dmaven.test.skip|-Dmaven.test.skip=true) SKIP=1;; esac; done
+if [ "$WANT" = 1 ] && [ "$SKIP" = 0 ] && [ "${TC:-0}" = 0 ]; then
+  echo "EMPTY RUN (0 testcases): not a pass -- the run requested tests (args: ${A[*]}) but no <testcase> was reported$( [ "$DRE" -gt 0 ] && echo "; see the dependency-resolution WARNING above")"
+  exit 3
+fi
+exit 0

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE project [ <!ENTITY secret SYSTEM "file:///etc/passwd"> ]>
+<project>
+  <groupId>org.acme</groupId>
+  <artifactId>&secret;</artifactId>
+</project>

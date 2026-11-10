@@ -1,0 +1,886 @@
+#!/usr/bin/env bash
+# kiln-scan -- the ONLY command kiln's scan key may run on a host (kiln-f1-design §3.2, §5; pr-tracker-spec §5.2).
+#
+# Installed as ~/tools/kiln-scan and bound to kiln's key by a forced command in ~/.ssh/authorized_keys:
+#   restrict,command="exec ~/tools/kiln-scan" ssh-ed25519 AAAA... kiln-scan
+#
+# The request arrives in $SSH_ORIGINAL_COMMAND, single-space separated, and must be EXACTLY one of:
+#   scan <root>...      one JSON line per directory the roots match, then the trailer (the line format is the javadoc
+#                       of kiln-core's ScanLine; ScanOutcome.of judges it). stdin is read to its end FIRST, before any
+#                       check: a newline-separated list of checkout paths that get full facts (a "checkout" line);
+#                       every other checkout gets a "stub" line (path, activityAt, commonDir: three stats, no git).
+#                       An empty stdin means full facts for every checkout. A non-git directory gets a "nonGit" line.
+#                       A checkout whose full facts cannot be read or trusted gets a stub line: kiln keeps its previous
+#                       facts rather than reading a failure as facts (see "Stubs" below). The trailer also carries
+#                       "home": $HOME's on-disk spelling (`cd ~ && pwd -P`), the expansion of every `~` root; a HOME
+#                       that cannot be entered is a read error (74).
+#   reach <sha>...      at most 200 SHAs, each 40 lowercase hex: per SHA {"sha":..,"ref":<the first ref of
+#                       ~/work/pragmatica.git containing it, or null>}, then {"end":true,"count":N}. With no such
+#                       bare, or the SHA not a commit in it, the ref is null.
+#   size <root> <path>  {"path":..,"kb":N}, `du -sk` of one directory the root matches, or one under such a match
+#                       (the root passes the rules below; the path is absolute, canonical (`cd -P` gives it back), no
+#                       symbolic link, and no hard exclusion; else 64). 66 when the path is no directory; 74 when
+#                       `du` fails (a directory under it cannot be read), with nothing written.
+#   tickets            READ-ONLY (T3 contract C3.3): `exec "$HOME/tools/bb-tickets"`, the bb queue's JSON lines and trailer, for
+#                       `[fleet] bbHosts` hosts read over this key. No other word may follow. 69 when ~/tools/bb-tickets is not
+#                       installed. Over ssh only: the argv form (the Mac, which has no bb queue) refuses it with 64.
+# Everything else exits 64, before anything is scanned. On the Mac (spec §5.4) it runs as `kiln-scan scan <root>...`:
+# with SSH_ORIGINAL_COMMAND unset the request is argv, and stdin is not read (every checkout gets full facts), so a
+# caller's open stdin cannot hang it.
+#
+# Roots: `/abs/...` or `~/...` (`~` is $HOME). Every component is [A-Za-z0-9._@+-] plus `*`, never empty, `.` or `..`;
+# `*` may appear in any component after the first and matches exactly one component (any run of characters, a leading
+# `.` only when the component starts with `.`, as in the shell); `**` is refused. The script expands roots itself,
+# component by component, matching names against a regex built from the validated word: never eval, never an unquoted
+# root. Only directories match. Symbolic links under a root (any entry from the first `*` on) are ignored: never
+# listed, never counted, never followed; the components before the first `*` are the root's own spelling and may be one.
+# A match that a symbolic link replaces during the scan is skipped the same way (it is gone).
+# Paths: every path is the directory's on-disk spelling (`cd -P <dir> && pwd -P`). One directory is listed once, under
+# the first root that matched it: two matches are one directory when their device:inode is one (a second root naming it
+# differently, or on the Mac a second case spelling, which `pwd -P` keeps as typed). A name holding a control
+# character, U+2028/U+2029 or bytes that are not UTF-8 cannot be a scan path; it is skipped, noted on stderr.
+# Never listed (hard exclusions, here and not in kiln's config): ~/work/pragmatica.git and ~/work/m2-seed and anything
+# under them, anything under ~/.temper/jobs, and any match that is the parent directory of another root of the same
+# call (a proper ancestor of its literal prefix, or that prefix itself when the root holds a `*`), so `~/work/*` beside
+# `~/work/co/*` does not list `~/work/co`.
+# Read errors: a root whose fixed part (the components before its first `*`, or the whole root without one) is missing
+# or no directory (a vanished or unmounted root must never read as "nothing there"), a directory on the way to a match
+# that cannot be listed or searched, a match or its `.git` that cannot be read, a `stat` that fails: the call ends at
+# once with 74 and NO trailer (lines already written stay), so kiln reads the listing as incomplete and deletes nothing.
+# A directory that VANISHED between the listing and its being read (a checkout removed mid-scan: it is absent from a parent
+# that is searchable, ENOENT; absent only because an ancestor lost search permission, EACCES, is not vanished) is skipped like a replaced symbolic link, never a read error: no line, not counted. Only
+# below the first `*`, never the root's fixed part (that stays a read error). A directory that still exists and cannot
+# be read (permissions, EIO) stays 74. The existence is re-tested once after the failure, never looped: a directory that
+# vanishes after that test is the next failure's, still 74 or a skip. `size`: a failed `du` is retried once (a
+# subdirectory that vanished mid-walk is not in the second walk; an unreadable one fails again, 74); when it fails
+# again and the path itself is gone, 66, as for a path that is no directory.
+# An unreadable directory is never called non-git: a "nonGit" line needs positive evidence, the directory readable and
+# searchable when it is classified and still after its `.git` was not found; a directory that lost either since the
+# listing (a race) is a read error too.
+#
+# Facts of a checkout line: head (HEAD^{commit}, null when unborn), branch (null when detached), remote (origin's URL
+# without its userinfo, or null when that cannot be told apart), branches (refs/heads with tips), modified and
+# untracked (`git status --porcelain`, so ignored and skip-worktree paths do not count), stash (the reflog of
+# refs/stash, shared by every worktree of a common dir), op (rebase, merge, cherry-pick, revert or bisect in progress),
+# activityAt (the newest mtime of the worktree's git dir HEAD, index and logs/HEAD), processes (PIDs of the scanning
+# user whose cwd is the checkout or under it), maven (one of them runs
+# org.codehaus.plexus.classworlds.launcher.Launcher), commonDir, salvageRefs (refs/salvage/*).
+# Stubs: a listed checkout gets a stub line instead when (1) git, kept inside it (its parent is the ceiling of git's
+# repository search), does not name it as its own top level (an interrupted clone, unreadable objects, core.worktree
+# elsewhere: never facts of another repository); (2) its config, includes followed, defines a filter driver
+# (filter.<x>.clean, .smudge or .process: `git status` would run it), or its index holds a submodule (`git status`
+# would run git there, with that repository's config), or it is a partial clone (extensions.partialClone or any
+# remote.<x>.promisor set: `git status` would fetch a missing object, running the remote's upload-pack); (3) a branch
+# name, HEAD's or a local one, fails the branch rule below; (4) git fails or a value is not UTF-8 (the common dir's
+# spelling among them). The rest of the scan stays complete.
+# Branch rule (never looser than kiln-core's BranchName): ASCII [A-Za-z0-9._/-] only; no component starting with `.` or
+# `-`, none ending in `.lock`; no `..`, no `//`; not `HEAD` or `@`; no leading `/`, no trailing `/` or `.`.
+# Process probe, once per call: Linux reads /proc/[0-9]*/cwd of the caller's uid; macOS (uname -s = Darwin) runs one
+# `lsof -a -d cwd -u "$USER" -Fn`. A probe that lists no process at all (not even this script) fails the call (70).
+#
+# Writes nothing, runs nothing of a repository's: every git call is `GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+# GIT_OPTIONAL_LOCKS=0 GIT_NO_LAZY_FETCH=1 GIT_ALLOW_PROTOCOL=none git --no-optional-locks -c core.hooksPath=/dev/null
+# -c core.fsmonitor=false -c protocol.allow=never` (only the repository's own config is read), so `git status` never
+# refreshes the index (an agent's concurrent commit never meets our index.lock) and starts no fsmonitor daemon; no
+# transport can run (GIT_ALLOW_PROTOCOL overrides a repository's protocol.<x>.allow, protocol.allow=never is the
+# config's own default; GIT_NO_LAZY_FETCH is honoured from git 2.44): no fetch, no lazy fetch, no gc, no filter (see
+# Stubs). No temporary file: no here-string or here-document.
+# It runs under `nice -n 19`, plus `ionice -c3` when `command -v ionice` finds one (not on macOS, erratum E-2).
+# bash 3.2 with BSD tools (macOS) and bash 5 with GNU tools (Linux). A failure anywhere ends the call before the
+# trailer, so kiln reads the listing as incomplete and deletes nothing.
+set -euo pipefail
+
+if [ "${KILN_SCAN_NICED:-}" != 1 ]; then
+  export KILN_SCAN_NICED=1
+  if command -v ionice >/dev/null 2>&1; then
+    exec nice -n 19 ionice -c3 "$BASH" "$0" "$@"
+  fi
+  exec nice -n 19 "$BASH" "$0" "$@"
+fi
+
+export LC_ALL=C
+unset CDPATH GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES \
+  GIT_NAMESPACE GIT_CEILING_DIRECTORIES GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT
+shopt -s nullglob
+shopt -u patsub_replacement 2>/dev/null || true
+# The scan's own processes must never sit inside a checkout.
+cd /
+
+MAVEN_MAIN=org.codehaus.plexus.classworlds.launcher.Launcher
+ROOT_COMPONENT_RE='^[A-Za-z0-9._@+*-]+$'
+SHA_RE='^[0-9a-f]{40}$'
+MAX_SHAS=200
+
+die() {
+  echo "kiln-scan: $2" >&2
+  exit "$1"
+}
+
+warn() {
+  echo "kiln-scan: $1" >&2
+}
+
+g() {
+  GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_OPTIONAL_LOCKS=0 GIT_NO_LAZY_FETCH=1 GIT_ALLOW_PROTOCOL=none \
+    git --no-optional-locks -c core.hooksPath=/dev/null -c core.fsmonitor=false -c protocol.allow=never "$@"
+}
+
+# gat <checkout> <arg>...: git in the checkout, its parent the ceiling, so git never searches above it for a repository.
+gat() {
+  local p=$1 up=${1%/*}
+  shift
+  GIT_CEILING_DIRECTORIES=${up:-/} g -C "$p" "$@"
+}
+
+# devino <path>: prints device:inode.
+devino() {
+  stat "${STAT_ID[@]}" "$1"
+}
+
+# branch_ok <name>: the branch rule of the header.
+branch_ok() {
+  [[ $1 =~ ^[A-Za-z0-9._/-]+$ ]] || return 1
+  case $1 in
+    HEAD | @ | /* | */ | *. | *..* | *//* | .* | */.* | -* | */-* | *.lock | *.lock/*) return 1 ;;
+  esac
+}
+
+# redact <url>: sets REMOTE to the URL without its userinfo: through the last `@` of a URL's authority, or of an
+# scp-like `[user@]host:path` before its last `:`. A URL with an `@` past its authority (userinfo holding a `/`, or an
+# `@` in the path) cannot be told apart, so REMOTE is empty: nothing that held userinfo is ever written.
+redact() {
+  local u=$1 scheme rest auth
+  REMOTE=$u
+  if [[ $u =~ ^[A-Za-z][A-Za-z0-9+.-]*:// ]]; then
+    scheme=${BASH_REMATCH[0]}
+    rest=${u#"$scheme"}
+    auth=${rest%%/*}
+    case $auth in
+      *@*) rest=${rest#"${auth%@*}@"} ;;
+    esac
+    case $rest in
+      *@*) REMOTE= ;;
+      *) REMOTE=$scheme$rest ;;
+    esac
+    return 0
+  fi
+  case $u in
+    /* | .* | '~'*) return 0 ;;
+  esac
+  case ${u%%:*} in
+    "$u" | */*) return 0 ;;
+  esac
+  auth=${u%:*}
+  case $auth in
+    *@*) REMOTE=${u#"${auth%@*}@"} ;;
+  esac
+}
+
+# js <string>: sets JS to the string as a JSON string literal. Under LC_ALL=C every byte is one character, so UTF-8
+# passes through unchanged; backslash, quote and every control character are escaped. A global, not a $(...): no fork.
+js() {
+  local s=$1 bs='\' q='"' i c
+  s=${s//"$bs"/"$bs$bs"}
+  s=${s//"$q"/"$bs$q"}
+  case $s in
+    *[[:cntrl:]]*)
+      s=${s//$'\n'/"${bs}n"}
+      s=${s//$'\r'/"${bs}r"}
+      s=${s//$'\t'/"${bs}t"}
+      for ((i = 1; i < 32; i++)); do
+        printf -v c "\\$(printf '%03o' "$i")"
+        s=${s//"$c"/"$(printf '%su%04x' "$bs" "$i")"}
+      done
+      s=${s//$'\x7f'/"${bs}u007f"}
+      ;;
+  esac
+  JS="\"$s\""
+}
+
+# utf8 <string>: whether it is valid UTF-8 (iconv only when a byte above 0x7f is present).
+utf8() {
+  case $1 in
+    *[$'\x80'-$'\xff']*) printf '%s' "$1" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1 ;;
+  esac
+}
+
+# printable <string>: no control character, no U+2028/U+2029, valid UTF-8 (CheckoutPath's alphabet).
+printable() {
+  case $1 in
+    *[[:cntrl:]]* | *$'\xe2\x80\xa8'* | *$'\xe2\x80\xa9'*) return 1 ;;
+  esac
+  utf8 "$1"
+}
+
+# replaced <path>: the path is a symbolic link now, or VANISHED: absent, and the absence is proven by the nearest ancestor
+# that exists being a directory we can search (`-x`), so the entry is not there (ENOENT) rather than hidden (EACCES: an
+# ancestor that lost search permission makes `-e` fail on a path that is still there, and that stays a read error).
+# Only the `test` builtin's -L/-e/-d/-x: no errno, no external command, the same on bash 3.2/BSD and bash 5/GNU.
+replaced() {
+  local p=$1 parent
+  [ -L "$p" ] && return 0
+  [ -e "$p" ] && return 1
+  parent=${p%/*}
+  [ -n "$parent" ] || parent=/
+  [ "$parent" != "$p" ] || return 1
+  if [ -d "$parent" ]; then
+    [ -x "$parent" ]
+  else
+    replaced "$parent"
+  fi
+}
+
+# physical <dir>: the directory's on-disk spelling; fails when it cannot be entered.
+physical() {
+  (cd -P -- "$1" 2>/dev/null && pwd -P)
+}
+
+# valid_root <word>: the root grammar above.
+valid_root() {
+  local word=$1 rest comp first=1
+  case $word in
+    /*) rest=${word#/} ;;
+    "~/"*) rest=${word#\~/} ;;
+    *) return 1 ;;
+  esac
+  while :; do
+    comp=${rest%%/*}
+    [[ $comp =~ $ROOT_COMPONENT_RE ]] || return 1
+    case $comp in
+      . | .. | *'**'*) return 1 ;;
+    esac
+    if [ "$first" = 1 ]; then
+      case $comp in
+        *'*'*) return 1 ;;
+      esac
+      first=0
+    fi
+    if [ "$comp" = "$rest" ]; then
+      return 0
+    fi
+    rest=${rest#*/}
+  done
+}
+
+# glob_re <component>: the component as an anchored regex, `*` matching any run of characters (a name holds no `/`).
+glob_re() {
+  local c=$1 re=
+  while [ -n "$c" ]; do
+    case ${c:0:1} in
+      '*') re+='.*' ;;
+      [A-Za-z0-9_@-]) re+=${c:0:1} ;;
+      *) re+="\\${c:0:1}" ;;
+    esac
+    c=${c:1}
+  done
+  GLOB_RE="^$re\$"
+}
+
+# expand_root <word>: prints each directory the (valid) root matches, one per line, as spelled through the root; from
+# the first `*` on, a symbolic link is skipped. Fails (74) when a directory on the way cannot be listed or searched, and
+# when the root's fixed part (its components before the first `*`, the whole root without one) is not a directory: a
+# vanished or unmounted root is a read error, never an empty listing that would delete every row under it.
+expand_root() {
+  local word=$1 rest comp dir entry name globbed=0 below
+  local -a current next
+  case $word in
+    /*) current=(""); rest=${word#/} ;;
+    *) current=("$HOME_DIR"); rest=${word#\~/} ;;
+  esac
+  while :; do
+    comp=${rest%%/*}
+    next=()
+    below=$globbed
+    case $comp in
+      *'*'*)
+        globbed=1
+        glob_re "$comp"
+        for dir in "${current[@]}"; do
+          if [ ! -r "$dir" ] || [ ! -x "$dir" ]; then
+            # a directory a `*` matched that vanished since is skipped; one that is there and unreadable is 74
+            if [ "$below" = 1 ] && replaced "$dir"; then continue; fi
+            return 74
+          fi
+          if [ "${comp:0:1}" = . ]; then
+            set -- "$dir"/.*
+          else
+            set -- "$dir"/*
+          fi
+          for entry in "$@"; do
+            name=${entry##*/}
+            case $name in
+              . | ..) continue ;;
+            esac
+            if [[ $name =~ $GLOB_RE ]] && [ ! -L "$entry" ] && [ -d "$entry" ]; then
+              if printable "$name"; then
+                next+=("$entry")
+              else
+                warn "skipped a name under $dir that is not printable UTF-8"
+              fi
+            fi
+          done
+        done
+        ;;
+      *)
+        for dir in "${current[@]}"; do
+          entry=$dir/$comp
+          if [ "$globbed" = 1 ] && [ -L "$entry" ]; then
+            continue
+          elif [ -d "$entry" ]; then
+            next+=("$entry")
+          elif [ "$globbed" = 0 ]; then
+            warn "the root $word: $entry, part of its fixed prefix, is not a directory"
+            return 74
+          elif [ ! -x "${dir:-/}" ]; then
+            if [ "$globbed" = 1 ] && replaced "$dir"; then continue; fi
+            return 74
+          fi
+        done
+        ;;
+    esac
+    if [ "${#next[@]}" -eq 0 ]; then
+      return 0
+    fi
+    current=("${next[@]}")
+    if [ "$comp" = "$rest" ]; then
+      break
+    fi
+    rest=${rest#*/}
+  done
+  printf '%s\n' "${current[@]}"
+}
+
+# anchor <word>: records the root's literal prefix (the components before its first `*`) for the parent exclusion.
+anchor() {
+  local word=$1 rest comp base kind=L phys
+  case $word in
+    /*) base=; rest=${word#/} ;;
+    *) base=$HOME_DIR; rest=${word#\~/} ;;
+  esac
+  while :; do
+    comp=${rest%%/*}
+    case $comp in
+      *'*'*) kind=G; break ;;
+    esac
+    base=$base/$comp
+    if [ "$comp" = "$rest" ]; then
+      break
+    fi
+    rest=${rest#*/}
+  done
+  phys=$(physical "$base") || phys=$base
+  ANCHOR_KIND+=("$kind")
+  ANCHOR_PATH+=("$phys")
+}
+
+# excluded <path>: the hard exclusions and the parent-of-another-root rule.
+excluded() {
+  local p=$1 i
+  case $p in
+    "$EX_BARE" | "$EX_BARE"/* | "$EX_SEED" | "$EX_SEED"/* | "$EX_JOBS"/*) return 0 ;;
+  esac
+  for ((i = 0; i < ${#ANCHOR_PATH[@]}; i++)); do
+    case ${ANCHOR_PATH[i]} in
+      "$p"/*) return 0 ;;
+    esac
+    if [ "${ANCHOR_KIND[i]}" = G ] && [ "${ANCHOR_PATH[i]}" = "$p" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# candidates <root>...: "path<TAB>root" for every matched directory no exclusion covers, by its on-disk spelling; one
+# directory (one device:inode) once, under the first root that matched it. Fails (74) on a read error.
+candidates() {
+  local word logical phys list id seen=$'\n'
+  for word in "$@"; do
+    list=$(expand_root "$word") || return 74
+    while IFS= read -r logical; do
+      [ -n "$logical" ] || continue
+      if ! phys=$(physical "$logical"); then
+        excluded "$logical" && continue
+        if [[ $word == *'*'* ]] && replaced "$logical"; then continue; fi
+        return 74
+      fi
+      excluded "$phys" && continue
+      if ! printable "$phys"; then
+        warn "skipped a directory whose on-disk path is not printable UTF-8"
+        continue
+      fi
+      if [ ! -r "$phys" ]; then
+        if [[ $word == *'*'* ]] && replaced "$phys"; then continue; fi
+        return 74
+      fi
+      if ! id=$(devino "$phys"); then
+        if [[ $word == *'*'* ]] && replaced "$phys"; then continue; fi
+        return 74
+      fi
+      case $seen in
+        *$'\n'"$id"$'\n'*) continue ;;
+      esac
+      seen+="$id"$'\n'
+      printf '%s\t%s\n' "$phys" "$word"
+    done < <(printf '%s\n' "$list")
+  done
+}
+
+# git_dirs <dir>: sets GITDIR (the worktree's git dir) and COMMONDIR, both on-disk spellings, read from `.git` and
+# `commondir` as git itself finds them. 1: no checkout (no .git, or one naming no directory); 2: a read error (`.git`,
+# the git dir or `commondir` is there but cannot be read). Whether git reads it as a repository is checkout_line's.
+# A common dir whose spelling is not UTF-8 (a worktree of a repository elsewhere) is still a checkout: COMMONDIR is
+# then that spelling with the invalid bytes dropped (a JSON line holds only UTF-8) and LOSSY=1, so it gets a stub.
+git_dirs() {
+  local dir=$1 dotgit=$1/.git gd line=
+  [ -r "$dir" ] && [ -x "$dir" ] || return 2
+  if [ -d "$dotgit" ]; then
+    gd=$dotgit
+  elif [ -f "$dotgit" ]; then
+    [ -r "$dotgit" ] || return 2
+    IFS= read -r line < "$dotgit" || true
+    line=${line%$'\r'}
+    case $line in
+      "gitdir: "?*) gd=${line#gitdir: } ;;
+      *) return 1 ;;
+    esac
+    case $gd in
+      /*) ;;
+      *) gd=$dir/$gd ;;
+    esac
+  else
+    return 1
+  fi
+  [ -d "$gd" ] || return 1
+  [ -r "$gd" ] && [ -x "$gd" ] || return 2
+  GITDIR=$(physical "$gd") || return 2
+  COMMONDIR=$GITDIR
+  if [ -e "$GITDIR/commondir" ]; then
+    [ -r "$GITDIR/commondir" ] || return 2
+    line=
+    IFS= read -r line < "$GITDIR/commondir" || true
+    line=${line%$'\r'}
+    [ -n "$line" ] || return 1
+    case $line in
+      /*) ;;
+      *) line=$GITDIR/$line ;;
+    esac
+    [ -d "$line" ] || return 1
+    COMMONDIR=$(physical "$line") || return 2
+  fi
+  LOSSY=0
+  if ! utf8 "$COMMONDIR"; then
+    COMMONDIR=$(printf '%s' "$COMMONDIR" | iconv -f UTF-8 -t UTF-8 -c 2>/dev/null) || true
+    LOSSY=1
+  fi
+}
+
+# activity: the newest mtime, in epoch seconds, of the worktree git dir's HEAD, index and logs/HEAD (0 when none);
+# fails when stat does.
+activity() {
+  local -a files=()
+  local f t out newest=0
+  for f in "$GITDIR/HEAD" "$GITDIR/index" "$GITDIR/logs/HEAD"; do
+    if [ -e "$f" ]; then
+      files+=("$f")
+    fi
+  done
+  if [ "${#files[@]}" -gt 0 ]; then
+    out=$(stat "${STAT_MTIME[@]}" "${files[@]}") || return 1
+    while IFS= read -r t; do
+      if [ "$t" -gt "$newest" ]; then
+        newest=$t
+      fi
+    done < <(printf '%s\n' "$out")
+  fi
+  ACTIVITY=$newest
+}
+
+is_maven() {
+  local cmd
+  if [ "$OS" = Darwin ]; then
+    cmd=$(ps -o command= -p "$1" 2>/dev/null) || cmd=
+  else
+    cmd=$(tr '\0' ' ' < "/proc/$1/cmdline" 2>/dev/null) || cmd=
+  fi
+  case $cmd in
+    *"$MAVEN_MAIN"*) return 0 ;;
+  esac
+  return 1
+}
+
+# processes <path>: sets PROCS (a JSON array of PIDs whose cwd is the path or under it) and MAVEN.
+processes() {
+  local p=$1 pid sep=
+  PROCS=
+  MAVEN=false
+  case $PROBE in
+    *"$p"*) ;;
+    *) PROCS='[]'; return 0 ;;
+  esac
+  while IFS= read -r pid; do
+    PROCS+="$sep$pid"
+    sep=,
+    if is_maven "$pid"; then
+      MAVEN=true
+    fi
+  done < <(printf '%s\n' "$PROBE" | P=$p awk 'BEGIN { p = ENVIRON["P"] }
+    { i = index($0, "\t"); pid = substr($0, 1, i - 1); cwd = substr($0, i + 1) }
+    i > 1 && pid ~ /^[0-9]+$/ && (cwd == p || index(cwd, p "/") == 1) { print pid }')
+  PROCS="[$PROCS]"
+}
+
+# probe: PROBE = "pid<TAB>cwd" lines of every process of the scanning user, read once per call.
+probe() {
+  local -a cwds
+  PROBE=
+  if [ "$OS" = Darwin ]; then
+    PROBE=$(lsof -a -d cwd -u "$SCAN_USER" -Fn 2>/dev/null \
+      | awk '/^p/ { pid = substr($0, 2) } /^n/ { print pid "\t" substr($0, 2) }') || true
+  else
+    cwds=(/proc/[0-9]*/cwd)
+    if [ "${#cwds[@]}" -gt 0 ]; then
+      PROBE=$(find "${cwds[@]}" -maxdepth 0 -user "$(id -u)" -printf '%h\t%l\n' 2>/dev/null | sed 's|^/proc/||') || true
+    fi
+  fi
+  [ -n "$PROBE" ] || die 70 "the process probe listed no process"
+}
+
+stub_line() {
+  if ! activity; then
+    if replaced "$1"; then return 1; fi
+    die 74 "read error: cannot stat the git dir of a checkout"
+  fi
+  # A checkout that vanished leaves no git dir to stat: activity is then 0, which must not become a line.
+  if replaced "$1"; then return 1; fi
+  js "$1"
+  local path=$JS
+  js "$COMMONDIR"
+  printf '{"kind":"stub","path":%s,"activityAt":%d,"commonDir":%s}\n' "$path" "$ACTIVITY" "$JS"
+}
+
+# unset_in <path> <regex>: no config key of the checkout (includes followed) matches; fails as well when git cannot
+# tell (rc above 1).
+unset_in() {
+  local rc=0
+  gat "$1" config --includes --get-regexp "$2" >/dev/null || rc=$?
+  [ "$rc" = 1 ]
+}
+
+# trusted <path>: git names the checkout as its own top level, its config defines no filter driver and no partial clone,
+# and its index holds no submodule (the header's Stubs 1 and 2). Every other git call of the checkout comes after it.
+trusted() {
+  local p=$1 top id stages
+  id=$(devino "$p") || return 1
+  top=$(gat "$p" rev-parse --show-toplevel) || return 1
+  [ -n "$top" ] && [ "$(devino "$top")" = "$id" ] || return 1
+  unset_in "$p" '^filter\..*\.(clean|smudge|process)$' || return 1
+  unset_in "$p" '^(extensions\.partialclone|remote\..*\.promisor)$' || return 1
+  stages=$(gat "$p" ls-files --stage) || return 1
+  case $'\n'"$stages" in
+    *$'\n'160000' '*) return 1 ;;
+  esac
+}
+
+# checkout_line <path>: prints the full-facts line; fails (the caller then writes a stub) when its common dir is not
+# UTF-8 (LOSSY), the checkout is not trusted, git fails, a branch name fails branch_ok or a value is not UTF-8. Run in
+# a subshell, so it reports failure by its status.
+checkout_line() {
+  local p=$1 head branch remote refs status oid ref line branches= sep= salvage=0 stash=0 modified=0 untracked=0
+  local op=null path common out
+  [ "$LOSSY" = 0 ] || return 1
+  trusted "$p" || return 1
+  head=$(gat "$p" rev-parse -q --verify 'HEAD^{commit}') || head=
+  branch=$(gat "$p" symbolic-ref -q HEAD) || branch=
+  remote=$(gat "$p" config --get remote.origin.url) || remote=
+  refs=$(gat "$p" for-each-ref --format='%(objectname) %(refname)' refs/heads refs/salvage refs/stash) || return 1
+  status=$(gat "$p" status --porcelain --untracked-files=normal) || return 1
+  while read -r oid ref; do
+    case $ref in
+      refs/heads/*)
+        branch_ok "${ref#refs/heads/}" || return 1
+        js "${ref#refs/heads/}"
+        branches+="$sep{\"name\":$JS,\"tip\":\"$oid\"}"
+        sep=,
+        ;;
+      refs/salvage/*) salvage=$((salvage + 1)) ;;
+      refs/stash) stash=$(gat "$p" rev-list --walk-reflogs --count refs/stash) || return 1 ;;
+    esac
+  done < <(printf '%s\n' "$refs")
+  while IFS= read -r line; do
+    case $line in
+      '') ;;
+      '?? '*) untracked=$((untracked + 1)) ;;
+      *) modified=$((modified + 1)) ;;
+    esac
+  done < <(printf '%s\n' "$status")
+  if [ -d "$GITDIR/rebase-merge" ] || [ -d "$GITDIR/rebase-apply" ]; then
+    op='"rebase"'
+  elif [ -f "$GITDIR/MERGE_HEAD" ]; then
+    op='"merge"'
+  elif [ -f "$GITDIR/CHERRY_PICK_HEAD" ]; then
+    op='"cherry-pick"'
+  elif [ -f "$GITDIR/REVERT_HEAD" ]; then
+    op='"revert"'
+  elif [ -f "$GITDIR/BISECT_LOG" ]; then
+    op='"bisect"'
+  fi
+  if [[ $head =~ $SHA_RE ]]; then head="\"$head\""; else head=null; fi
+  case $branch in
+    refs/heads/?*)
+      branch_ok "${branch#refs/heads/}" || return 1
+      js "${branch#refs/heads/}"
+      branch=$JS
+      ;;
+    *) branch=null ;;
+  esac
+  redact "$remote"
+  if [ -n "$REMOTE" ]; then
+    js "$REMOTE"
+    remote=$JS
+  else
+    remote=null
+  fi
+  activity || return 1
+  processes "$p"
+  js "$p"
+  path=$JS
+  js "$COMMONDIR"
+  common=$JS
+  out=$(printf '{"kind":"checkout","path":%s,"head":%s,"branch":%s,"remote":%s,"branches":[%s],"modified":%d,"untracked":%d,"stash":%d,"op":%s,"activityAt":%d,"processes":%s,"maven":%s,"commonDir":%s,"salvageRefs":%d}' \
+    "$path" "$head" "$branch" "$remote" "$branches" "$modified" "$untracked" "$((stash + 0))" "$op" "$ACTIVITY" \
+    "$PROCS" "$MAVEN" "$common" "$salvage")
+  utf8 "$out" || return 1
+  printf '%s\n' "$out"
+}
+
+wants_full() {
+  [ "$ALL_FULL" = 1 ] && return 0
+  case $FULL_LIST in
+    *$'\n'"$1"$'\n'*) return 0 ;;
+  esac
+  return 1
+}
+
+# read_full_list: stdin's non-empty lines, the checkouts that get full facts; none means every checkout.
+read_full_list() {
+  local line
+  FULL_LIST=$'\n'
+  ALL_FULL=1
+  while IFS= read -r line || [ -n "$line" ]; do
+    if [ -n "$line" ]; then
+      FULL_LIST+="$line"$'\n'
+      ALL_FULL=0
+    fi
+  done
+}
+
+# exclusions: the hard exclusions' on-disk spellings.
+exclusions() {
+  EX_BARE=$(physical "$HOME_DIR/work/pragmatica.git") || EX_BARE=$HOME_DIR/work/pragmatica.git
+  EX_SEED=$(physical "$HOME_DIR/work/m2-seed") || EX_SEED=$HOME_DIR/work/m2-seed
+  EX_JOBS=$(physical "$HOME_DIR/.temper/jobs") || EX_JOBS=$HOME_DIR/.temper/jobs
+}
+
+scan() {
+  local word phys root count=0 nongit=0 cands line rc home
+  ANCHOR_KIND=()
+  ANCHOR_PATH=()
+  for word in "$@"; do
+    anchor "$word"
+  done
+  exclusions
+  home=$(physical "$HOME_DIR") || die 74 "read error: HOME cannot be entered"
+  probe
+  cands=$(candidates "$@") || die 74 "read error: a directory on the way to or matched by a root cannot be read"
+  while IFS=$'\t' read -r phys root; do
+    [ -n "$phys" ] || continue
+    # A match replaced by a symbolic link since the listing is skipped, as the symlink rule skips it: checked before it
+    # is classified and again right before its line is written, so no line follows a link to another directory.
+    if replaced "$phys"; then continue; fi
+    rc=0
+    git_dirs "$phys" || rc=$?
+    case $rc in
+      0)
+        if wants_full "$phys" && line=$(checkout_line "$phys"); then
+          if replaced "$phys"; then continue; fi
+          printf '%s\n' "$line"
+        else
+          if replaced "$phys"; then continue; fi
+          stub_line "$phys" || continue
+        fi
+        count=$((count + 1))
+        ;;
+      1)
+        if replaced "$phys"; then continue; fi
+        if [ ! -r "$phys" ] || [ ! -x "$phys" ]; then
+          if replaced "$phys"; then continue; fi
+          die 74 "read error: a match became unreadable while it was classified"
+        fi
+        js "$root"
+        line=$JS
+        js "$phys"
+        printf '{"kind":"nonGit","root":%s,"path":%s}\n' "$line" "$JS"
+        nongit=$((nongit + 1))
+        ;;
+      *)
+        if replaced "$phys"; then continue; fi
+        die 74 "read error: the .git of a match cannot be read"
+        ;;
+    esac
+  done < <(printf '%s\n' "$cands")
+  js "$home"
+  printf '{"end":true,"count":%d,"nonGit":%d,"nonGitBytes":null,"home":%s}\n' "$count" "$nongit" "$JS"
+}
+
+reach() {
+  local bare=$HOME_DIR/work/pragmatica.git sha ref
+  for sha in "$@"; do
+    ref=
+    if [ -d "$bare" ] && g -C "$bare" cat-file -e "$sha^{commit}" 2>/dev/null; then
+      ref=$(g -C "$bare" for-each-ref --contains "$sha" --count=1 --format='%(refname)')
+    fi
+    if [ -n "$ref" ]; then
+      js "$ref"
+      ref=$JS
+    else
+      ref=null
+    fi
+    printf '{"sha":"%s","ref":%s}\n' "$sha" "$ref"
+  done
+  printf '{"end":true,"count":%d}\n' "$#"
+}
+
+# canonical_path <path>: absolute, printable, no empty, `.` or `..` component (CheckoutPath's rule).
+canonical_path() {
+  local rest comp
+  case $1 in
+    /?*) rest=${1#/} ;;
+    *) return 1 ;;
+  esac
+  printable "$1" || return 1
+  while :; do
+    comp=${rest%%/*}
+    case $comp in
+      '' | . | ..) return 1 ;;
+    esac
+    if [ "$comp" = "$rest" ]; then
+      return 0
+    fi
+    rest=${rest#*/}
+  done
+}
+
+# size <root> <path>: `du -sk` of the path when it is one of the root's matches (on-disk spellings) or under one, no
+# hard exclusion, a directory (else 66), and its own on-disk spelling, so no symbolic link (else 64). The root is
+# checked first, so a path outside it gets 64 whether it exists or not.
+size() {
+  local root=$1 p=$2 list m phys kb inside=0
+  ANCHOR_KIND=()
+  ANCHOR_PATH=()
+  exclusions
+  ! excluded "$p" || die 64 "refused: the path is a hard exclusion"
+  list=$(expand_root "$root") || die 74 "read error: a directory on the way to the root's matches cannot be read"
+  while IFS= read -r m; do
+    [ -n "$m" ] || continue
+    phys=$(physical "$m") || continue
+    case $p in
+      "$phys" | "$phys"/*) inside=1 ;;
+    esac
+  done < <(printf '%s\n' "$list")
+  [ "$inside" = 1 ] || die 64 "refused: the path is not under the root"
+  [ -d "$p" ] || die 66 "no such directory"
+  [ ! -L "$p" ] && [ "$(physical "$p")" = "$p" ] || die 64 "refused: the path is not its own on-disk spelling"
+  # One retry, no loop: a subdirectory that vanished mid-walk is absent from the second walk; an unreadable one fails again.
+  kb=$(du -sk -- "$p") || kb=$(du -sk -- "$p") || {
+    if replaced "$p"; then die 66 "no such directory"; fi
+    die 74 "read error: du could not read all of the path"
+  }
+  kb=${kb%%[!0-9]*}
+  [ -n "$kb" ] || die 70 "du printed no size"
+  js "$p"
+  printf '{"path":%s,"kb":%d}\n' "$JS" "$kb"
+}
+
+# split_request <request>: WORDS = its single-space separated words; fails unless joining them gives it back.
+split_request() {
+  local rest=$1 word joined
+  WORDS=()
+  while [ -n "$rest" ]; do
+    word=${rest%% *}
+    [ -n "$word" ] || return 1
+    WORDS+=("$word")
+    case $rest in
+      *' '*) rest=${rest#* } ;;
+      *) rest= ;;
+    esac
+  done
+  [ "${#WORDS[@]}" -gt 0 ] || return 1
+  joined="${WORDS[*]}"
+  [ "$joined" = "$1" ]
+}
+
+main() {
+  local form=argv request word i
+  [[ ${HOME:-} == /* ]] || die 64 "refused: HOME must be an absolute path"
+  HOME_DIR=${HOME%/}
+  OS=$(uname -s)
+  SCAN_USER=${USER:-$(id -un)}
+  if stat -c %Y / >/dev/null 2>&1; then
+    STAT_MTIME=(-c %Y)
+    STAT_ID=(-c %d:%i)
+  else
+    STAT_MTIME=(-f %m)
+    STAT_ID=(-f %d:%i)
+  fi
+  if [ -n "${SSH_ORIGINAL_COMMAND+set}" ]; then
+    form=ssh
+    request=$SSH_ORIGINAL_COMMAND
+    [ -n "$request" ] || die 64 "no command: this key only runs 'scan <root>...', 'reach <sha>...', 'size <root> <path>' or 'tickets'"
+    case $request in
+      *[[:cntrl:]]*) die 64 "refused: control characters in the command" ;;
+    esac
+    split_request "$request" || die 64 "refused: the command must be single-space separated"
+  else
+    [ "$#" -gt 0 ] || die 64 "usage: kiln-scan scan <root>..."
+    WORDS=("$@")
+  fi
+  case ${WORDS[0]} in
+    scan)
+      ALL_FULL=1
+      FULL_LIST=$'\n'
+      if [ "$form" = ssh ]; then
+        read_full_list
+      fi
+      [ "${#WORDS[@]}" -ge 2 ] || die 64 "usage: scan <root>..."
+      for word in "${WORDS[@]:1}"; do
+        valid_root "$word" || die 64 "refused: bad root (an absolute or ~/ path of [A-Za-z0-9._@+-] components, * after the first)"
+      done
+      scan "${WORDS[@]:1}"
+      ;;
+    reach)
+      [ "${#WORDS[@]}" -ge 2 ] || die 64 "usage: reach <sha>..."
+      [ "$((${#WORDS[@]} - 1))" -le "$MAX_SHAS" ] || die 64 "refused: at most $MAX_SHAS SHAs"
+      for ((i = 1; i < ${#WORDS[@]}; i++)); do
+        [[ ${WORDS[i]} =~ $SHA_RE ]] || die 64 "refused: a SHA is 40 lowercase hex"
+      done
+      reach "${WORDS[@]:1}"
+      ;;
+    size)
+      [ "${#WORDS[@]}" -eq 3 ] || die 64 "usage: size <root> <path>"
+      valid_root "${WORDS[1]}" || die 64 "refused: bad root (an absolute or ~/ path of [A-Za-z0-9._@+-] components, * after the first)"
+      canonical_path "${WORDS[2]}" || die 64 "refused: the path must be absolute and canonical"
+      size "${WORDS[1]}" "${WORDS[2]}"
+      ;;
+    tickets)
+      [ "$form" = ssh ] || die 64 "refused: tickets is an ssh-form verb (there is no bb queue here)"
+      [ "${#WORDS[@]}" -eq 1 ] || die 64 "usage: tickets"
+      [ -x "$HOME_DIR/tools/bb-tickets" ] || die 69 "~/tools/bb-tickets not installed"
+      exec "$HOME_DIR/tools/bb-tickets"
+      ;;
+    *)
+      die 64 "refused: only 'scan <root>...', 'reach <sha>...', 'size <root> <path>' and 'tickets' are allowed"
+      ;;
+  esac
+}
+
+main "$@"

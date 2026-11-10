@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# with-kiln-app <cmd> [args...] -- run <cmd> with GH_TOKEN set to a fresh kiln App installation token.
+# The token is in the environment of the exec'd command only: never exported into the
+# calling shell, never written to a file, never on argv. The command's children inherit it, and the same Unix user can
+# read it from /proc/<pid>/environ while it runs: "one command" means one process tree.
+# TEMPER_GH_WRAPPER=1 is set for the minting script alone, so the command does not inherit it.
+set -euo pipefail
+
+[ $# -ge 1 ] || { echo "usage: with-kiln-app <cmd> [args...]" >&2; exit 64; }
+token=$(TEMPER_GH_WRAPPER=1 "$HOME/.local/libexec/temper-gh/gh-app-token" "$HOME/.config/kiln/app.ids" "$HOME/.config/kiln/app-key.pem")
+GH_TOKEN=$token exec "$@"

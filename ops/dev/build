@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+# build -- ONE maven run in this tree, serialised and judged: refuses the flags that make a run report less than it
+# did, holds the tree's build lock for the run, logs everything to .wp-logs/<name>.log, and hands the log to
+# ops/dev/build-report, whose verdict (GREEN, COMPILE-ONLY or RED) and exit code are this script's.
+#
+# Usage (from a tree root): ops/dev/build [--name <log>] [--expect mod1,mod2] -- <maven args>
+#   e.g. ops/dev/build --name wp3-install --expect temper-store -- install
+#
+# Before anything runs, ops/dev/build-args reads the command line, MAVEN_ARGS, .mvn/maven.config, and the -D properties
+# of MAVEN_OPTS, JAVA_TOOL_OPTIONS and .mvn/jvm.config. It refuses (exit 2, naming the flag and where) what makes a
+# run report less than it did: -q, -fn, -T/-b (parallel builds), -l (log elsewhere), -s/-gs (other settings), and
+# properties such as jbct.skip*, maven.test.failure.ignore*, surefire.skip*, skipITs*, maven.main.skip*,
+# maven.resources.skip*, maven.compiler.failOnError* (its docstring has the full list it knows). It names what selects
+# modules (-pl, -rf, -am, -amd, -N, -f) or tests (-Dtest, -Dit.test, -Dgroups, ...): such a run is PARTIAL at best.
+# -DskipTests and -Dmaven.test.skip are allowed; their verdict is COMPILE-ONLY, never GREEN. Refused too: no
+# -Dmaven.repo.local in any channel, an mvn outside ops/dev/maven-homes, a java that is not a native executable, an
+# env var activating a test-selecting profile or read by test configuration, a default settings.xml whose profile can
+# select tests.
+# The lock is .wp-logs/build.lock, taken, extended and released by ops/dev/build-lock (its docstring has the format):
+# its `pid` file lists this wrapper's pid, then maven's (`lstart` has their start times); it is held while either runs.
+# A marker .wp-logs/<name>.marker (HEAD, dirty flag, tree state, selection, args, start, this wrapper's pid and start)
+# is written before maven starts: build-report counts only test reports newer than it, compares the tree state after
+# the run, and runs while this wrapper still holds the lock. Refused too: a tracked file git is told not to see
+# (assume-unchanged, skip-worktree; .mvn/maven.config aside). `clean` is always the first goal (prepended when absent):
+# compiled classes from another state of the sources are not in the tree state. Maven runs with MAVEN_SKIP_RC=1 (no
+# mavenrc files) and without JDK_JAVA_OPTIONS, _JAVA_OPTIONS, MAVEN_DEBUG_OPTS and MAVEN_BASEDIR; the marker records
+# mvn's realpath, `mvn -v`'s first line, JAVA_HOME, and build-args' java (realpath) and settings (sha256) lines.
+#
+# Exit codes: 0 GREEN, 1 RED, PARTIAL or COMPILE-ONLY, 2 usage or refused flag, 3 the tree's build lock is held.
+set -euo pipefail
+
+HERE=$(cd "$(dirname "$0")" && pwd)
+readonly HERE
+usage() { echo "usage: $0 [--name <log>] [--expect mod1,mod2] -- <maven args>" >&2; exit 2; }
+
+name=$(date +%Y%m%d-%H%M%S)
+expect=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --name) [ $# -ge 2 ] || usage; name=$2; shift 2 ;;
+    --expect) [ $# -ge 2 ] || usage; expect=$2; shift 2 ;;
+    --) shift; break ;;
+    *) usage ;;
+  esac
+done
+[ $# -gt 0 ] || usage
+[[ "$name" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "refused: --name '$name' must match [A-Za-z0-9._-]+" >&2; exit 2; }
+
+selection=$(python3 "$HERE/build-args" -- "$@")  # exits 2 on a refused flag, and so does this script
+# clean first: a stale target/ (classes compiled from another state of the sources) is outside the tree state
+[ "$1" = clean ] || set -- clean "$@"
+
+[ -f pom.xml ] && [ -e .git ] || { echo "refused: run from a tree root (pom.xml and .git in $(pwd))" >&2; exit 2; }
+# assume-unchanged (lowercase tag) and skip-worktree (S) hide edits from git status and diff, so from the tree state;
+# .mvn/maven.config is skip-worktree by convention, and build-report hashes its content instead
+hidden=$(git ls-files -v | awk 'substr($0, 1, 1) ~ /[a-zS]/ && substr($0, 3) != ".mvn/maven.config" { print substr($0, 3) }')
+[ -z "$hidden" ] || {
+  echo "refused: git is told to ignore changes to tracked files (assume-unchanged or skip-worktree)," \
+    "the tree state cannot see them:" >&2
+  printf '%s\n' "$hidden" | head -n 5 | sed 's/^/  /' >&2
+  echo "  undo with git update-index --no-assume-unchanged --no-skip-worktree <file>" >&2
+  exit 2
+}
+
+mvn_path=$(command -v mvn) || { echo "refused: no mvn on PATH" >&2; exit 2; }
+# maven as it will run: no ~/.mavenrc, /etc/mavenrc, MAVEN_DEBUG_OPTS, MAVEN_BASEDIR, JDK_JAVA_OPTIONS, _JAVA_OPTIONS
+maven() { env -u JDK_JAVA_OPTIONS -u _JAVA_OPTIONS -u MAVEN_DEBUG_OPTS -u MAVEN_BASEDIR MAVEN_SKIP_RC=1 mvn "$@"; }
+mvn_real=$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$mvn_path")
+maven_version=$(maven -v 2> /dev/null | tr -d '\033' | sed -e 's/\[[0-9;]*m//g' | sed -n 1p || true)
+
+readonly LOGS=.wp-logs LOCK=.wp-logs/build.lock
+mkdir -p "$LOGS"
+
+python3 "$HERE/build-lock" take "$LOCK" "$$" || exit $?
+mvn_pid=
+released() { python3 "$HERE/build-lock" release "$LOCK" "$$" || true; }
+stopped() {  # maven runs in the background, where a non-interactive shell ignores INT for it: forward the stop
+  [ -n "$mvn_pid" ] && kill -TERM "$mvn_pid" 2> /dev/null && wait "$mvn_pid" 2> /dev/null
+  exit "$1"
+}
+trap released EXIT
+trap 'stopped 130' INT
+trap 'stopped 143' TERM
+printf 'start=%s\nargs=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" > "$LOCK/info"
+
+readonly LOG=$LOGS/$name.log MARKER=$LOGS/$name.marker
+# dirty: git status, or a gitignored file under a module's src/ or a pom (build-report --ignored-sources)
+printf 'head=%s\ndirty=%s\ntree=%s\nstart=%s\nargs=%s\nwrapper=%s\nwrapper_lstart=%s\nmvn=%s\nmaven_version=%s\njava_home=%s\n%s\n' \
+  "$(git rev-parse HEAD 2> /dev/null || echo unknown)" \
+  "$([ -z "$(git status --porcelain 2> /dev/null)$("$HERE/build-report" --ignored-sources .)" ] && echo no || echo yes)" \
+  "$("$HERE/build-report" --tree-state .)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" "$$" "$(sed -n 1p "$LOCK/lstart")" \
+  "$mvn_real" "$maven_version" "${JAVA_HOME:-}" \
+  "$selection" > "$MARKER"
+echo "mvn -B $* > $LOG"
+# maven records its own pid in the lock before it starts, so a kill -9 of this wrapper leaves the lock held by maven
+# shellcheck disable=SC2016  # expanded by the inner sh
+sh -c 'lock=$1 owner=$2; shift 2
+  python3 "$0" add "$lock" "$owner" $$ &&
+  exec env -u JDK_JAVA_OPTIONS -u _JAVA_OPTIONS -u MAVEN_DEBUG_OPTS -u MAVEN_BASEDIR MAVEN_SKIP_RC=1 mvn -B "$@"' \
+  "$HERE/build-lock" "$LOCK" "$$" "$@" > "$LOG" 2>&1 &
+mvn_pid=$!
+rc=0
+wait "$mvn_pid" || rc=$?
+mvn_pid=
+# the lock stays held until the verdict is read: no other build writes reports into the tree meanwhile, and
+# build-report checks that this wrapper holds it (provenance)
+verdict=0
+"$HERE/build-report" --tree . --marker "$MARKER" --log "$LOG" --mvn-exit "$rc" ${expect:+--expect "$expect"} || verdict=$?
+released
+trap - EXIT
+exit "$verdict"

@@ -1,0 +1,443 @@
+#!/usr/bin/env python3
+"""build-args -- classifies the arguments of ONE maven run before it starts: refuses what would make the run report
+less than it did (exit 2), and names what selects a subset of the reactor or of the tests (the run can then be
+PARTIAL at best, never GREEN).
+
+Usage: ops/dev/build-args -- <maven args>      (run from the tree root)
+
+Read: the maven command line and MAVEN_ARGS (one argument list, as the launcher passes them), and .mvn/maven.config
+(one argument per line, a line starting with # a comment), each through maven's quote handling (clean_args) and
+read as maven's command line (short and long options, abbreviated long options, bundled short flags, attached
+values, -D x, --define x, --define=x, a value in one pair of double quotes); MAVEN_OPTS, JAVA_TOOL_OPTIONS (with the
+JVM's quoting) and .mvn/jvm.config for -D system properties, which maven also reads as properties. How maven 3.9.12
+and 3.10.0 read quotes and # was run, not read from their source (docs/developer-guide.md 3.1).
+Every -D and -P that is neither refused, nor a known test selection, nor on ALLOWED_PROPERTIES / ALLOWED_PROFILES is
+`select_other` (the run is PARTIAL): a property or profile can change what a pom tests. The reactor poms are read as
+well: a -D of a property that surefire/failsafe configuration reads (`${name}`), a -D that activates a profile which
+configures surefire/failsafe or sets such a property or a surefire/failsafe parameter (build_rules.selects_tests),
+and a -P of such a profile are `select_tests`.
+The settings maven reads by default are judged too (settings_files: the Maven home's conf/settings.xml, and
+.m2/settings.xml under the account's home, $HOME and any -Duser.home): a settings profile that can be active and sets
+a refused or test-selecting property is refused, as is an <activeProfile> naming a test-selecting profile.
+Refused besides: JDK_JAVA_OPTIONS, _JAVA_OPTIONS, MAVEN_DEBUG_OPTS and MAVEN_BASEDIR when non-empty (ops/dev/build runs
+maven without them, and with MAVEN_SKIP_RC=1), -Dmaven.repo.local naming anything but <tree>/.m2-local, and in every
+channel an @argfile, -XX:VMOptionsFile or -XX:Flags= (options read from a file); a run in which no channel sets
+maven.repo.local (maven would use ~/.m2); an mvn on PATH whose realpath, or that of the launcher a wrapper there
+execs, lies under no directory ops/dev/maven-homes lists; a java (check_java) that is not a native executable; an
+environment in which the env.* activation of a test-selecting profile holds (env.X: X set, even empty; !env.X: X
+unset; env.X=!v: X unset or not v), or an environment variable that surefire/failsafe configuration reads as
+${env.X}; a test-selecting reactor profile with any activation that can hold with nothing in the run naming it
+(file, os, jdk, activeByDefault true, a negated or JVM-defined property, any other kind), whether it holds or not.
+The reactor is every pom <modules> name, recursively and in every profile. The property lists live in build_rules.py, which build-report
+applies to the system properties each test JVM recorded in its XML.
+Prints the marker lines `select_modules=<what> (<where>); ...`, `select_tests=...` and `select_other=...`, always, empty
+when nothing selects; then `java=<realpath>` and `settings=<path> <sha256 or absent>; ...`. The lists below are what
+this script knows; what they miss is left to build-report's evidence.
+Exit codes: 0 classified, 2 refused (stderr names the flag and where it came from).
+"""
+import hashlib
+import os
+import pwd
+import re
+import shutil
+import sys
+import xml.etree.ElementTree as ET
+
+sys.dont_write_bytecode = True  # no __pycache__ in ops/dev
+from build_rules import ALLOWED_PROFILES, LAUNCHER_ENVIRONMENT, Reactor, judge, local, text_of  # noqa: E402
+
+# maven's command-line options: short name -> (long name, takes a value)
+OPTIONS = {
+    "am": ("also-make", False), "amd": ("also-make-dependents", False), "B": ("batch-mode", False),
+    "b": ("builder", True), "C": ("strict-checksums", False), "c": ("lax-checksums", False),
+    "cpu": ("check-plugin-updates", False), "D": ("define", True), "e": ("errors", False),
+    "emp": ("encrypt-master-password", False), "ep": ("encrypt-password", False), "f": ("file", True),
+    "fae": ("fail-at-end", False), "ff": ("fail-fast", False), "fn": ("fail-never", False),
+    "gs": ("global-settings", True), "gt": ("global-toolchains", True), "h": ("help", False),
+    "itr": ("ignore-transitive-repositories", False), "l": ("log-file", True),
+    "llr": ("legacy-local-repository", False), "N": ("non-recursive", False), "npr": ("no-plugin-registry", False),
+    "npu": ("no-plugin-updates", False), "nsu": ("no-snapshot-updates", False), "ntp": ("no-transfer-progress", False),
+    "o": ("offline", False), "P": ("activate-profiles", True), "pl": ("projects", True), "q": ("quiet", False),
+    "rf": ("resume-from", True), "s": ("settings", True), "t": ("toolchains", True), "T": ("threads", True),
+    "U": ("update-snapshots", False), "up": ("update-plugins", False), "v": ("version", False),
+    "V": ("show-version", False), "X": ("debug", False),
+}
+LONG = dict((long, value) for long, value in OPTIONS.values())
+LONG["color"] = True
+
+REFUSED_OPTIONS = {
+    "quiet": "hides what the build did: the log must carry the per-module evidence",
+    "fail-never": "hides what the build did: a failure exits 0",
+    "threads": "interleaves modules in the log: per-module jbct counts and test lines cannot be attributed",
+    "builder": "picks the scheduler that -T would: per-module log attribution needs the default one",
+    "settings": "replaces the settings maven reads, whose profiles can set any property unseen",
+    "global-settings": "replaces the settings maven reads, whose profiles can set any property unseen",
+    "log-file": "sends maven's output elsewhere: the log must carry the per-module evidence",
+}
+MODULE_SELECTION = {"projects", "resume-from", "also-make", "also-make-dependents", "non-recursive", "file"}
+
+FROM_A_FILE = "reads more options from a file this script does not read"
+# the first bytes of a native executable: Mach-O (32/64-bit, either byte order, universal) and ELF
+NATIVE = (b"\xfe\xed\xfa\xce", b"\xfe\xed\xfa\xcf", b"\xce\xfa\xed\xfe", b"\xcf\xfa\xed\xfe", b"\xca\xfe\xba\xbe",
+          b"\x7fELF")
+# a wrapper script in front of maven's own launcher (Homebrew's bin/mvn): `[VAR=value ...] exec "<launcher>"`
+WRAPPER_EXEC = re.compile(r'^\s*(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|\S*)\s+)*exec\s+"?(/[^"\s]+)"?', re.M)
+WRAPPER_JAVA_HOME = re.compile(r'JAVA_HOME="\$\{JAVA_HOME:-([^}"]+)\}"')
+MAVEN_HOMES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "maven-homes")
+
+
+def refuse(shown, where, why):
+    print("refused: %s (%s) %s; run without it" % (shown, where, why), file=sys.stderr)
+    sys.exit(2)
+
+
+class Selection:
+    def __init__(self, reactor):
+        self.reactor = reactor
+        self.modules = []
+        self.tests = []
+        self.other = []
+        self.repo = False  # some channel sets maven.repo.local (judge() allows only <tree>/.m2-local)
+        self.homes = []  # every -Duser.home a channel gives (whose settings.xml maven may read)
+
+    def option(self, long, value, shown, where):
+        value = unquote(value) if value is not None else None
+        if long in REFUSED_OPTIONS:
+            refuse(shown, where, REFUSED_OPTIONS[long])
+        if long == "define":
+            self.property(value or "", where)
+        elif long == "activate-profiles":
+            self.profiles(value or "", shown, where)
+        elif long in MODULE_SELECTION:
+            self.modules.append("%s (%s)" % (shown, where))
+
+    def property(self, definition, where):
+        shown = "-D" + definition
+        # a quote left unbalanced: maven sets the name with it and without it, both judged; the repo only exactly
+        kinds = {}
+        for reading in dict.fromkeys((definition, definition.strip('"'))):
+            name, eq, value = reading.partition("=")
+            kind, why = judge(name, value if eq else None, ".", self.reactor)
+            kinds.setdefault(kind, why)
+            self.repo = self.repo or name == "maven.repo.local" and kind is None and reading == definition
+            if name == "user.home" and eq:
+                self.homes.append(value)
+        if "refused" in kinds:
+            refuse(shown, where, kinds["refused"])
+        elif "tests" in kinds:
+            self.tests.append("%s (%s)%s" % (shown, where, " " + kinds["tests"] if kinds["tests"] else ""))
+        elif "other" in kinds:
+            self.other.append("%s (%s)" % (shown, where))
+
+    def profiles(self, value, shown, where):
+        for profile in (p.strip() for p in value.split(",") if p.strip()):
+            profile_id = profile.lstrip("?")
+            if profile_id in self.reactor.test_profiles:
+                self.tests.append("-P%s (%s) %s" % (profile_id, where, self.reactor.test_profiles[profile_id]))
+            elif profile_id not in ALLOWED_PROFILES:  # also a deactivation, !id or -id
+                self.other.append("-P%s (%s)" % (profile, where))
+
+
+def from_a_file(word, where):
+    if word.startswith("@") or "VMOptionsFile" in word or word.startswith("-XX:Flags="):
+        refuse(word, where, FROM_A_FILE)
+
+
+def long_matches(name):
+    """maven's parser accepts an unambiguous prefix of a long option, after one dash or two."""
+    if name in LONG:
+        return [name]
+    return [long for long in LONG if long.startswith(name)]
+
+
+def unquote(value):
+    """commons-cli's reading of an option value: one pair of surrounding double quotes, none inside, is dropped."""
+    if len(value) > 1 and value[0] == value[-1] == '"' and '"' not in value[1:-1]:
+        return value[1:-1]
+    return value
+
+
+def clean_args(pairs):
+    """maven's CleanArgument over (word, where) pairs, as run against maven 3.9.12 and 3.10.0: a word opening with
+    `"` and closing with it loses both; one opening without closing starts an argument that takes every following
+    word, joined by a space, up to the next word opening with `"` or the end. Each argument keeps its first word's
+    `where`."""
+    cleaned, current = [], None
+    for word, where in pairs:
+        if word.startswith('"'):
+            if current is not None:
+                cleaned.append(current)
+            current = None if len(word) > 1 and word.endswith('"') else (word[1:], where)
+            if current is None:
+                cleaned.append((word[1:-1], where))
+        elif current is not None:
+            current = (current[0] + " " + word, current[1])
+        else:
+            cleaned.append((word, where))
+    return cleaned + ([current] if current is not None else [])
+
+
+def cli(pairs, selection):
+    """Reads (word, where) pairs as maven's command line does, closely enough to find every option on the lists
+    above: after clean_args, as maven does."""
+    for word, where in pairs:
+        from_a_file(word, where)
+    pairs = clean_args(pairs)
+    words = [word for word, _ in pairs]
+    i = 0
+    while i < len(words):
+        word, where = pairs[i]
+        i += 1
+        if word == "--":
+            return
+        if not word.startswith("-") or word == "-":
+            continue
+        def value():
+            nonlocal i
+            if i < len(words):
+                i += 1
+                return words[i - 1]
+            return None
+        if word.startswith("--"):
+            name, eq, attached = word[2:].partition("=")
+            for long in long_matches(name):  # an ambiguous prefix fails maven; each candidate is judged anyway
+                taken = attached if eq else value() if LONG[long] and len(long_matches(name)) == 1 else None
+                selection.option(long, taken, word if long != "define" else None, where)
+            continue
+        token = word[1:]
+        name, eq, attached = token.partition("=")
+        if name in OPTIONS:
+            long, takes = OPTIONS[name]
+            taken = (attached if eq else value()) if takes else None
+            selection.option(long, taken, word if long != "define" else None, where)
+            continue
+        if len(name) > 1 and not eq and long_matches(name):
+            for long in long_matches(name):
+                selection.option(long, value() if LONG[long] and len(long_matches(name)) == 1 else None, word, where)
+            continue
+        prefix = next((token[:n] for n in range(len(token) - 1, 1, -1) if token[:n] in OPTIONS), None)
+        if prefix and OPTIONS[prefix][1]:  # -plx, -rf:x
+            long = OPTIONS[prefix][0]
+            selection.option(long, token[len(prefix):], word, where)
+            continue
+        for j, letter in enumerate(token):  # -BqT4: bundled one-letter options, the first that takes a value ends it
+            if letter not in OPTIONS:
+                break
+            long, takes = OPTIONS[letter]
+            if takes:
+                rest = token[j + 1:]
+                selection.option(long, rest if rest else value(), word if long != "define" else None, where)
+                break
+            selection.option(long, None, word if word == "-" + letter else "%s (as -%s)" % (word, letter), where)
+
+
+def jvm(words, where, selection):
+    for word in words:
+        from_a_file(word, where)
+        if word.startswith("-D") and len(word) > 2:
+            selection.property(word[2:], where)
+
+
+def jvm_options(text):
+    """The JVM's reading of JAVA_TOOL_OPTIONS: words split at whitespace, a '...' or "..." anywhere in a word kept
+    whole without its quotes (an unmatched quote stops the JVM; read here to the end)."""
+    words, i = [], 0
+    while i < len(text):
+        if text[i].isspace():
+            i += 1
+            continue
+        word = ""
+        while i < len(text) and not text[i].isspace():
+            if text[i] in "'\"":
+                end = text.find(text[i], i + 1)
+                end = len(text) if end < 0 else end
+                word += text[i + 1:end]
+                i = end + 1
+            else:
+                word += text[i]
+                i += 1
+        words.append(word)
+    return words
+
+
+def read_text(path):
+    try:
+        with open(path, encoding="utf-8", errors="replace") as source:
+            return source.read()
+    except OSError:
+        return ""
+
+
+def file_words(path):
+    return read_text(path).split()
+
+
+def maven_config(path):
+    """maven.config as maven 3.9.12 and 3.10.0 read it (run against both): one argument per line, a line starting
+    with # a comment; quotes then as on the command line (clean_args)."""
+    return [line for line in read_text(path).splitlines() if line.strip() and not line.startswith("#")]
+
+
+def maven_homes(path=MAVEN_HOMES):
+    """The Maven installations ops/dev/maven-homes lists (`<directory> <where and why>` per line), as realpaths."""
+    try:
+        with open(path, encoding="utf-8") as source:
+            lines = [line.split(None, 1) for line in source if line.strip() and not line.lstrip().startswith("#")]
+    except OSError:
+        return []
+    return [os.path.realpath(words[0]) for words in lines]
+
+
+def check_maven():
+    """The mvn on PATH is a Maven distribution ops/dev/maven-homes lists: a script first on PATH can add any flag.
+    Returns the scripts it runs, as realpaths, to maven's own launcher (the one passing -Dmaven.home): Homebrew's
+    bin/mvn is a wrapper exec'ing libexec/bin/mvn. Maven's home is that launcher's directory's parent, as the
+    launcher itself derives it."""
+    found = shutil.which("mvn")
+    if found is None:
+        refuse("mvn", "PATH", "is not found")
+    chain = [os.path.realpath(found)]
+    while "-Dmaven.home=" not in read_text(chain[-1]):
+        target = WRAPPER_EXEC.search(read_text(chain[-1]))
+        if target is None or len(chain) > 3:
+            refuse("mvn %s" % found, "PATH", "runs %s, which is not maven's launcher nor a wrapper exec'ing one"
+                   % chain[-1])
+        chain.append(os.path.realpath(target.group(1)))
+    for real in chain:
+        if not any(real.startswith(home.rstrip(os.sep) + os.sep) for home in maven_homes()):
+            refuse("mvn %s" % found, "PATH", "resolves to %s, under no Maven home ops/dev/maven-homes lists; a "
+                                             "script between this tree and maven can add any flag unseen" % real)
+    return chain
+
+
+def check_java(chain):
+    """The java maven runs is a native executable, not a script that can add any flag: $JAVA_HOME/bin/java, else the
+    default JAVA_HOME a wrapper in `chain` sets, else the java on PATH (as the launcher picks it). Returns its
+    realpath."""
+    defaults = [(m.group(1), path) for m, path in ((WRAPPER_JAVA_HOME.search(read_text(path)), path) for path in chain)
+                if m]
+    if os.environ.get("JAVA_HOME"):
+        java, where = os.path.join(os.environ["JAVA_HOME"], "bin", "java"), "JAVA_HOME"
+    elif defaults:
+        java, where = os.path.join(defaults[0][0], "bin", "java"), "the default JAVA_HOME of " + defaults[0][1]
+    else:
+        java, where = shutil.which("java"), "PATH"
+    if java is None:
+        refuse("java", "PATH", "is not found")
+    real = os.path.realpath(java)
+    try:
+        with open(real, "rb") as binary:
+            head = binary.read(4)
+    except OSError as cause:
+        refuse("java %s" % java, where, "cannot be read (%s)" % cause.strerror)
+    if not any(head.startswith(magic) for magic in NATIVE):
+        refuse("java %s" % java, where,
+               "resolves to %s, not a native executable (Mach-O or ELF): a script there can add any flag unseen" % real)
+    return real
+
+
+def settings_files(chain, homes):
+    """The settings.xml files maven reads by default (-s/-gs are refused): <maven home>/conf/settings.xml, and
+    .m2/settings.xml in the account's home, in $HOME and in every -Duser.home a channel gives (maven reads one of
+    them; all are judged)."""
+    found = [os.path.join(os.path.dirname(os.path.dirname(chain[-1])), "conf", "settings.xml")]
+    for home in [pwd.getpwuid(os.getuid()).pw_dir, os.environ.get("HOME", "")] + homes:
+        path = os.path.join(home, ".m2", "settings.xml") if home else None
+        if path and path not in found:
+            found.append(path)
+    return found
+
+
+def judge_settings(path, reactor, selection):
+    """A settings profile that can be active (activeByDefault, a condition, or in <activeProfiles>) and sets a
+    property judge() refuses or calls a test selection is refused; one that cannot is a test-selecting profile for
+    -P. An <activeProfiles> entry naming a reactor profile is judged as a -P of it."""
+    try:
+        root = ET.parse(path).getroot()
+    except FileNotFoundError:
+        return
+    except (OSError, ET.ParseError) as cause:
+        refuse(path, "settings", "cannot be read (%s): its profiles can set any property" % cause)
+    active = set(e.text.strip() for e in root.iter() if local(e.tag) == "activeProfile" and e.text)
+    for profile in (e for e in root.iter() if local(e.tag) == "profile"):
+        profile_id = text_of(profile, "id")
+        sets = ["%s=%s" % (local(p.tag), (p.text or "").strip()) for e in profile if local(e.tag) == "properties"
+                for p in e if local(p.tag)
+                and judge(local(p.tag), (p.text or "").strip(), ".", reactor)[0] in ("refused", "tests")]
+        if not sets:
+            continue
+        conditions = [c for a in profile if local(a.tag) == "activation" for c in a if local(c.tag)
+                      and (local(c.tag) != "activeByDefault" or (c.text or "").strip() == "true")]
+        if conditions or profile_id in active:
+            refuse("profile %s in %s" % (profile_id, path), "settings",
+                   "can be active and sets %s, which selects tests or hides what the run did" % ", ".join(sets))
+        reactor.test_profiles.setdefault(profile_id, "sets %s (%s)" % (", ".join(sets), path))
+    for profile_id in sorted(active):
+        if profile_id in reactor.test_profiles:
+            refuse("activeProfile %s in %s" % (profile_id, path), "settings",
+                   "activates profile %s, which %s" % (profile_id, reactor.test_profiles[profile_id]))
+        if profile_id in reactor.profile_ids and profile_id not in ALLOWED_PROFILES:
+            selection.other.append("-P%s (%s activeProfiles)" % (profile_id, path))
+
+
+def digest(path):
+    try:
+        with open(path, "rb") as source:
+            return hashlib.sha256(source.read()).hexdigest()
+    except OSError:
+        return "absent"
+
+
+def channels(arguments, selection):
+    """Every channel's options and properties into `selection`: MAVEN_ARGS and the command line are one argument list
+    to maven (the launcher passes `${MAVEN_ARGS} -B clean <arguments>`), maven.config another."""
+    cli([(w, "MAVEN_ARGS") for w in os.environ.get("MAVEN_ARGS", "").split()]
+        + [(w, "command line") for w in ["-B"] + arguments], selection)
+    cli([(w, ".mvn/maven.config") for w in maven_config(os.path.join(".mvn", "maven.config"))], selection)
+    jvm(os.environ.get("MAVEN_OPTS", "").split(), "MAVEN_OPTS", selection)
+    jvm(jvm_options(os.environ.get("JAVA_TOOL_OPTIONS", "")), "JAVA_TOOL_OPTIONS", selection)
+    jvm(file_words(os.path.join(".mvn", "jvm.config")), ".mvn/jvm.config", selection)
+
+
+def main():
+    arguments = sys.argv[1:]
+    if arguments[:1] == ["--"]:
+        arguments = arguments[1:]
+    for variable, why in sorted(LAUNCHER_ENVIRONMENT.items()):
+        if os.environ.get(variable):
+            refuse("%s=%s" % (variable, os.environ[variable]), "environment", why)
+    reactor = Reactor(".")
+    for profile, condition in sorted(reactor.standing.items()):
+        refuse("profile %s" % profile, "pom", "selects tests (%s) and its activation %s can hold with nothing in the run "
+               "naming it" % (reactor.test_profiles[profile], condition))
+    for variable, profile, condition, holds in sorted(reactor.env_activations, key=lambda a: a[:3]):
+        if holds(os.environ.get(variable)):
+            refuse("%s=%s" % (variable, os.environ[variable]) if variable in os.environ else "%s unset" % variable,
+                   "environment", "activates profile %s (%s), which %s" % (profile, condition, reactor.test_profiles[profile]))
+    for variable in sorted(reactor.env_reads):
+        if variable in os.environ:
+            refuse("%s=%s" % (variable, os.environ[variable]), "environment",
+                   "is read by surefire/failsafe configuration (${env.%s})" % variable)
+    chain = check_maven()
+    java = check_java(chain)
+    homes = Selection(reactor)  # a first pass for -Duser.home: settings profiles are -P targets in the second
+    channels(arguments, homes)
+    settings = settings_files(chain, homes.homes)
+    selection = Selection(reactor)
+    for path in settings:
+        judge_settings(path, reactor, selection)
+    channels(arguments, selection)
+    if not selection.repo:
+        print("refused: no channel sets -Dmaven.repo.local (command line, MAVEN_ARGS, .mvn/maven.config, MAVEN_OPTS, "
+              "JAVA_TOOL_OPTIONS, .mvn/jvm.config): maven would resolve and install into ~/.m2; put "
+              "-Dmaven.repo.local=.m2-local in .mvn/maven.config", file=sys.stderr)
+        sys.exit(2)
+    print("select_modules=" + "; ".join(selection.modules))
+    print("select_tests=" + "; ".join(selection.tests))
+    print("select_other=" + "; ".join(selection.other))
+    print("java=" + java)
+    print("settings=" + "; ".join("%s %s" % (path, digest(path)) for path in settings))
+
+
+if __name__ == "__main__":
+    main()

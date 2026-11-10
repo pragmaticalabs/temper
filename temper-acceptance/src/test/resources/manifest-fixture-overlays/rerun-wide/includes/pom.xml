@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>fx</groupId>
+        <artifactId>manifest-fixture</artifactId>
+        <version>1</version>
+    </parent>
+    <artifactId>includes</artifactId>
+    <!-- Custom includes replace the defaults (GammaTests is not run); the exclude drops ExcludedTest; failsafe is
+         declared here but its execution is bound to phase none, so UnboundIT is never run (archive fixture: profiles
+         inc, ex; m1-design §2.4 rule 1 "<phase>none</phase> is unbound", §9.2). -->
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <includes>
+                        <include>**/*Check.java</include>
+                        <include>**/*Test.java</include>
+                    </includes>
+                    <excludes>
+                        <exclude>**/Excluded*</exclude>
+                    </excludes>
+                    <!-- Deterministic class order: the crash overlay's CrashedForkProbeTest then runs after AlphaCheck and
+                         BetaTest, so a crashed fork loses only the probe on every filesystem (T1CrashIT). -->
+                    <runOrder>alphabetical</runOrder>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>unbound</id>
+                        <phase>none</phase>
+                        <goals>
+                            <goal>integration-test</goal>
+                            <goal>verify</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+    <!-- rerun-wide overlay (RerunIT, ruling R-M2-16): in a run without -Dtest (the Gate) this module's red tests do not
+         stop the build, so the Gate also reaches the red failsafe class in a later module and fails on all of them. A
+         rerun sets -Dtest, so the profile is off there: only the rerun step's own failure-ignore lets the build go on
+         past this module's still-red class to the failsafe one. -->
+    <profiles>
+        <profile>
+            <id>gate-goes-on</id>
+            <activation>
+                <property>
+                    <name>!test</name>
+                </property>
+            </activation>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-surefire-plugin</artifactId>
+                        <configuration>
+                            <testFailureIgnore>true</testFailureIgnore>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
+</project>

@@ -1,0 +1,85 @@
+# kiln's config: ~/.config/kiln/kiln.toml on bigboy (kiln-f1-design §6). Every path is /abs/... or ~/... .
+# Unknown sections and keys are refused at start. kiln always serves 127.0.0.1:<port>.
+
+[server]
+port = 7171
+# Optional: also serve one LAN address on the same port, for reading the dashboard without an ssh tunnel. A literal
+# IPv4 address; the wildcard (0.0.0.0), a loopback address and a host name are refused at start (exit 78). Reads (GET)
+# are answered from the LAN; every other method (the ingest POSTs) is refused 403 unless the connection comes from
+# this machine. There are no credentials: bind only a network you trust.
+# bind = "192.0.2.10"
+# Optional, only with bind: extra Host names answered besides 127.0.0.1, localhost and the bind address (any other Host
+# is refused 421, a DNS-rebinding guard). Refused without bind.
+# hostNames = ["bigboy"]
+
+[db]
+host = "127.0.0.1"
+port = 55442
+name = "kiln"
+user = "kiln"
+passwordFile = "~/.config/kiln/pg-password"
+
+[github]
+repo = "pragmaticalabs/pragmatica"
+bases = ["release-1.0.0-rc5", "main"]
+# Exactly one GitHub credential, else the start exits 78:
+#   - tokenFile: the owner's token, read by path and never printed; a file that is missing, empty or not one token
+#     fails the start. This is today's deployment.
+#   - the [github.app] table below (the kiln GitHub App; remove tokenFile when you add it): every request carries the
+#     App's installation token, and kiln never falls back to an unauthenticated read.
+#   - neither, with `anonymous = true`: GitHub is read unauthenticated (60 requests an hour; tests, or a deliberate
+#     workaround). Combining anonymous = true with either of the others is refused too.
+tokenFile = "~/.config/kiln/github-token"
+# anonymous = true
+cycleDeadlineSeconds = 600
+# kiln spends a bounded share of its GitHub bucket (the owner account's 5,000/h is shared with the whole fleet; an App
+# installation has its own 5,000/h): at most hourlyCap of its own requests per GitHub rate window, whatever limit GitHub
+# reports, and none while GitHub reports reserve or fewer remaining. Positive integers. hourlyCap is 1,428 reads plus the
+# 72 calls an hour of the ruleset and team drift reads.
+hourlyCap = 1572
+reserve = 1500
+
+# The kiln App (replaces tokenFile). clientId and installationId are not secret; keyFile is read at each mint, so a
+# rotated key needs no restart, and a key that is group- or other-readable fails the start (exit 78). The token is
+# narrowed to the repositories above ([github] repo and [[repos]]) and to read-only permissions.
+# [github.app]
+# clientId = "Iv23..."
+# installationId = 12345678
+# keyFile = "~/.config/kiln/app-key.pem"
+
+[mirror]
+origin = "https://github.com/pragmaticalabs/pragmatica.git"
+path = "~/.local/share/kiln/mirror.git"
+
+[temper]
+url = "http://127.0.0.1:7070"
+readTokenFile = "~/.config/temper/read-token"
+cycleDeadlineSeconds = 600
+
+[scan]
+hotSeconds = 120
+hotWindowHours = 48
+fullAt = "04:00"
+sizeGapSeconds = 5
+staleAfterHours = 48
+stepDeadlineSeconds = 600
+# Must stay below half of stepDeadlineSeconds (refused at start otherwise).
+transportTimeoutSeconds = 240
+
+# The Mac is not scanned over ssh: it pushes `kiln-scan scan <roots>` through the kiln-ingest key every 2 h (its push
+# reads stale after 6 h). These are the roots it pushes; a complete push deletes Mac rows only under them.
+[mac]
+# Example values: list the directories your own push names (absolute roots, or ~/ roots the scan expands).
+roots = ["~/src/pragmatica*", "~/src/ticketing", "/private/tmp/scratch-501/*/*/work/*"]
+
+# Scanned hosts: a list. cloudbb-3 and cloudbb-4 were deleted on 2026-10-29; bigboy is the only scanned host.
+[[hosts]]
+name = "bigboy"
+address = "127.0.0.1"
+user = "builder"
+key = "~/.ssh/kiln_scan"
+knownHosts = "~/.ssh/known_hosts"
+# The deploy-time list of roots is the operator's; this one covers a build host (no depth-2 roots). A `*` is
+# refused in the first component (design §9.2), so the checkouts in ~ itself are named. A root that disappears makes
+# every scan of this host INCOMPLETE; list only roots that persist.
+roots = ["~/work/co/*", "~/work/*", "~/temper-main", "~/pragmatica"]

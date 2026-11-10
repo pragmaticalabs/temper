@@ -1,0 +1,6 @@
+# ops/dev/required-checks -- check names ops/dev/land-pr waits for on the head: one not reported yet counts as
+# pending, so a green of the checks seen cannot stand in for one that never ran. One name per line; `#` lines and
+# blank lines are ignored.
+
+# .github/workflows/ci.yml, job build
+build

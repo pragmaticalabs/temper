@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# commit-msg -- the commit rule of docs/developer-guide.md §7 as a check: the message is ONE line,
+# `<type>[(<scope>)]: <subject>` with type feat, fix, refactor, chore, docs or test. No body, no trailers
+# (Co-Authored-By or any other). `#` lines (git's comments, and everything below a `git commit -v` scissors line) and
+# leading or trailing blank lines are not part of the message, as git's own cleanup drops them.
+# An early warning only: `git commit -m "# ..."`, --cleanup=verbatim or another core.commentChar store lines this hook
+# took for comments, and --no-verify skips it. ops/dev/hooks/pre-push checks the stored messages.
+# Installed by core.hooksPath=ops/dev/hooks (ops/dev/wt-new). Exit 0 accepts, 1 rejects.
+set -euo pipefail
+
+[ $# -eq 1 ] || { echo "usage: $0 <message-file>" >&2; exit 2; }
+
+lines=$(awk '
+  /^# -+ >8 -+$/ { exit }
+  /^#/ { next }
+  { sub(/\r$/, ""); text[++n] = $0 }
+  END {
+    first = 1; while (first <= n && text[first] ~ /^[[:space:]]*$/) first++
+    last = n;  while (last >= first && text[last] ~ /^[[:space:]]*$/) last--
+    for (i = first; i <= last; i++) print text[i]
+  }' "$1")
+
+rejected() {
+  echo "commit-msg: rejected: $1" >&2
+  echo "  the message must be exactly one line: <feat|fix|refactor|chore|docs|test>[(<scope>)]: <subject>" >&2
+  echo "  no body, no blank line, no trailers (Co-Authored-By or any other); e.g. git commit -m \"fix: refuse a linked seed\"" >&2
+  exit 1
+}
+
+[ -n "$lines" ] || rejected "the message is empty"
+count=$(printf '%s\n' "$lines" | wc -l | tr -d ' ')
+[ "$count" -eq 1 ] || rejected "the message has $count lines, a body or trailers: '$(printf '%s\n' "$lines" | sed -n '2,$p' | grep -v '^[[:space:]]*$' | head -n 1)'"
+[[ "$lines" =~ ^(feat|fix|refactor|chore|docs|test)(\([^()]+\))?:\ .+ ]] \
+  || rejected "'$lines' does not start with a conventional prefix"

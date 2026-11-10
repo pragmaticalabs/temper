@@ -1,0 +1,14 @@
+RUNNING (reactors on host: 3; cap 3 unless a ticket overrides; port group held by: 20260930-101500-v2174-1)
+TICKET                       OWNER    PRIO AGE           CHECKOUT  ARGS
+20260930-101500-v2174-1      v2174      10 1h02m         wt-gate  -pl aether/ember verify [waiter gone] [port-group]
+20260930-111000-cto-2        cto         0 0h05m         wt-core  -pl core install -DskipTests [waiter gone]
+  + 1 reactor(s) not started through the queue (direct mvn or BB_QUEUE=0)
+
+WAITING (grant order: priority desc, then FIFO; a [port-group] ticket is skipped while the group is held; a ticket its own cap blocks is passed by backfill until blocked 1200s, then the host drains for it)
+POS  TICKET                       OWNER    PRIO WAITED        CHECKOUT  ARGS
+1    20260930-110600-v2174-4      v2174      10 0h08m         wt-b  verify [waiter gone] [cap-blocked 0h01m; others backfill]
+2    20260930-110500-temper-3     temper      5 0h10m         wt-a  -pl aether/forge/forge-tests verify [waiter gone] [port-group]
+3    20260930-111500-x9-5         x9          0 0h01m         wt-c  -pl core test [waiter gone]
+
+FINISHED (most recent 0)
+STATE      RC     TICKET                       OWNER    WALL ENDED         CHECKOUT  ARGS

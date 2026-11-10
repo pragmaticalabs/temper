@@ -1,0 +1,6 @@
+# ops/dev/known-flakes -- tests whose failure alone lets ops/dev/land-pr rerun the failed CI jobs once.
+# One <class>.<method> per line, the fully qualified class as surefire prints it, without a parameter list. A line
+# names the issue that tracks the flake; remove the line when the issue is fixed. `#` lines and blank lines are ignored.
+
+# #38: 30k polls inside a 60 s wall-clock await, load-sensitive on a 2-core runner.
+org.pragmatica.temper.worker.unit.TestcontainersReapTest.await_completes_afterThirtyThousandPolls

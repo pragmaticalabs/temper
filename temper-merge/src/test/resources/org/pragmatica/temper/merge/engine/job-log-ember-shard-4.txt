@@ -1,0 +1,28 @@
+2026-11-07T21:19:25.2010963Z 21:19:25.117 [] INFO  o.p.a.d.m.f.MembershipFsm.expireJoinGrace() - Join-grace reaper DEFERRED for NodeId[id=newborn-4]: never-healthy but transport connection is LIVE — re-arming (window=TimeSpan(15S))
+2026-11-07T21:19:26.4988975Z 21:19:26.482 [] INFO  o.p.a.n.AetherNode$1aetherNode.lambda$stop$7() - Aether node NodeId[id=refusedcu-2] stopped
+2026-11-07T21:19:26.4990727Z 21:19:26.483 [] INFO  o.p.a.n.AetherNode$1aetherNode.lambda$stop$7() - Aether node NodeId[id=refusedcu-3] stopped
+2026-11-07T21:19:26.4996456Z 21:19:26.483 [] INFO  o.p.a.n.AetherNode$1aetherNode.lambda$stop$7() - Aether node NodeId[id=refusedcu-1] stopped
+2026-11-07T21:19:26.5026807Z 21:19:26.483 [] INFO  o.p.a.e.EmberCluster.clearClusterState() - Ember cluster stopped
+2026-11-07T21:19:26.5127840Z [ERROR] Tests run: 1, Failures: 1, Errors: 0, Skipped: 0, Time elapsed: 12.17 s <<< FAILURE! -- in org.pragmatica.aether.ember.EmberFirstPublishRefusedCatchupTest
+2026-11-07T21:19:26.5130506Z [ERROR] org.pragmatica.aether.ember.EmberFirstPublishRefusedCatchupTest.firstPublish_toANewCf2Stream_isAcknowledged_whenEveryReplicasFirstCatchupReadIsRefused -- Time elapsed: 12.17 s <<< FAILURE!
+2026-11-07T21:19:26.5131779Z java.lang.AssertionError: 
+2026-11-07T21:19:26.5132521Z [the first publish is acknowledged, not 503 outcome unknown] 
+2026-11-07T21:34:32.0300595Z [INFO] Tests run: 3, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 255.2 s -- in org.pragmatica.aether.ember.EmberWorkerRealQuorumLossTest
+2026-11-07T21:34:32.1140378Z [INFO] 
+2026-11-07T21:34:32.1140838Z [INFO] Results:
+2026-11-07T21:34:32.1141387Z [INFO] 
+2026-11-07T21:34:32.1142086Z [ERROR] Failures: 
+2026-11-07T21:34:32.1144270Z [ERROR]   EmberFirstPublishRefusedCatchupTest.firstPublish_toANewCf2Stream_isAcknowledged_whenEveryReplicasFirstCatchupReadIsRefused:119 [the first publish is acknowledged, not 503 outcome unknown] 
+2026-11-07T21:34:32.1146614Z Expecting actual:
+2026-11-07T21:34:32.1149118Z   "503 {"type":"about:blank","title":"Service Unavailable","status":503,"detail":"Management forward failed: POST request was NOT retried on another node: outcome unknown, may have been applied; retry only an idempotent operation","instance":"/api/v1/streams/ember/refusedcatchup0/1.0.0/publish","requestId":"req-01m6vy2pscb6djfsa1v2b0mcyb"}"
+2026-11-07T21:34:32.1151573Z to start with:
+2026-11-07T21:34:32.1152184Z   "2"
+2026-11-07T21:34:32.1152554Z 
+2026-11-07T21:34:32.1152769Z [INFO] 
+2026-11-07T21:34:32.1153284Z [ERROR] Tests run: 57, Failures: 1, Errors: 0, Skipped: 1
+2026-11-07T21:34:32.1153872Z [INFO] 
+2026-11-07T21:34:32.1180006Z [INFO] ------------------------------------------------------------------------
+2026-11-07T21:34:32.1180696Z [ERROR] BUILD FAILURE
+2026-11-07T21:34:32.1181266Z [INFO] ------------------------------------------------------------------------
+2026-11-07T21:34:32.1184505Z [INFO] Total time:  15:40 min (Wall Clock)
+2026-11-07T21:34:32.1187204Z [INFO] Finished at: 2026-11-07T21:34:32Z

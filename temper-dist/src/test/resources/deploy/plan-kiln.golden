@@ -1,0 +1,43 @@
+plan-header v1 unit=kiln commit=@COMMIT@ host=bigboy current=@OLD@ new=@NEW@
+plan 001 check staged-copy @HOME@/.deploy/stage/kiln/@COMMIT@
+plan 002 check manifest @MANIFEST@
+plan 003 check expect-new @NEW@
+plan 004 check expect-current @OLD@
+plan 005 check lock free
+plan 006 check judge @COMMIT@
+plan 007 check main-class kiln-service.jar=org.pragmatica.kiln.service.Main
+plan 008 check not-linked @HOME@/.kiln/dist
+plan 009 check schema V2
+plan 010 prepare mkdir <B> 0700
+plan 011 prepare write <B>/MANIFEST.old @LIVEMANIFEST@
+plan 012 prepare dump kiln-pg kiln <B>/kiln-pg.dump
+plan 013 prepare verify-dump <B>/kiln-pg.dump TABLE
+plan 014 backup backup @HOME@/.kiln/dist/kiln-service.jar @HOME@/.kiln/dist/kiln-service.jar.bak-@OLD@
+plan 015 swap copy @HOME@/.deploy/stage/kiln/@COMMIT@/files/kiln-service.jar @HOME@/.kiln/dist/kiln-service.jar.partial
+plan 016 swap chmod 0644 @HOME@/.kiln/dist/kiln-service.jar.partial
+plan 017 swap rename @HOME@/.kiln/dist/kiln-service.jar.partial @HOME@/.kiln/dist/kiln-service.jar @OLD@ @NEW@
+plan 018 swap verify @HOME@/.kiln/dist/kiln-service.jar @NEW@
+plan 019 restart restart kiln
+plan 020 health timeout 6 interval 1
+plan 021 health probe KH1 fresh-active,kiln
+plan 022 health probe KH2 200,/,body~<title>kiln:[[:space:]]dashboard</title>
+plan 023 health probe KH3 200,/api/v1/sources,body~^\{"sources":\[
+plan 024 health probe KH4 421,/,host=evil.example
+plan 025 health settle kiln 1
+plan 026 health reprobe KH1,KH2,KH3,KH4
+plan 027 record record <time> event=install unit=kiln commit=@COMMIT@ sha256=@NEW@ outcome=installed rollback=@OLD@ schema=<s> dir=<B>
+plan 028 on-unhealthy record <time> event=install unit=kiln commit=@COMMIT@ sha256=@NEW@ outcome=health-failed rollback=@OLD@ schema=<s> dir=<B>
+plan 029 on-unhealthy forward-only-if schema>V<before>
+plan 030 rollback restore @HOME@/.kiln/dist/kiln-service.jar.bak-@OLD@ @HOME@/.kiln/dist/kiln-service.jar @OLD@
+plan 031 rollback verify @HOME@/.kiln/dist/kiln-service.jar @OLD@
+plan 032 rollback restart kiln
+plan 033 rollback timeout 6 interval 1
+plan 034 rollback probe KH1 fresh-active,kiln
+plan 035 rollback probe KH2 200,/,body~<title>kiln:[[:space:]]dashboard</title>
+plan 036 rollback probe KH3 200,/api/v1/sources,body~^\{"sources":\[
+plan 037 rollback probe KH4 421,/,host=evil.example
+plan 038 rollback settle kiln 1
+plan 039 rollback reprobe KH1,KH2,KH3,KH4
+plan 040 rollback record <time> event=rollback unit=kiln commit=@COMMIT@ sha256=@NEW@ outcome=rolled-back rollback=@OLD@ schema=<s> dir=<B>
+plan 041 rollback else-record <time> event=rollback unit=kiln commit=@COMMIT@ sha256=@NEW@ outcome=rollback-failed rollback=@OLD@ schema=<s> dir=<B> exit 6 banner
+plan-sha256 @SHA@

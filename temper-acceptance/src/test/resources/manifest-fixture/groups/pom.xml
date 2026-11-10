@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>fx</groupId>
+        <artifactId>manifest-fixture</artifactId>
+        <version>1</version>
+    </parent>
+    <artifactId>groups</artifactId>
+    <!-- groups=fast, excludedGroups=slow (archive scenarios grp, exg; classes JTaggedTest, KMixedTest, LAllSlowTest). -->
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <groups>fast</groups>
+                    <excludedGroups>slow</excludedGroups>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>

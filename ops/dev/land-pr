@@ -1,0 +1,355 @@
+#!/usr/bin/env bash
+# land-pr -- the mechanics of landing a PR the owner approved: checks, merging main in, waiting for CI on the exact
+# head, one rerun of known flakes, the merge. Approval stays human: --approved records it, the script never infers it.
+# The repository has no branch protection, so this is what holds "green on the exact SHA".
+#
+# Usage: ops/dev/land-pr <pr> --approved [--flake <class.method>]... [--allow-neutral <check>]... [--timeout <s>]
+#   --approved       the owner approved this merge; without it nothing is read or changed
+#   --flake          a test whose failure counts as a known flake, beside those in ops/dev/known-flakes
+#   --allow-neutral  a check whose neutral or skipped conclusion counts as green (otherwise only success does)
+#   --timeout        seconds to wait for CI in total, every rerun and every new merge with main included; default 3600
+# Steps, one summary line each (`ok:` on stdout; `refused:`/`FAILED:` on stderr, then exit):
+#   1. `gh pr view`: the PR is OPEN, based on main, not a draft, not from a fork; origin's branch is at its head.
+#   2. Every commit of origin/main..head keeps the one-line rule (message_fault in ops/dev/lib.sh, as pre-push).
+#   3. A head not containing origin/main gets `chore: merge main into <branch>`, made in a temporary detached
+#      worktree and pushed with a plain push (never forced); the worktree is removed. A conflict is aborted: the
+#      branch stays as it was and the conflicting files are named.
+#   4. CI on that exact SHA: its check runs and commit statuses (`gh api .../commits/<sha>/...`, paginated). Green is
+#      every check named in ops/dev/required-checks reported, at least one check, all completed, each success (or
+#      neutral/skipped when allowed). A required check not reported, or none at all, counts as pending. It waits with
+#      `gh run watch` on the SHA's running workflow run, else polls every ${TEMPER_LAND_POLL_SECONDS:-30} s.
+#   5. Red: the failed jobs are rerun once for this SHA, one `gh run rerun <run> --failed` per Actions run, and CI
+#      waited for again, only when every failed check is an Actions job (its check run id is its job id, its run in
+#      its details_url) concluded `failure` whose `gh run view --job <id> --log-failed` shows at least one failed
+#      test, every failure marker parses as a test (`[ERROR] <class>.<method>[(<params>)][[<n>]] ... <<< FAILURE!`
+#      or `<<< ERROR!`, normalised to <class>.<method>), as many as the `Tests run: ..., Failures: F, Errors: E`
+#      summaries count, each of them a known flake, and no other failure shows (COMPILATION ERROR, a failed goal
+#      other than surefire's or failsafe's test failures, an `##[error]` of another step than the failed tests').
+#      Otherwise, or red again (at once, even while the rerun jobs run), it prints the failing checks and tests.
+#   6. The PR is read again: a head that moved since CI was judged is refused. origin/main is fetched again: when it
+#      moved past the head, back to 3 with the green SHA as the head, at most 5 times and within --timeout.
+# ops/dev/known-flakes and ops/dev/required-checks: one entry per line, CR stripped, blank and full-line `#` lines
+# ignored; a line with trailing content (an inline comment) is refused, as it would match nothing. A required check is
+# matched only by an Actions check run of that name, never by a commit status or another app's check run.
+# The known limit: main can still move between the last fetch and `gh pr merge`. --match-head-commit pins the PR's
+# head, not main, so the merge can then join a head tested against a main one commit older. Only branch protection
+# ("require branches to be up to date") closes that window; this repository's plan has none.
+#   7. `gh pr merge <pr> --merge --subject "chore: merge <title without its prefix> (#<pr>)" --body ""
+#      --match-head-commit <sha>`; origin/main is fetched and the merge commit printed; the repository's main
+#      checkout, when on main with no tracked change, is fast-forwarded.
+#
+# Exit codes: 0 merged (a warning after the merge does not change it), 2 usage or no --approved (nothing done),
+# 3 refused (PR state, base, draft, fork, a commit message, origin's branch not at the head, the head moved before
+# the merge, an entry with trailing content in known-flakes or required-checks), 4 merging main conflicted (branch unchanged), 5 CI red (not only known flakes, or red after the one
+# rerun), 6 CI timed out (pending, a required check missing, no check, or main kept moving), 7 a git or gh command failed (fetch, push,
+# reading the PR or the checks, rerun, merge).
+set -euo pipefail
+
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/lib.sh"
+
+usage() {
+  echo "usage: $0 <pr> --approved [--flake <class.method>]... [--allow-neutral <check>]... [--timeout <seconds>]" >&2
+  exit 2
+}
+step() { echo "ok: $*"; }
+refused() { echo "refused: $*" >&2; exit 3; }
+failed() { local rc=$1; shift; echo "FAILED: $*" >&2; exit "$rc"; }
+
+pr=
+approved=0
+flakes=
+allowed=
+timeout=3600
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --approved) approved=1; shift ;;
+    --flake) [ $# -ge 2 ] || usage; flakes+=$2$'\n'; shift 2 ;;
+    --allow-neutral) [ $# -ge 2 ] || usage; allowed+=$2$'\n'; shift 2 ;;
+    --timeout) [ $# -ge 2 ] || usage; timeout=$2; shift 2 ;;
+    -*) usage ;;
+    *) [ -z "$pr" ] || usage; pr=$1; shift ;;
+  esac
+done
+[[ "$pr" =~ ^[0-9]+$ ]] || usage
+[[ "$timeout" =~ ^[0-9]+$ ]] || usage
+poll=${TEMPER_LAND_POLL_SECONDS:-30}
+[[ "$poll" =~ ^[1-9][0-9]*$ ]] || { echo "usage: TEMPER_LAND_POLL_SECONDS '$poll' is not a positive whole number" >&2; exit 2; }
+[ "$approved" -eq 1 ] || { echo "refused: no --approved: the owner approves each merge; nothing was done" >&2; exit 2; }
+step "approval: --approved given for #$pr"
+
+repo=$(git -C "$here" rev-parse --show-toplevel)
+cd "$repo"
+config() {  # config <file> <bad>: its entries, CR and surrounding blanks stripped, blank and full-line # lines skipped;
+  [ -f "$1" ] || { echo "refused: land-pr: ${1#"$repo"/} missing" >&2; exit 3; }
+  awk -v bad="$2" -v file="${1#"$repo"/}" '  # exit 3 at an entry matching <bad>, which would silently match nothing
+    { sub(/\r$/, ""); gsub(/^[ \t]+|[ \t]+$/, "") }
+    /^(#|$)/ { next }
+    $0 ~ bad { print "refused: " file ":" NR ": \"" $0 "\" has trailing content (a comment goes on a line of its own)" > "/dev/stderr"; exit 3 }
+    { print }' "$1"
+}
+known=$(config "$here/known-flakes" '[[:space:]#]') || exit 3  # a test name holds no blank
+known+=$'\n'$flakes
+required=$(config "$here/required-checks" '#') || exit 3  # a check name may hold blanks
+
+read_pr() {  # sets state, base, branch, head, draft and fork from the PR's fields, and title raw (no @tsv escapes)
+  local fields
+  fields=$(gh pr view "$pr" --json state,baseRefName,headRefName,headRefOid,isDraft,isCrossRepository,title \
+    --jq '([.state, .baseRefName, .headRefName, .headRefOid, .isDraft, .isCrossRepository] | @tsv), .title') \
+    || failed 7 "gh pr view $pr"
+  { IFS=$'\t' read -r state base branch head draft fork; IFS= read -r title || true; } <<< "$fields"
+}
+
+fetch() {  # fetches origin's main and the PR's branch
+  git fetch -q origin "+refs/heads/main:refs/remotes/origin/main" "+refs/heads/$branch:refs/remotes/origin/$branch" \
+    || failed 7 "git fetch origin main $branch"
+}
+
+read_pr
+[ "$state" = OPEN ] || refused "#$pr is $state, not OPEN"
+[ "$base" = main ] || refused "#$pr is based on $base, not main"
+[ "$draft" = false ] || refused "#$pr is a draft"
+[ "$fork" = false ] || refused "#$pr comes from a fork"
+fetch
+fetched=$(git rev-parse "refs/remotes/origin/$branch")
+[ "$fetched" = "$head" ] || refused "origin's $branch is at $fetched, #$pr's head is $head: it is moving; run again"
+step "pr: #$pr '$title' is open, based on main, not a draft, not from a fork; $branch at $head"
+
+bad=
+count=0
+for commit in $(git rev-list "refs/remotes/origin/main..$head"); do
+  count=$((count + 1))
+  why=$(message_fault "$commit")
+  [ -z "$why" ] || bad+="  ${commit:0:12} $why"$'\n'
+done
+if [ -n "$bad" ]; then
+  echo "refused: commits of origin/main..$branch break the one-line rule (docs/developer-guide.md §7):" >&2
+  printf '%s' "$bad" >&2
+  exit 3
+fi
+step "subjects: the $count commits of origin/main..$branch keep the one-line rule"
+
+scratch=
+cleanup() {  # removes the temporary worktree, if any
+  [ -n "$scratch" ] || return 0
+  git worktree remove --force "$scratch/tree" > /dev/null 2>&1 || true
+  rm -rf "$scratch"
+  git worktree prune
+  scratch=
+}
+trap cleanup EXIT
+
+merge_main() {  # merge_main: $sha made to contain the fetched origin/main, merged and pushed when it does not
+  if git merge-base --is-ancestor refs/remotes/origin/main "$sha"; then
+    step "main: $branch contains origin/main"
+    return 0
+  fi
+  scratch=$(mktemp -d "${TMPDIR:-/tmp}/land-pr.XXXXXX")
+  git worktree add -q --detach "$scratch/tree" "$sha" || failed 7 "git worktree add $scratch/tree"
+  if ! git -C "$scratch/tree" merge -q --no-ff -m "chore: merge main into $branch" refs/remotes/origin/main \
+      > "$scratch/merge.out" 2>&1; then
+    conflicts=$(git -C "$scratch/tree" diff --name-only --diff-filter=U | tr '\n' ' ')
+    git -C "$scratch/tree" merge --abort > /dev/null 2>&1 || true
+    [ -n "$conflicts" ] || failed 7 "git merge origin/main: $(tail -n 3 "$scratch/merge.out")"
+    failed 4 "main: merging origin/main into $branch conflicts in: ${conflicts% }; $branch is unchanged, merge it by hand"
+  fi
+  sha=$(git -C "$scratch/tree" rev-parse HEAD)
+  git -C "$scratch/tree" push -q origin "HEAD:refs/heads/$branch" \
+    || failed 7 "git push of the merge with main to $branch (a plain push: $branch moved meanwhile?); $branch is unchanged"
+  cleanup
+  step "main: merged origin/main into $branch as $sha and pushed it"
+}
+
+checks_of() {  # checks_of <sha>: "<state>|<id>|<app>|<run>|<name>" per check run and commit status of exactly <sha>:
+  local runs statuses  # state pending or the run's conclusion, app its app's slug, run the Actions run id from its
+  # details_url ("-" when none, or when another app made it); a status is success, pending or failure with id, app and run "status", "-", "-"
+  runs=$(gh api "repos/{owner}/{repo}/commits/$1/check-runs" --paginate \
+    --jq '.check_runs[] | [.id, .status, (.conclusion // ""), (.app.slug // ""), (.details_url // ""), .name] | @tsv') \
+    || return 1
+  statuses=$(gh api "repos/{owner}/{repo}/commits/$1/status" --paginate \
+    --jq '.statuses[] | [.state, .context] | @tsv') || return 1
+  printf '%s\n' "$runs" | awk -F'\t' 'NF { run = "-"
+      if ($4 == "github-actions" && match($5, /\/actions\/runs\/[0-9]+\//)) run = substr($5, RSTART + 14, RLENGTH - 15)
+      print ($2 != "completed" ? "pending" : $3) "|" $1 "|" ($4 == "" ? "-" : $4) "|" run "|" $6 }'
+  printf '%s\n' "$statuses" | awk -F'\t' 'NF { print ($1 == "success" || $1 == "pending" ? $1 : "failure") "|status|-|-|" $2 }'
+}
+
+judge() {  # judge <stale ids>: "<verdict>|<failing id:state:run ...>|<detail>" for $sha; verdict none, pending, red or
+  local checks  # green. A check run in <stale ids> (one a rerun replaces) is pending; after a rerun (stale ids given)
+  checks=$(checks_of "$sha") || return 1  # a failure is red at once, as waiting cannot change it
+  printf '%s\n' "$checks" | ALLOWED=$allowed REQUIRED=$required STALE=$1 awk -F'|' '
+    BEGIN { n = split(ENVIRON["ALLOWED"], a, "\n"); for (i = 1; i <= n; i++) ok[a[i]] = 1
+            n = split(ENVIRON["STALE"], a, " "); for (i = 1; i <= n; i++) { sub(/:.*/, "", a[i]); old[a[i]] = 1 } }
+    NF < 5 { next }
+    { total++; name = substr($0, length($1) + length($2) + length($3) + length($4) + 5) }
+    $3 == "github-actions" { seen[name] = 1 }  # a required check is an Actions job; a status or another app is not
+    $1 == "pending" || ($2 in old) { waiting = waiting (waiting == "" ? "" : ", ") name; next }
+    $1 == "success" || (($1 == "neutral" || $1 == "skipped") && (name in ok)) { next }
+    { bad = bad (bad == "" ? "" : ", ") name " (" $1 ")"; ids = ids (ids == "" ? "" : " ") $2 ":" $1 ":" $4 }
+    END {
+      n = split(ENVIRON["REQUIRED"], a, "\n")
+      for (i = 1; i <= n; i++) if (a[i] != "" && !(a[i] in seen)) waiting = waiting (waiting == "" ? "" : ", ") a[i] " (not reported)"
+      if (bad != "" && ENVIRON["STALE"] != "") print "red|" ids "|" bad
+      else if (total == 0) print "none||no check reported"
+      else if (waiting != "") print "pending||" waiting
+      else if (bad != "") print "red|" ids "|" bad
+      else print "green||" total " checks" }'
+}
+
+deadline=$(($(date +%s) + timeout))
+wait_ci() {  # wait_ci <stale ids>: waits for a green or red verdict on $sha (verdict, ids, detail); exit 6 at the deadline
+  local result left run watched=
+  while :; do
+    result=$(judge "$1") || failed 7 "reading the checks of $sha (gh api)"
+    IFS='|' read -r verdict ids detail <<< "$result"
+    case "$verdict" in green|red) return 0 ;; esac
+    left=$((deadline - $(date +%s)))
+    [ "$left" -gt 0 ] || failed 6 "ci: timed out after ${timeout}s on $sha: $detail"
+    run=$(gh run list --commit "$sha" --json databaseId,status \
+      --jq '.[] | select(.status != "completed") | .databaseId' 2> /dev/null | head -n 1) || run=
+    if [ -n "$run" ] && [ "$run" != "$watched" ]; then
+      watched=$run  # once per wait: a watch that returns early must not spin
+      bounded "$left" gh run watch "$run" > /dev/null 2>&1 || true
+    else
+      sleep $((poll < left ? poll : left))
+    fi
+  done
+}
+
+# A surefire/failsafe test failure line: [ERROR] <class>.<method>, a (<params>) and a [<n>] of a parameterised test.
+TEST_LINE='.*\[ERROR\][[:space:]]+([^[:space:](]+)(\([^)]*\))?(\[[0-9]+\])?[[:space:]]+(--[[:space:]]+)?Time elapsed:.*<<< (FAILURE|ERROR)!.*'
+
+failures_in() {  # failures_in <log>: per failure in a failed job's log a <class>.<method>, or "unexplained: <why>"
+  local line test n steps= errors= count=0 sum=0  # (the log's lines are "<job>\t<step>\t<time> <text>")
+  while IFS= read -r line; do
+    case "$line" in
+      *'Tests run:'*' -- in '*) ;;  # a class's summary; its failed tests have lines of their own
+      *'Tests run: '*', Failures: '*', Errors: '*', Skipped: '*)  # a module's summary of its surefire or failsafe run
+        n=$(printf '%s\n' "$line" | sed -nE 's/.*Failures: ([0-9]+), Errors: ([0-9]+), Skipped: [0-9]+[[:space:]]*$/\1 \2/p')
+        [ -z "$n" ] || sum=$((sum + ${n% *} + ${n#* })) ;;
+      *'<<< FAILURE!'*|*'<<< ERROR!'*)
+        test=$(printf '%s\n' "$line" | sed -nE "s/$TEST_LINE/\\1/p")
+        if [ -n "$test" ]; then
+          echo "$test"
+          count=$((count + 1))
+          steps+=$(printf '%s\n' "$line" | cut -f 2)$'\n'
+        else
+          echo "unexplained: $line"
+        fi ;;
+      *'##[error]'*) errors+=$line$'\n' ;;
+      *'COMPILATION ERROR'*) echo "unexplained: $line" ;;
+      *'Failed to execute goal'*)
+        case "$line" in
+          *maven-surefire-plugin*'There are test failures'*|*maven-failsafe-plugin*'There are test failures'*) ;;
+          *) echo "unexplained: $line" ;;
+        esac ;;
+    esac
+  done <<< "$1"
+  while IFS= read -r line; do  # an error of a step other than the one whose tests failed (GitHub marks maven's own)
+    [ -z "$line" ] || grep -Fqx -- "$(cut -f 2 <<< "$line")" <<< "$steps" || echo "unexplained: $line"
+  done <<< "$errors"
+  [ "$count" -eq "$sum" ] || echo "unexplained: $count failed test lines, but the test summaries count $sum failures and errors"
+}
+
+only_flakes() {  # only_flakes <failures>: at least one, and each a known flake, matched whole
+  local test
+  [ -n "$1" ] || return 1
+  while read -r test; do
+    # a here-string, not a pipe: under pipefail grep -q's early exit can SIGPIPE printf (141) and read a known flake
+    # as unknown (seen as a LandPrIT.twoFlakyJobsOfOneRun red, 2026-10-26)
+    grep -Fqx -- "$test" <<< "$known" || return 1
+  done <<< "$1"
+}
+
+listed() { printf '%s\n' "$1" | paste -s -d ' ' -; }  # listed <lines>: on one line
+
+explain() {  # explain: sets tests (the failures in the logs of the failing checks $ids) and why (empty when every
+  local entry id conclusion log failures  # failing check is an Actions job failed by known flakes only); runs, the
+  tests=  # Actions runs of the failing checks
+  why=
+  runs=
+  for entry in $ids; do
+    id=${entry%%:*}
+    conclusion=${entry#*:}
+    conclusion=${conclusion%%:*}
+    if [ "$id" = status ]; then why=${why:-"a commit status failed (no job to rerun)"}; continue; fi
+    [ "$conclusion" = failure ] || why=${why:-"check $id concluded $conclusion"}
+    case "${entry##*:}" in
+      -) why=${why:-"check $id is no Actions job"} ;;
+      *) case " $runs " in *" ${entry##*:} "*) ;; *) runs+=" ${entry##*:}" ;; esac ;;
+    esac
+    if ! log=$(gh run view --job "$id" --log-failed 2> /dev/null); then
+      why=${why:-"check $id has no Actions job log"}
+      continue
+    fi
+    failures=$(failures_in "$log")
+    [ -n "$failures" ] || failures="unexplained: job $id failed without a failed test in its log"
+    tests+=$failures$'\n'
+    only_flakes "$failures" || why=${why:-"job $id failed by more than known flakes"}
+  done
+  tests=$(printf '%s' "$tests" | sort -u)
+}
+
+red() {  # red <what>: exits 5 naming the failing checks and tests
+  failed 5 "ci: $1 on $sha: $detail${why:+; $why}; failing tests: $(listed "${tests:-none found in the logs}")"
+}
+
+ci_green() {  # ci_green: waits until $sha is green, rerunning failed jobs once when only known flakes failed
+  wait_ci ""
+  if [ "$verdict" = red ]; then
+    explain
+    [ -z "$why" ] || red red
+    for run in $runs; do  # once per run: a second rerun of a run already re-running is refused
+      gh run rerun "$run" --failed > /dev/null || failed 7 "gh run rerun $run --failed"
+    done
+    step "ci: red on $sha only by known flakes ($(listed "$tests")); reran the failed jobs once"
+    wait_ci "$ids"
+    if [ "$verdict" = red ]; then
+      explain
+      why=
+      red "red again after the one rerun"
+    fi
+  fi
+  step "ci: green on $sha: $detail"
+}
+
+MAX_REMERGES=5
+remerges=0
+sha=$head
+while :; do
+  merge_main
+  ci_green
+  read_pr
+  [ "$head" = "$sha" ] || refused "head: #$pr moved to $head after CI was judged on $sha; not merged"
+  [ "$state" = OPEN ] || refused "head: #$pr is $state now; not merged"
+  step "head: #$pr is still at $sha"
+  fetch
+  git merge-base --is-ancestor refs/remotes/origin/main "$sha" && break
+  remerges=$((remerges + 1))
+  [ "$remerges" -le "$MAX_REMERGES" ] \
+    || failed 6 "main: origin/main kept moving: it moved after CI $remerges times (at most $MAX_REMERGES merges of main); last CI on $sha"
+  [ "$(date +%s)" -lt "$deadline" ] || failed 6 "ci: timed out after ${timeout}s: origin/main moved after CI on $sha"
+  step "main: origin/main moved to $(git rev-parse refs/remotes/origin/main) during CI; merging it in again"
+done
+
+subject="chore: merge $(printf '%s' "$title" | sed -E 's/^(feat|fix|refactor|chore|docs|test)(\([^()]+\))?: //') (#$pr)"
+gh pr merge "$pr" --merge --subject "$subject" --body "" --match-head-commit "$sha" || failed 7 "gh pr merge $pr"
+step "merge: #$pr merged as '$subject'"
+
+merged=$(gh pr view "$pr" --json mergeCommit --jq '.mergeCommit.oid') || merged=
+if git fetch -q origin "+refs/heads/main:refs/remotes/origin/main" && [ -n "$merged" ] \
+    && line=$(git log -1 --format='%H %s' "$merged" 2> /dev/null); then
+  step "main: merge commit $line"
+else
+  echo "warning: main: could not fetch or show the merge commit '${merged:-unknown}' of #$pr" >&2
+fi
+checkout=$(git worktree list --porcelain | sed -n '1s/^worktree //p')
+if [ "$(git -C "$checkout" symbolic-ref -q --short HEAD || true)" != main ]; then
+  step "checkout: $checkout is not on main; left as it is"
+elif [ -n "$(git -C "$checkout" status --porcelain --untracked-files=no)" ]; then
+  step "checkout: $checkout has tracked changes; left as it is"
+elif git -C "$checkout" merge -q --ff-only refs/remotes/origin/main > /dev/null 2>&1; then
+  step "checkout: fast-forwarded $checkout to $(git -C "$checkout" rev-parse HEAD)"
+else
+  echo "warning: checkout: could not fast-forward $checkout to origin/main" >&2
+fi

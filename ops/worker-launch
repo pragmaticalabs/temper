@@ -1,0 +1,432 @@
+#!/usr/bin/env bash
+# worker-launch -- the ONLY command a temper controller key may run on a worker host (m0-design §6.4, Q-13).
+#
+# Installed as ~/.temper/bin/worker-launch and bound to the key by a forced command in ~/.ssh/authorized_keys:
+#   restrict,from="127.0.0.1,::1",command="exec ~/.temper/bin/worker-launch" ssh-ed25519 AAAA... temper-controller
+#
+# The requested command arrives in $SSH_ORIGINAL_COMMAND and must be EXACTLY one of (single spaces, nothing else):
+#   run <ver>               copy ~/.temper/worker-<ver>.jar to a private ~/.temper/run/worker-<ver>.<pid>.jar, and
+#                           exec that copy only if ITS sha256 equals the one recorded at install in
+#                           ~/.temper/worker-<ver>.jar.sha256 (the file executed is the file hashed; a concurrent
+#                           install cannot swap it). Copies of workers that are no longer running are removed.
+#                           Then, best effort, old installed jars are pruned (below); a prune failure is logged on
+#                           stderr and the launch goes on.
+#   install <ver> <sha256>  read the jar from stdin, verify its sha256 BEFORE anything is renamed into place, record
+#                           the hash, then rename both atomically into ~/.temper
+#   evidence <job> <unit> small|full
+#                           READ-ONLY (m1-design §3.2, CTO ruling M1-2): `tar -czf -` of the unit directory
+#                           ~/.temper/jobs/<job>/units/<unit> on stdout. `small` is the fixed set .temper, reports,
+#                           threaddumps, manifest and log.tail (missing members skipped); `full` is the whole
+#                           directory. Every path component from ~/.temper down must be a real directory (a symbolic
+#                           link anywhere is refused), the unit directory's physical path must lie under the physical
+#                           ~/.temper/jobs, and the apparent size of its regular files is capped (small 256 MiB, full
+#                           4 GiB). tar never follows a link. Nothing is written and no environment is printed.
+#   tickets                READ-ONLY (T3 contract C3.3): `exec "$HOME/tools/bb-tickets"`, the bb queue's tickets as JSON lines
+#                           plus a trailer. No other word may follow. bb tooling is per user, so TEMPER_WORKER_HOME does not
+#                           change the path. 69 when ~/tools/bb-tickets is not installed.
+# <ver> matches ^[0-9A-Za-z.+-]{1,40}$, <sha256> is 64 lowercase hex, <job> ^[1-9][0-9]{0,18}$, <unit>
+# ^[a-z0-9][a-z0-9-]{0,31}$ (the shapes of a temper JobId and UnitName). Everything else is refused.
+#
+# TEMPER_WORKER_HOME, an absolute path, replaces ~/.temper everywhere below (every "~/.temper" here means it) and is
+# passed to the worker, which reads the same variable. Only the owner sets it, in the forced command of a second key:
+#   restrict,from="127.0.0.1,::1",command="TEMPER_WORKER_HOME=$HOME/temper-acceptance/.temper exec ~/temper-acceptance/.temper/bin/worker-launch" ssh-ed25519 AAAA... temper-acceptance
+# so the acceptance host tier never touches the live home (M1 WP7 verification, F1). `restrict` does NOT stop sshd from
+# passing client environment. The requester cannot set TEMPER_WORKER_HOME because sshd's AcceptEnv matches no TEMPER_*
+# variable (bigboy: `AcceptEnv LANG LC_*`), PermitUserEnvironment is off (bigboy: unset, so the default `no`), and the
+# account has no `environment=` option in authorized_keys and no ~/.ssh/environment (docs/hosts/bigboy.md, checked
+# 2026-10-25). Changing AcceptEnv or PermitUserEnvironment breaks that. This launcher reads no other variable of its own.
+#
+# Pruning (owner decision A2), on every `run <ver>`: ~/.temper keeps the jar being launched and the PREVIOUS one, the
+# installed jar most recently launched or installed before it. "Most recently" is the jar's mtime in whole seconds
+# (`stat -c %Y` on GNU, `stat -f %m` on BSD, so both OSes compare alike): install writes it, and every `run` stamps its
+# own jar (`touch`) when it claims it, so the order is the order of real launches, never of names. Every jar tied for
+# the newest second is kept. Only an installed pair is a candidate: a regular ~/.temper/worker-<ver>.jar, <ver> in the
+# version alphabet below, next to a regular worker-<ver>.jar.sha256 whose first line is a sha256, exactly what `install`
+# writes; a `.part`, a `.bak-*`, an install's `.worker-*` temporary, a link or any other name is never touched, nor a
+# jar whose mtime cannot be read. A version with a run copy in ~/.temper/run (a running worker, or a launch that has
+# claimed it) is never pruned.
+#
+# The lock: a kernel lock (flock) on ~/.temper/run/.lock, taken with flock(1) when it is on PATH, else with python3's
+# fcntl.flock when a python3 on PATH passes a self-test (`import fcntl`; the macOS /usr/bin/python3 stub without the
+# Command Line Tools does not), on a descriptor this shell holds. The kernel drops it when the last process holding that descriptor
+# ends, killed or not, so no lock is ever broken by age. A launch claims its version (creates its run copy and stamps
+# its jar), a prune scans and deletes, and `install` renames its record and jar into place, each under the lock, so
+# none of them overlaps another: a prune never takes a claimed or freshly installed jar, or leaves a jar without its
+# record. The lock is waited for 5 seconds at most. A prune that cannot take it in time is skipped (logged), and the
+# launch goes on; a claim that cannot take it in time is made without it (a version pruned meanwhile is then not
+# installed, 66, below); an install that cannot take it in time installs nothing (70). With neither flock nor a
+# working python3, or when the tool fails other than by timing out (or the lock file cannot be opened), there is no
+# lock: pruning is skipped (logged), never done unlocked, and claims and installs go on unlocked (an install logs it),
+# since no prune can run on this host without a working tool. A version pruned before its launch claimed it is not installed (66), as after any prune, and the controller
+# installs it again. The descriptor is closed before the worker is exec'd, so a running worker never holds the lock.
+#
+# Writes only under ~/.temper. No shell evaluation of the request: it is split into words and compared literally.
+# The java used is "$(cat ~/.temper/java-home)/bin/java" when that file exists, else the first java on PATH.
+#
+# Exit codes: 64 refused (bad or missing command, a symbolic link or an escape in the evidence path), 65 integrity
+# (sha256 mismatch, missing or bad record; evidence over its size cap), 66 jar not installed or no such unit
+# directory, 69 no usable java, 70 install I/O failure; `run` otherwise becomes the worker's own exit code, and
+# `evidence` tar's.
+set -euo pipefail
+umask 077
+
+readonly TEMPER_HOME="${TEMPER_WORKER_HOME:-$HOME/.temper}"
+readonly VERSION_RE='^[0-9A-Za-z.+-]{1,40}$'
+readonly SHA_RE='^[0-9a-f]{64}$'
+readonly MAX_JAR_BYTES=$((256 * 1024 * 1024))
+readonly JOB_RE='^[1-9][0-9]{0,18}$'
+readonly UNIT_RE='^[a-z0-9][a-z0-9-]{0,31}$'
+readonly SMALL_CAP_BYTES=$((256 * 1024 * 1024))
+readonly FULL_CAP_BYTES=$((4 * 1024 * 1024 * 1024))
+readonly SMALL_SET=".temper reports threaddumps manifest log.tail"
+
+die() {  # die <exit code> <message...>
+  local code=$1
+  shift
+  echo "worker-launch: $*" >&2
+  exit "$code"
+}
+
+sha256_of() {  # sha256_of <file> -> lowercase hex on stdout
+  if command -v sha256sum > /dev/null 2>&1; then
+    sha256sum < "$1" | cut -d' ' -f1
+  else
+    shasum -a 256 < "$1" | cut -d' ' -f1
+  fi
+}
+
+java_bin() {
+  local home_file=$TEMPER_HOME/java-home
+  if [ -f "$home_file" ]; then
+    local java_home
+    java_home=$(head -n 1 "$home_file")
+    [ -x "$java_home/bin/java" ] || die 69 "java-home $java_home has no executable bin/java"
+    echo "$java_home/bin/java"
+  else
+    command -v java || die 69 "no java on PATH and no $home_file"
+  fi
+}
+
+regular_file() {  # a regular file that is not a symbolic link
+  [ -f "$1" ] && [ ! -L "$1" ]
+}
+
+reap_copies() {  # reap_copies <dir>: remove run copies whose worker process is gone
+  local copy base pid
+  for copy in "$1"/worker-*.jar; do
+    [ -e "$copy" ] || continue
+    base=${copy%.jar}
+    pid=${base##*.}
+    [[ $pid =~ ^[0-9]+$ ]] || continue
+    kill -0 "$pid" 2> /dev/null || rm -f -- "$copy"
+  done
+}
+
+readonly LOCK_WAIT_SECONDS=5
+LOCK_FD_OPEN=0
+
+# The exit code of a lock tool that timed out; any other non-zero code is the tool failing.
+readonly LOCK_TIMED_OUT=75
+
+lock_tool() {  # lock_tool: flock, a working python3, or nothing (no lock is possible)
+  if command -v flock > /dev/null 2>&1; then
+    echo flock
+  elif command -v python3 > /dev/null 2>&1 && python3 -I -c 'import fcntl' > /dev/null 2>&1; then
+    echo python3
+  fi
+}
+
+# Takes an exclusive flock on descriptor 9, which the calling shell holds, retrying until the deadline; exits 75 when
+# the deadline passes (an unexpected error exits 1, a tool failure).
+readonly PY_LOCK='import fcntl, sys, time
+deadline = time.monotonic() + float(sys.argv[1])
+while True:
+    try:
+        fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        sys.exit(0)
+    except BlockingIOError:
+        if time.monotonic() >= deadline:
+            sys.exit(75)
+        time.sleep(0.05)'
+
+# lock_take <runs dir>: 0 locked (descriptor 9), 1 held by another past the wait, 2 no lock tool, 3 the tool failed
+# (or the lock file cannot be opened); 2 and 3 both mean no lock.
+lock_take() {
+  local tool rc=0
+  tool=$(lock_tool)
+  [ -n "$tool" ] || return 2
+  exec 9>> "$1/.lock" || return 3
+  LOCK_FD_OPEN=1
+  if [ "$tool" = flock ]; then
+    flock -w "$LOCK_WAIT_SECONDS" -E "$LOCK_TIMED_OUT" 9 || rc=$?
+  else
+    python3 -I -c "$PY_LOCK" "$LOCK_WAIT_SECONDS" || rc=$?
+  fi
+  [ "$rc" -ne 0 ] || return 0
+  lock_release
+  [ "$rc" -eq "$LOCK_TIMED_OUT" ] && return 1
+  echo "worker-launch: the lock tool $tool failed (rc $rc); going on without the lock" >&2
+  return 3
+}
+
+lock_release() {  # lock_release: closing this shell's descriptor drops the lock (no child keeps it)
+  if [ "$LOCK_FD_OPEN" = 1 ]; then
+    exec 9>&-
+    LOCK_FD_OPEN=0
+  fi
+}
+
+claim() {  # claim <copy> <jar>: create the run copy (so no prune takes the version) and stamp the jar
+  : > "$1" && touch -c -- "$2"
+}
+
+installed_pair() {  # installed_pair <jar>: exactly what `install` leaves, a regular jar and a well-formed record
+  local record
+  regular_file "$1" && regular_file "$1.sha256" || return 1
+  record=$(head -n 1 "$1.sha256" 2> /dev/null) || return 1
+  [[ $record =~ $SHA_RE ]]
+}
+
+claimed() {  # claimed <runs dir> <ver>: a run copy worker-<ver>.<pid>.jar exists (a running worker, or a claimed launch)
+  local copy pid
+  for copy in "$1/worker-$2".*.jar; do
+    [ -e "$copy" ] || continue
+    pid=${copy#"$1/worker-$2."}
+    pid=${pid%.jar}
+    [[ $pid =~ ^[0-9]+$ ]] && return 0
+  done
+  return 1
+}
+
+version_of() {  # version_of <jar path>: <ver> of .../worker-<ver>.jar
+  local name=${1##*/}
+  name=${name#worker-}
+  echo "${name%.jar}"
+}
+
+prune_jars() {  # prune_jars <runs dir> <ver>: delete installed pairs but <ver>, the newest others and claimed ones
+  local runs=$1 current=$2 jar ver seconds newest=-1 failed=0
+  local -a others=() times=() mtime
+  # The mtime in whole seconds, the stat flavour detected once: GNU `-c %Y`, BSD `-f %m`.
+  if stat -c %Y / > /dev/null 2>&1; then
+    mtime=(stat -c %Y --)
+  else
+    mtime=(stat -f %m --)
+  fi
+  for jar in "$TEMPER_HOME"/worker-*.jar; do
+    ver=$(version_of "$jar")
+    [[ $ver =~ $VERSION_RE ]] || continue
+    [ "$ver" != "$current" ] || continue
+    installed_pair "$jar" || continue
+    if ! seconds=$("${mtime[@]}" "$jar") || ! [[ $seconds =~ ^[0-9]+$ ]]; then
+      echo "worker-launch: cannot read the mtime of ${jar##*/}; kept" >&2
+      failed=1
+      continue
+    fi
+    others+=("$jar")
+    times+=("$seconds")
+    [ "$seconds" -le "$newest" ] || newest=$seconds
+  done
+  # Indexed by count, not by expanding the arrays: an empty array expands as unbound under `set -u` in bash 3.2, and
+  # this loop needs no guard for it.
+  local i=-1
+  while [ $((i += 1)) -lt "${#others[@]}" ]; do
+    jar=${others[$i]}
+    # The previous jar, and every jar tied with it to the second.
+    [ "${times[$i]}" -lt "$newest" ] || continue
+    claimed "$runs" "$(version_of "$jar")" && continue
+    if rm -f -- "$jar" && rm -f -- "$jar.sha256"; then
+      echo "worker-launch: pruned ${jar##*/}" >&2
+    else
+      echo "worker-launch: could not prune ${jar##*/}" >&2
+      failed=1
+    fi
+  done
+  return "$failed"
+}
+
+prune() {  # prune <runs dir> <ver>: best effort; never fails the launch, never prunes unlocked
+  local rc=0
+  lock_take "$1" || rc=$?
+  case $rc in
+    1) echo "worker-launch: pruning skipped: $1/.lock is held; launching anyway" >&2; return 0 ;;
+    2) echo "worker-launch: pruning skipped: neither flock nor a working python3 is available to lock it; launching anyway" >&2; return 0 ;;
+    3) echo "worker-launch: pruning skipped: no lock; launching anyway" >&2; return 0 ;;
+  esac
+  # A subshell: not even an unexpected shell error in the prune can end the launch. It holds the lock with its parent.
+  ( prune_jars "$1" "$2" ) || rc=$?
+  lock_release
+  [ "$rc" -eq 0 ] || echo "worker-launch: pruning old worker jars failed (rc $rc); launching anyway" >&2
+  return 0
+}
+
+run_worker() {  # run_worker <ver>
+  local jar=$TEMPER_HOME/worker-$1.jar
+  local record=$jar.sha256
+  regular_file "$jar" || die 66 "worker-$1.jar is not installed"
+  regular_file "$record" || die 65 "no recorded sha256 for worker-$1.jar"
+  local expected actual
+  expected=$(head -n 1 "$record")
+  [[ $expected =~ $SHA_RE ]] || die 65 "recorded sha256 for worker-$1.jar is malformed"
+  local java
+  java=$(java_bin)
+  local runs=$TEMPER_HOME/run
+  mkdir -p "$runs" || die 70 "cannot create $runs"
+  reap_copies "$runs"
+  # The JVM gets this shell's pid on exec, so the copy is named after the worker that runs it.
+  local copy=$runs/worker-$1.$$.jar
+  local locked=0
+  lock_take "$runs" || locked=$?
+  [ "$locked" -ne 1 ] || echo "worker-launch: $runs/.lock is held; claiming worker-$1.jar without it" >&2
+  claim "$copy" "$jar" || { lock_release; rm -f -- "$copy"; die 70 "cannot claim worker-$1.jar"; }
+  lock_release
+  # Pruned by another launch before this one claimed it: not installed, as after any prune.
+  regular_file "$jar" || { rm -f -- "$copy"; die 66 "worker-$1.jar is not installed"; }
+  cp -- "$jar" "$copy" || { rm -f -- "$copy"; die 70 "cannot copy worker-$1.jar"; }
+  actual=$(sha256_of "$copy")
+  if [ "$actual" != "$expected" ]; then
+    rm -f -- "$copy"
+    die 65 "sha256 of worker-$1.jar does not match the recorded one; refusing to run it"
+  fi
+  prune "$runs" "$1"
+  TEMPER_WORKER_HOME=$TEMPER_HOME exec "$java" -XX:+ExitOnOutOfMemoryError -jar "$copy"
+}
+
+install_worker() {  # install_worker <ver> <sha256>; the jar arrives on stdin
+  local version=$1 expected=$2
+  local jar=$TEMPER_HOME/worker-$version.jar
+  mkdir -p "$TEMPER_HOME" || die 70 "cannot create $TEMPER_HOME"
+  [ ! -d "$jar" ] && [ ! -d "$jar.sha256" ] || die 70 "a directory is in the way of worker-$version.jar"
+  local partial
+  partial=$(mktemp "$TEMPER_HOME/.worker-$version.jar.XXXXXX") || die 70 "cannot create a temporary file"
+  # shellcheck disable=SC2064  # expand now: the trap must remove exactly these files
+  trap "rm -f -- '$partial' '$partial.sha256'" EXIT
+  head -c $((MAX_JAR_BYTES + 1)) > "$partial" || die 70 "reading the jar from stdin failed"
+  local size
+  size=$(wc -c < "$partial" | tr -d ' ')
+  [ "$size" -gt 0 ] || die 65 "empty jar on stdin"
+  [ "$size" -le "$MAX_JAR_BYTES" ] || die 65 "jar larger than $MAX_JAR_BYTES bytes"
+  local actual
+  actual=$(sha256_of "$partial")
+  [ "$actual" = "$expected" ] || die 65 "sha256 mismatch: got $actual, expected $expected; nothing installed"
+  printf '%s\n' "$expected" > "$partial.sha256" || die 70 "cannot write the hash record"
+  chmod 600 "$partial" "$partial.sha256"
+  # Under the lock (header): no prune runs between the two renames, so none deletes the new jar or leaves it without
+  # its record. Without a lock tool no prune can run at all.
+  mkdir -p "$TEMPER_HOME/run" || die 70 "cannot create $TEMPER_HOME/run"
+  local locked=0
+  lock_take "$TEMPER_HOME/run" || locked=$?
+  [ "$locked" -ne 1 ] || die 70 "$TEMPER_HOME/run/.lock is held past ${LOCK_WAIT_SECONDS}s; nothing installed"
+  [ "$locked" -eq 0 ] || echo "worker-launch: installing worker-$version.jar without the lock (no working lock tool)" >&2
+  # Record first, jar second: between the two renames `run` sees a mismatch and refuses (fails safe), never a jar
+  # whose hash was not recorded.
+  mv -f -- "$partial.sha256" "$jar.sha256" || die 70 "cannot rename the hash record into place"
+  mv -f -- "$partial" "$jar" || die 70 "cannot rename the jar into place"
+  lock_release
+  trap - EXIT
+  echo "worker-launch: installed worker-$version.jar sha256=$expected" >&2
+}
+
+real_dir() {  # real_dir <path>: an existing directory that is not a symbolic link (refuses 64 on a link)
+  if [ -L "$1" ]; then
+    die 64 "refused: a symbolic link in the evidence path"
+  fi
+  [ -d "$1" ]
+}
+
+physical() {  # physical <dir>: the directory's path with every link resolved
+  (cd -P -- "$1" && pwd -P)
+}
+
+apparent_bytes() {  # apparent_bytes <member...>: total size of the regular files below, links not followed
+  local -a sizer
+  if stat -c %s / > /dev/null 2>&1; then
+    sizer=(stat -c %s)
+  else
+    sizer=(stat -f %z)
+  fi
+  find -P "$@" -type f -print0 | xargs -0 -r "${sizer[@]}" | awk '{ total += $1 } END { printf "%.0f\n", total + 0 }'
+}
+
+send_evidence() {  # send_evidence <job> <unit> <small|full>
+  local jobs=$TEMPER_HOME/jobs
+  local unit_dir=$jobs/$1/units/$2
+  local component
+  for component in "$TEMPER_HOME" "$jobs" "$jobs/$1" "$jobs/$1/units" "$unit_dir"; do
+    real_dir "$component" || die 66 "no evidence directory for job $1 unit $2"
+  done
+  local real_jobs real_unit
+  real_jobs=$(physical "$jobs") || die 66 "cannot resolve the jobs directory"
+  real_unit=$(physical "$unit_dir") || die 66 "cannot resolve the unit directory"
+  case "$real_unit" in
+    "$real_jobs"/*) ;;
+    *) die 64 "refused: the unit directory lies outside ~/.temper/jobs" ;;
+  esac
+  cd -P -- "$real_unit" || die 66 "cannot enter the unit directory"
+  local -a members=()
+  local cap member
+  if [ "$3" = full ]; then
+    members=(.)
+    cap=$FULL_CAP_BYTES
+  else
+    for member in $SMALL_SET; do
+      if [ -e "$member" ] || [ -L "$member" ]; then
+        members+=("$member")
+      fi
+    done
+    cap=$SMALL_CAP_BYTES
+  fi
+  if [ "${#members[@]}" -eq 0 ]; then
+    exec tar -czf - -T /dev/null
+  fi
+  local size
+  size=$(apparent_bytes "${members[@]}")
+  [ "$size" -le "$cap" ] || die 65 "evidence of job $1 unit $2 is $size bytes, over the $3 cap of $cap"
+  exec tar -czf - -- "${members[@]}"
+}
+
+main() {
+  [[ $TEMPER_HOME == /* ]] || die 64 "refused: TEMPER_WORKER_HOME must be an absolute path"
+  local request=${SSH_ORIGINAL_COMMAND:-}
+  [ -n "$request" ] || die 64 "no command: this key only runs 'run <ver>', 'install <ver> <sha256>', 'evidence <job> <unit> small|full' or 'tickets'"
+  case "$request" in
+    *$'\n'* | *$'\r'* | *$'\t'*) die 64 "refused: control characters in the command" ;;
+  esac
+  local -a words
+  read -r -a words <<< "$request"
+  # Exactness: the words joined by single spaces must give back the request unchanged.
+  [ "${words[*]}" = "$request" ] || die 64 "refused: the command must be single-space separated"
+  case "${words[0]}" in
+    run)
+      [ "${#words[@]}" -eq 2 ] || die 64 "usage: run <ver>"
+      [[ ${words[1]} =~ $VERSION_RE ]] || die 64 "refused: bad version"
+      run_worker "${words[1]}"
+      ;;
+    install)
+      [ "${#words[@]}" -eq 3 ] || die 64 "usage: install <ver> <sha256>"
+      [[ ${words[1]} =~ $VERSION_RE ]] || die 64 "refused: bad version"
+      [[ ${words[2]} =~ $SHA_RE ]] || die 64 "refused: sha256 must be 64 lowercase hex"
+      install_worker "${words[1]}" "${words[2]}"
+      ;;
+    evidence)
+      [ "${#words[@]}" -eq 4 ] || die 64 "usage: evidence <job> <unit> small|full"
+      [[ ${words[1]} =~ $JOB_RE ]] || die 64 "refused: bad job id"
+      [[ ${words[2]} =~ $UNIT_RE ]] || die 64 "refused: bad unit name"
+      case "${words[3]}" in
+        small | full) ;;
+        *) die 64 "refused: the evidence kind is small or full" ;;
+      esac
+      send_evidence "${words[1]}" "${words[2]}" "${words[3]}"
+      ;;
+    tickets)
+      [ "${#words[@]}" -eq 1 ] || die 64 "usage: tickets"
+      [ -x "$HOME/tools/bb-tickets" ] || die 69 "~/tools/bb-tickets not installed"
+      exec "$HOME/tools/bb-tickets"
+      ;;
+    *)
+      die 64 "refused: only 'run <ver>', 'install <ver> <sha256>', 'evidence <job> <unit> small|full' and 'tickets' are allowed"
+      ;;
+  esac
+}
+
+main

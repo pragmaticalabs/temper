@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>fx</groupId>
+        <artifactId>manifest-fixture</artifactId>
+        <version>1</version>
+    </parent>
+    <!-- A11 (m1-design §9.1): the host-tier acceptance controller lists this module in [portGroup] modules, so a Gate
+         of this branch goes through bb-hold. -->
+    <artifactId>hold</artifactId>
+</project>

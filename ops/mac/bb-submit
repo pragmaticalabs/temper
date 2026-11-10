@@ -1,0 +1,91 @@
+#!/bin/bash
+# bb-submit -- queue a build on a bb host with the caller's Claude session in the ticket (design §7.1).
+# For direct users of ~/tools/bb-build; ops/bb/bb-temper calls it for the temper builds.
+#
+#   bb-submit [--detached --reader <label>] <user@address> <remote-checkout> [mvn args...]
+#
+# Runs, over ssh, on the host:
+#   <session words> [BB_AGENT=…] [BB_LANE=…] [BB_PR=…] BB_OWNER=<o> ~/tools/bb-build [--detached --reader <l>] <co> <args…>
+# - <session words> are `temper-mac session` of this caller (BB_SESSION_PID/START/LABEL, the first `claude` ancestor); none
+#   when there is no such ancestor (exit 3 there), and the build is queued all the same: the ticket then reads
+#   UNKNOWN(no session field). `temper-mac` is looked up beside this script, else in ~/.local/bin.
+# - BB_OWNER is required ([A-Za-z0-9._-]{1,64}). BB_AGENT and BB_LANE (the same form) and BB_PR (a positive number) are
+#   optional; a malformed one is refused here (exit 2): this tool is new, so a mistake is refused, not silently dropped.
+# - <remote-checkout> is ^(~/)?[A-Za-z0-9._/-]+$ and is placed unquoted so that a leading ~ expands on the host. Every value is
+#   checked against its form before it reaches the remote command line, so nothing shell-active can reach the remote shell;
+#   each mvn argument is printf %q-quoted.
+# - --detached --reader <label> (only as the first three arguments, in that order) marks a build whose owner is a reader
+#   session, not this caller (bb-build writes detached_reader=<label>).
+# - Optional BB_SSH_PROXY=<user@host> and BB_KNOWN_HOSTS=<existing file> (set by bb-temper for a host reached through a jump host, which may only
+#   admit the jump host's network): ssh then goes through that host (ProxyCommand ssh -W) and with the host keys pinned in
+#   that file (StrictHostKeyChecking=yes). A malformed value is refused (exit 2) before any ssh. Unset: ssh as before.
+# The ssh is never retried: a dropped session after the enqueue would enqueue twice. The exit code is ssh's, which is
+# bb-build's. Exit 2: usage or a malformed value; 3 is not used here.
+# bash 3.2 and BSD tools (macOS), also GNU.
+set -euo pipefail
+set -f
+
+readonly WORD_RE='^[A-Za-z0-9._-]{1,64}$'
+readonly LABEL_RE='^[A-Za-z0-9._:-]{1,64}$'
+readonly PR_RE='^[1-9][0-9]{0,9}$'
+readonly TARGET_RE='^[A-Za-z0-9][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9._:-]*$'
+readonly CHECKOUT_RE='^(~/)?[A-Za-z0-9._/-]+$'
+readonly SESSION_RE='^BB_SESSION_PID=[1-9][0-9]{0,9} BB_SESSION_START=[1-9][0-9]{8,10} BB_SESSION_LABEL=[A-Za-z0-9._:-]{1,64}$'
+
+die() { echo "bb-submit: $1" >&2; exit 2; }
+
+detached=
+if [ "${1:-}" = --detached ]; then
+  [ "${2:-}" = --reader ] || die "--detached needs --reader <label> as the next two arguments"
+  [[ ${3:-} =~ $LABEL_RE ]] || die "--reader label must match $LABEL_RE"
+  detached="--detached --reader $3"
+  shift 3
+fi
+[ $# -ge 2 ] || die "usage: bb-submit [--detached --reader <label>] <user@address> <remote-checkout> [mvn args...]"
+target=$1 checkout=$2
+shift 2
+[[ $target =~ $TARGET_RE ]] || die "target must match $TARGET_RE"
+[[ $checkout =~ $CHECKOUT_RE ]] || die "remote checkout must match $CHECKOUT_RE"
+[[ ${BB_OWNER:-} =~ $WORD_RE ]] || die "set BB_OWNER=<agent name matching $WORD_RE>"
+
+env_words="BB_OWNER=$BB_OWNER"
+if [ -n "${BB_PR:-}" ]; then [[ $BB_PR =~ $PR_RE ]] || die "BB_PR must match $PR_RE"; env_words="BB_PR=$BB_PR $env_words"; fi
+if [ -n "${BB_LANE:-}" ]; then [[ $BB_LANE =~ $WORD_RE ]] || die "BB_LANE must match $WORD_RE"; env_words="BB_LANE=$BB_LANE $env_words"; fi
+if [ -n "${BB_AGENT:-}" ]; then [[ $BB_AGENT =~ $WORD_RE ]] || die "BB_AGENT must match $WORD_RE"; env_words="BB_AGENT=$BB_AGENT $env_words"; fi
+# bb-build's own switches (0 or 1): BB_DEDUP=0 runs an identical build anyway, BB_QUEUE=0 bypasses the queue.
+if [ -n "${BB_DEDUP:-}" ]; then [[ $BB_DEDUP =~ ^[01]$ ]] || die "BB_DEDUP must be 0 or 1"; env_words="$env_words BB_DEDUP=$BB_DEDUP"; fi
+if [ -n "${BB_QUEUE:-}" ]; then [[ $BB_QUEUE =~ ^[01]$ ]] || die "BB_QUEUE must be 0 or 1"; env_words="$env_words BB_QUEUE=$BB_QUEUE"; fi
+
+readonly PROXY_RE='^[A-Za-z0-9._-]+@[0-9A-Za-z.-]+$'
+# The ssh key: BB_SSH_KEY (bb-temper exports its config's key), else the `key` line of the bb host config
+# (~/.config/bb-temper/hosts or BB_TEMPER_HOSTS; ops/bb/hosts.example). Neither: refused (exit 2), no key is guessed.
+key=${BB_SSH_KEY:-}
+if [ -z "$key" ]; then
+  hosts=${BB_TEMPER_HOSTS:-$HOME/.config/bb-temper/hosts}
+  [ ! -r "$hosts" ] || key=$(sed -n 's/#.*//; s/^[[:space:]]*key[[:space:]]\{1,\}\([^[:space:]]\{1,\}\)[[:space:]]*$/\1/p' "$hosts" | tail -n 1)
+  case $key in '~/'*) key=$HOME/${key#'~/'} ;; esac
+  [ -n "$key" ] || die "no ssh key: set BB_SSH_KEY or a 'key <path>' line in $hosts"
+fi
+sshopts=(-i "$key" -o BatchMode=yes)
+if [ -n "${BB_SSH_PROXY:-}" ] || [ -n "${BB_KNOWN_HOSTS:-}" ]; then
+  [[ ${BB_SSH_PROXY:-} =~ $PROXY_RE ]] || die "BB_SSH_PROXY must match $PROXY_RE"
+  [ -f "${BB_KNOWN_HOSTS:-}" ] || die "BB_KNOWN_HOSTS must be an existing regular file"
+  sshopts+=(-o "UserKnownHostsFile=$BB_KNOWN_HOSTS" -o StrictHostKeyChecking=yes
+            -o "ProxyCommand=ssh -i $key -o BatchMode=yes -o ConnectTimeout=15 -W %h:%p $BB_SSH_PROXY")
+fi
+
+mac=$(dirname "$0")/temper-mac
+[ -x "$mac" ] || mac=$HOME/.local/bin/temper-mac
+session=
+rc=0
+session=$("$mac" session) || rc=$?
+case $rc in
+  0) [[ $session =~ $SESSION_RE ]] || die "temper-mac session printed an unexpected line" ;;
+  3) session= ;;
+  *) die "temper-mac session failed (exit $rc)" ;;
+esac
+
+args=
+for arg in "$@"; do args="$args $(printf '%q' "$arg")"; done
+remote="${session:+$session }$env_words ~/tools/bb-build${detached:+ $detached} $checkout$args"
+exec ssh "${sshopts[@]}" -o ConnectTimeout=15 "$target" "$remote"

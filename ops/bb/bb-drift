@@ -1,0 +1,204 @@
+#!/usr/bin/env bash
+# bb-drift -- read-only drift check of the installed bb tools against this repo (S2 precursor; added after the repo
+# bb-temper drifted from the live copy unnoticed, 2026-11-09). It writes nothing anywhere: every remote command is a md5sum.
+#
+# Usage: bb-drift [place ...]      default places: mac and every auto host of the host config, in config order
+#   place: mac (this machine), a host name of the host config (~/.config/bb-temper/hosts or BB_TEMPER_HOSTS, the file bb-temper
+#   reads; format: ops/bb/hosts.example), reached as bb-temper reaches it (the same key, jump host and pinned known_hosts), or
+#   user@address (a host, direct ssh with the config's key). A host with pick "explicit" is not a default place; name it to
+#   check it. The config is read only when a place needs it (no places, a host name, or user@address without BB_DRIFT_SSH).
+#   BB_DRIFT_SSH (tests only) replaces everything before <target> in the ssh call.
+# Every file in a host's ~/tools falls in exactly one class:
+#   repo-sourced    bb-build bb-tickets bb-queue-lib.sh bb-queue (ops/bb), kiln-scan kiln-ingest (ops/kiln): compared to the md5
+#                   of the repo file; a mismatch or an absent file is `drift`. The ops/bb pins in install-bb-fields.sh are reused:
+#                   a repo file that is not at its pin is itself reported (place `repo`).
+#   no-repo-source  the host-only tools below, each pinned to the md5 of the 2026-11-09 snapshot (identical on all 3 hosts): at
+#                   the pin it prints `vendor ... to be vendored (PR next)` (informational, not drift); off the pin it is `drift`;
+#                   absent is fine. This class goes away when the vendoring PR lands.
+#   unlisted        any other file: `unlisted <place> <file> md5=<md5|dir>`, exit 1.
+# Not classified: dotfiles (the glob skips them), <known>.bak* and <known>.pre-* (backups the installers leave; <known> is a
+#   repo-sourced or pinned tool name, so evil.bak and x.pre-foo are unlisted), and `maven` -- the host's Maven install, a
+#   directory and not a tool file, so it has no md5 to pin; accepted by name AND only when it resolves to an existing directory
+#   (real or symlink); a dangling symlink, a symlink to a non-directory, a regular file, or any other directory is unlisted.
+# Where each file is expected (the installed set today):
+#   mac:   ~/temper-wt/bb-temper (repo ops/bb/bb-temper), ~/tools/kiln-scan
+#   hosts: ~/tools, as classified above (a place prints under the name it was given: host name or user@address)
+# Output: `drift <place> <file> installed=<md5|absent> expected=<md5>`, `vendor ...`, `unlisted ...` per file per place; `ok <place> <n> files`
+#   (n = repo-sourced files) for a place with no drift and nothing unlisted; `unreachable <place>` for a host that did not answer.
+# Exit: 0 no drift anywhere; 1 drift or unlisted file; 2 usage; 69 a place unreachable (nothing is reported as clean for it);
+#   78 host config missing or malformed.
+set -euo pipefail
+PROG=bb-drift
+
+readonly TARGET_RE='^[a-z_][a-z0-9_-]{0,31}@[A-Za-z0-9.:-]+$'
+HERE=$(cd "$(dirname "$0")" && pwd)
+KILN_SCAN=$HERE/../kiln/kiln-scan
+HOST_FILES=(bb-build bb-tickets bb-queue-lib.sh bb-queue kiln-scan kiln-ingest)
+
+vendor_pin() {  # vendor_pin <file>: the pinned md5 of a host-only tool; fails for any other name
+  case $1 in
+    bb-build-direct) echo 50aa0b772fa7f916e2983be40e328b32 ;;
+    bb-checkout) echo 7098ea8dee142600771968559e15e4db ;;
+    bb-hold) echo 0bc2401b6e94fd05b66e1df04387e2ac ;;
+    bb-hold-test.sh) echo 0f774ba7a36f0734077704319393892e ;;
+    bb-mutate) echo f9bfbd37c5feafe67995f6716e8fecb0 ;;
+    bb-portgroup.py) echo a93ade2ff7dddcc75cee3d4169a08499 ;;
+    bb-report) echo 63b01be0cf9b6fab8c4f523118025a8c ;;
+    bb-sockwatch) echo cdcd6dc4958b5c77493d76fcb31cabfe ;;
+    *) return 1 ;;
+  esac
+}
+
+is_backup() {  # is_backup <file>: <known>.bak* or <known>.pre-*, <known> a repo-sourced or pinned tool name
+  local k
+  for k in "${HOST_FILES[@]}" bb-build-direct bb-checkout bb-hold bb-hold-test.sh bb-mutate bb-portgroup.py bb-report bb-sockwatch; do
+    case $1 in "$k".bak*|"$k".pre-*) return 0 ;; esac
+  done
+  return 1
+}
+
+md5_of() {
+  if command -v md5sum > /dev/null 2>&1; then md5sum < "$1" | cut -d' ' -f1; else md5 -q "$1"; fi
+}
+
+# ---- host config: this block is identical in bb-temper and bb-drift (BbDriftIT holds the two copies equal) --------------
+# The file is ~/.config/bb-temper/hosts, or the one BB_TEMPER_HOSTS names; format and a TEST-NET example: ops/bb/hosts.example.
+# load_hosts sets KEY and the parallel arrays H_NAME H_ADDR H_JUMP H_KNOWN H_PICK (file order). A missing file or any malformed
+# line is exit 78 with the line number: no host, address or key is ever guessed. bash 3.2 compatible.
+HOSTS_FILE=${BB_TEMPER_HOSTS:-$HOME/.config/bb-temper/hosts}
+cfg_die() { echo "$PROG: $HOSTS_FILE: $*" >&2; exit 78; }
+home_path() { case $1 in '~/'*) printf '%s\n' "$HOME/${1#'~/'}" ;; *) printf '%s\n' "$1" ;; esac; }
+host_index() {  # host_index <name>: print the configured host's index; fail when it is not configured
+  local i=0
+  while [ "$i" -lt "${#H_NAME[@]}" ]; do [ "${H_NAME[i]}" = "$1" ] && { echo "$i"; return 0; }; i=$((i + 1)); done
+  return 1
+}
+load_hosts() {
+  local n=0 line f re='^[a-z_][a-z0-9_-]{0,31}@[A-Za-z0-9.:-]+$'
+  KEY=; H_NAME=(); H_ADDR=(); H_JUMP=(); H_KNOWN=(); H_PICK=()
+  [ -r "$HOSTS_FILE" ] || cfg_die "no host config (copy ops/bb/hosts.example there and fill in your hosts)"
+  while IFS= read -r line || [ -n "$line" ]; do
+    n=$((n + 1)); line=${line%$'\r'}; line=${line%%#*}
+    read -r -a f <<< "$line"
+    [ "${#f[@]}" -gt 0 ] || continue
+    case ${f[0]}:${#f[@]} in
+      key:2) [ -z "$KEY" ] || cfg_die "line $n: key is listed twice"; KEY=$(home_path "${f[1]}") ;;
+      host:6)
+        [[ ${f[1]} =~ ^[a-z0-9][a-z0-9-]*$ ]] && [ "${f[1]}" != auto ] && [ "${f[1]}" != mac ] || cfg_die "line $n: bad host name '${f[1]}'"
+        ! host_index "${f[1]}" > /dev/null || cfg_die "line $n: host ${f[1]} is listed twice"
+        [[ ${f[2]} =~ $re ]] || cfg_die "line $n: the address must be user@address"
+        [ "${f[3]}" = - ] || [[ ${f[3]} =~ $re ]] || cfg_die "line $n: the jump must be - or user@address"
+        [ "${f[3]}" = - ] && [ "${f[4]}" = - ] || { [ "${f[3]}" != - ] && [ "${f[4]}" != - ]; } \
+          || cfg_die "line $n: a jump and a known_hosts file go together (both - or both set)"
+        case ${f[5]} in auto|explicit) ;; *) cfg_die "line $n: pick must be auto or explicit" ;; esac
+        H_NAME+=("${f[1]}"); H_ADDR+=("${f[2]}"); H_JUMP+=("${f[3]}"); H_KNOWN+=("$(home_path "${f[4]}")"); H_PICK+=("${f[5]}") ;;
+      *) cfg_die "line $n: expected 'key <path>' or 'host <name> <user@address> <jump> <known_hosts> <auto|explicit>'" ;;
+    esac
+  done < "$HOSTS_FILE"
+  [ -n "$KEY" ] || cfg_die "no 'key <path>' line"
+  [ "${#H_NAME[@]}" -gt 0 ] || cfg_die "no host line"
+}
+auto_hosts() {  # auto_hosts: AUTO = the hosts with pick auto, in file order (the tie order of bb-temper's pick)
+  local i=0
+  AUTO=()
+  while [ "$i" -lt "${#H_NAME[@]}" ]; do [ "${H_PICK[i]}" != auto ] || AUTO+=("${H_NAME[i]}"); i=$((i + 1)); done
+  [ "${#AUTO[@]}" -gt 0 ] || cfg_die "no host with pick auto"
+}
+# ---- end of the shared host-config block ----------------------------------------------------------------------------------
+
+need_cfg=0
+if [ $# -eq 0 ]; then need_cfg=1; fi
+for p in "$@"; do
+  case $p in
+    mac) ;;
+    *@*) [[ $p =~ $TARGET_RE ]] || { echo "bb-drift: bad place '$p' (mac, a configured host name or user@address)" >&2; exit 2; }
+         [ -n "${BB_DRIFT_SSH:-}" ] || need_cfg=1 ;;
+    *) [[ $p =~ ^[a-z0-9][a-z0-9-]*$ ]] || { echo "bb-drift: bad place '$p' (mac, a configured host name or user@address)" >&2; exit 2; }
+       need_cfg=1 ;;
+  esac
+done
+[ "$need_cfg" = 0 ] || load_hosts
+if [ $# -gt 0 ]; then places=("$@"); else auto_hosts; places=(mac "${AUTO[@]}"); fi
+for p in "${places[@]}"; do
+  case $p in
+    mac|*@*) ;;
+    *) host_index "$p" > /dev/null || { echo "bb-drift: place '$p' is not a host of $HOSTS_FILE" >&2; exit 2; } ;;
+  esac
+done
+
+expected_of() {  # expected_of <file>: the md5 a place must hold
+  case $1 in
+    bb-temper) md5_of "$HERE/bb-temper" ;;
+    kiln-scan) md5_of "$KILN_SCAN" ;;
+    kiln-ingest) md5_of "$HERE/../kiln/kiln-ingest" ;;
+    *) md5_of "$HERE/$1" ;;
+  esac
+}
+
+drift=0; down=0
+
+# ---- the repo's own pins: a repo file off its pin is drift of the repo itself
+pin_of() { sed -n "s/^readonly $1=\([0-9a-f]\{32\}\)\$/\1/p" "$HERE/install-bb-fields.sh" | head -n 1; }
+for pair in bb-build:BB_BUILD_NEW bb-tickets:BB_TICKETS_NEW bb-queue-lib.sh:BB_LIB_NEW bb-queue:BB_QUEUE_NEW; do
+  f=${pair%%:*}; pin=$(pin_of "${pair##*:}"); have=$(md5_of "$HERE/$f")
+  if [ "$pin" != "$have" ]; then echo "drift repo $f installed=$have expected=$pin"; drift=1; fi
+done
+
+report() {  # report <place> <file> <installed> ; counts a mismatch
+  local want; want=$(expected_of "$2")
+  if [ "$3" != "$want" ]; then echo "drift $1 $2 installed=$3 expected=$want"; drift=1; return 1; fi
+}
+
+for p in "${places[@]}"; do
+  bad=0
+  if [ "$p" = mac ]; then
+    for pair in "bb-temper:$HOME/temper-wt/bb-temper" "kiln-scan:$HOME/tools/kiln-scan"; do
+      f=${pair%%:*}; path=${pair#*:}
+      if [ -f "$path" ]; then m=$(md5_of "$path"); else m=absent; fi
+      report mac "$f" "$m" || bad=$((bad + 1))
+    done
+    [ "$bad" -gt 0 ] || echo "ok mac 2 files"
+    continue
+  fi
+  i=
+  case $p in *@*) t=$p ;; *) i=$(host_index "$p"); t=${H_ADDR[i]} ;; esac
+  if [ -n "${BB_DRIFT_SSH:-}" ]; then
+    read -r -a SSH <<< "$BB_DRIFT_SSH"
+  else
+    SSH=(ssh -i "$KEY" -o BatchMode=yes -o ConnectTimeout=15)
+    if [ -n "$i" ] && [ "${H_JUMP[i]}" != - ]; then
+      SSH+=(-o "UserKnownHostsFile=\"${H_KNOWN[i]}\"" -o StrictHostKeyChecking=yes
+            -o "ProxyCommand=ssh -i \"$KEY\" -o BatchMode=yes -o ConnectTimeout=15 -W %h:%p ${H_JUMP[i]}")
+    fi
+  fi
+  # one line per ~/tools entry (the glob skips dotfiles): "<md5> <name>" for a regular file, "dir <name>" for a directory (or a
+  # symlink to one), "other <name>" for anything else (dangling symlink, device, ...)
+  PROBE='cd "$HOME/tools" 2>/dev/null || exit 0
+for p in *; do
+  [ -e "$p" ] || [ -L "$p" ] || continue
+  if [ -f "$p" ]; then printf "%s %s\n" "$(md5sum < "$p" | cut -d" " -f1)" "$p"; elif [ -d "$p" ]; then printf "dir %s\n" "$p"; else printf "other %s\n" "$p"; fi
+done'
+  if ! out=$("${SSH[@]}" "$t" bash -s <<< "$PROBE"); then
+    echo "unreachable $p"; down=1; continue
+  fi
+  for f in "${HOST_FILES[@]}"; do
+    m=$(printf '%s\n' "$out" | awk -v f="$f" '{ n = $0; sub(/^[^ ]+ /, "", n); if (n == f) { print $1; exit } }')
+    [ -n "$m" ] || m=absent
+    report "$p" "$f" "$m" || bad=$((bad + 1))
+  done
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    m=${line%% *}; f=${line#* }
+    case " ${HOST_FILES[*]} " in *" $f "*) continue ;; esac
+    is_backup "$f" && continue
+    if pin=$(vendor_pin "$f"); then
+      if [ "$m" = "$pin" ]; then echo "vendor $p $f md5=$m to be vendored (PR next)"
+      else echo "drift $p $f installed=$m expected=$pin"; drift=1; bad=$((bad + 1)); fi
+    elif [ "$f" = maven ] && [ "$m" = dir ]; then :
+    else echo "unlisted $p $f md5=$m"; drift=1; bad=$((bad + 1)); fi
+  done <<< "$out"
+  [ "$bad" -gt 0 ] || echo "ok $p ${#HOST_FILES[@]} files"
+done
+
+[ "$down" = 0 ] || exit 69
+exit "$drift"

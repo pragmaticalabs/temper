@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="all">
+  <testsuite name="org.example.ATest" tests="1">
+    <testcase name="a" classname="org.example.ATest" time="0.1"/>
+  </testsuite>
+  <testsuite name="org.example.BTest" tests="2">
+    <testcase name="b1" classname="org.example.BTest" time="0.1"/>
+    <testcase name="b2" classname="org.example.BTest" time="0.1"/>
+  </testsuite>
+</testsuites>

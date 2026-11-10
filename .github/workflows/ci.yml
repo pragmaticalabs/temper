@@ -1,0 +1,58 @@
+# Full-reactor build with tests, the same command as a local `mvn install` from the root (docs/developer-guide.md).
+# It resolves the released pragmatica 1.0.0-rc4 from Maven Central (all of it is there since 2026-10-18; first green run
+# 39100157883). It is deliberately not pointed at any other repository.
+# temper-acceptance is outside the default reactor (its `acceptance` profile; the host tier needs a real controller host)
+# and does not run here.
+name: CI
+
+on:
+  push:
+    branches: [main, m1]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      # .mvn/maven.config sets -Dmaven.repo.local=.m2-local, so the repository lives in the workspace, not ~/.m2:
+      # setup-java's own maven cache would cache an unused directory.
+      - uses: actions/cache@v6
+        with:
+          path: .m2-local
+          key: m2-${{ runner.os }}-${{ hashFiles('**/pom.xml') }}
+          restore-keys: m2-${{ runner.os }}-
+
+      # Tests use Testcontainers (PostgreSQL, the runner image); the hosted runner provides Docker.
+      - name: Build and test
+        run: mvn -B -ntp install
+
+      # temper-acceptance is built only with -Pacceptance (root pom), which every deploy build uses (the deploy runbook, step 1)
+      # but the step above does not: compile its main and test sources against the modules just installed, so an API
+      # change that breaks the acceptance harness fails CI instead of the next deploy (#82 broke it unnoticed, #88).
+      - name: Compile the acceptance module
+        run: mvn -B -ntp -Pacceptance -pl temper-acceptance test-compile
+
+      - name: Test reports
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-reports
+          path: |
+            **/target/surefire-reports*/
+            **/target/failsafe-reports/
+          if-no-files-found: ignore

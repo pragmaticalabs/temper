@@ -1,0 +1,31 @@
+# kiln (PR tracker F1), systemd USER unit (kiln-f1-design §6). A copy of ops/temper-controller.service.
+#
+# Install (as aether on bigboy, on CTO approval; linger is already enabled for temper):
+#   install -D -m 0644 ops/kiln/kiln.service ~/.config/systemd/user/kiln.service
+#   install -D -m 0644 kiln-service/target/kiln-service-0.1.0-SNAPSHOT-all.jar ~/.kiln/dist/kiln-service.jar
+#   install -D -m 0600 ops/kiln/kiln.toml.example ~/.config/kiln/kiln.toml    # then edit it
+#   systemctl --user daemon-reload && systemctl --user enable --now kiln
+#
+# Needs: Java 25 on PATH, kiln-pg (ops/pg-up.sh with TEMPER_PG_NAME=kiln-pg ...), ~/.config/kiln/kiln.toml and the
+# files it names: pg-password (0600), temper's read-token (0600), and optionally the GitHub token (0600; absent means
+# kiln reads GitHub unauthenticated). kiln serves 127.0.0.1 only.
+[Unit]
+Description=kiln PR tracker
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/env java -Xmx512m -jar %h/.kiln/dist/kiln-service.jar %h/.config/kiln/kiln.toml
+# SIGTERM stops the loops and the HTTP server, then closes the store.
+KillSignal=SIGTERM
+TimeoutStopSec=45
+Restart=on-failure
+RestartSec=5
+# Exit 78 is a refused configuration that a restart cannot fix.
+RestartPreventExitStatus=78
+# kiln never needs cloud credentials (money guard).
+UnsetEnvironment=HCLOUD_TOKEN
+
+[Install]
+WantedBy=default.target

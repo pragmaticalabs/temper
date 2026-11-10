@@ -1,0 +1,212 @@
+#!/bin/bash
+# temper-mac -- the Mac side of the bb ticket owners (design §7.1). Two verbs, one implementation of
+# "which processes are Claude Code sessions", so the post side and the ticket side cannot compute a start differently.
+#
+#   temper-mac [post]   (launchd runs it every 60 s; com.pragmatica.temper-mac.plist) POST every `claude` process to
+#                       <url>/api/v1/fleet/mac: {"v":1,"postedAt":"<ISO>","processes":[{"pid":N,"start":S,"label":"L"},…]}
+#                       sorted by pid, at most 512 (more is logged as "too many claude processes"); an empty list is valid.
+#                       The token goes on curl's stdin config and the body in a 0600 temp file, never on an argv. A line is
+#                       logged only on a change: "post failed: <http code | curl exit n> <reply>" on the first failure and
+#                       "post recovered" on the first success after one. No notification: temper's `mac` source goes stale
+#                       and the dead-man covers a dead controller.
+#                       Exit: 0 posted (HTTP 200); 1 refused or unreachable; 2 a setting is missing (no URL, no token file).
+#   temper-mac session  (the enqueuer's walk) from the caller upward, at most 64 parents, the first process whose comm
+#                       basename is `claude`; prints exactly one line
+#                         BB_SESSION_PID=<p> BB_SESSION_START=<epoch s> BB_SESSION_LABEL=<label>
+#                       Exit 3 with nothing on stdout and "temper-mac: no claude ancestor" on stderr when there is none (the
+#                       caller then sends no session fields; the owner's own terminal builds keep working).
+#
+# A session is a process whose comm basename is exactly `claude`, case-sensitive; `ucomm` is the version string and is never
+# used. Its start is the epoch second of `ps lstart`, read and converted in UTC (TZ=UTC and `date -u` both: on a CET Mac the
+# local reading is an hour off, H5). Its label is BB_SESSION (session verb only), else the value after `--name` in the
+# process's args up to the next option when that matches ^[A-Za-z0-9._:-]{1,64}$ (`--name 'a b'` is two words, so it does
+# not), else pid:<pid>.
+#
+# Settings (environment; the defaults are the Mac's):
+#   TEMPER_MAC_URL    the controller's base URL   (TEMPER_URL, else url = "…" in ~/.config/temper/config)
+#   TEMPER_MAC_TOKEN  the MAC token file          (~/.config/temper/mac-token, 0600)
+#   TEMPER_MAC_STATE  the state directory         (~/Library/Application Support/temper-mac)
+#   TEMPER_MAC_LOG    the log file                (~/Library/Logs/temper-mac.log)
+#   TEMPER_MAC_PS     replaces `ps` (tests only)
+#
+# Install (the owner, from the root of a temper checkout; one `!` command per line in Claude Code):
+#   ! mkdir -p ~/.local/bin ~/Library/LaunchAgents && install -m 0755 ops/mac/temper-mac ~/.local/bin/temper-mac && install -m 0755 ops/mac/bb-submit ~/.local/bin/bb-submit
+#   ! sed "s|__HOME__|$HOME|g" ops/mac/com.pragmatica.temper-mac.plist > ~/Library/LaunchAgents/com.pragmatica.temper-mac.plist
+#   ! launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.pragmatica.temper-mac.plist
+#   ! launchctl print gui/$UID/com.pragmatica.temper-mac | grep -E 'state|last exit'
+#   ! tail -5 ~/Library/Logs/temper-mac.log
+# Uninstall:
+#   ! launchctl bootout gui/$UID/com.pragmatica.temper-mac
+#   ! rm -f ~/Library/LaunchAgents/com.pragmatica.temper-mac.plist ~/.local/bin/temper-mac ~/.local/bin/bb-submit
+#   ! rm -rf ~/Library/Application\ Support/temper-mac
+#
+# bash 3.2 and BSD tools (macOS), also GNU (the tests run on Linux).
+set -euo pipefail
+set -f
+umask 077
+
+readonly PS_CMD=${TEMPER_MAC_PS:-ps}
+readonly STATE_DIR=${TEMPER_MAC_STATE:-$HOME/Library/Application Support/temper-mac}
+readonly LOG=${TEMPER_MAC_LOG:-$HOME/Library/Logs/temper-mac.log}
+readonly TOKEN_FILE=${TEMPER_MAC_TOKEN:-$HOME/.config/temper/mac-token}
+readonly STATE=$STATE_DIR/state
+readonly MAX_PROCESSES=512
+readonly MAX_WALK=64
+readonly LABEL_RE='^[A-Za-z0-9._:-]{1,64}$'
+
+if date -j -u -f %s 0 +%s > /dev/null 2>&1; then BSD_DATE=1; else BSD_DATE=0; fi
+readonly BSD_DATE
+
+ps_run() {  # the process table in UTC and the C locale, so lstart is a UTC reading in a fixed format
+  TZ=UTC LC_ALL=C "$PS_CMD" "$@"
+}
+
+start_of() {  # start_of <dow> <mon> <day> <time> <year>: epoch seconds, empty when it does not convert (H5: -u and TZ=UTC)
+  local words="$1 $2 $3 $4 $5"
+  if [ "$BSD_DATE" = 1 ]; then
+    TZ=UTC LC_ALL=C date -j -u -f '%a %b %e %T %Y' "$words" +%s 2> /dev/null || true
+  else
+    TZ=UTC LC_ALL=C date -u -d "$words" +%s 2> /dev/null || true
+  fi
+}
+
+start_of_pid() {  # start_of_pid <pid>: its start, empty when the process is gone
+  local out a b c d e
+  out=$(ps_run -o lstart= -p "$1" 2> /dev/null) || true
+  read -r a b c d e <<< "$out" || true
+  [ -n "${e:-}" ] || return 0
+  start_of "$a" "$b" "$c" "$d" "$e"
+}
+
+label_of() {  # label_of <pid>: the label; fails when the process is gone (args empty)
+  local pid=$1 args word found=0 value=
+  args=$(ps_run -o args= -p "$pid" 2> /dev/null) || true
+  [ -n "$args" ] || return 1
+  for word in $args; do
+    if [ "$found" = 0 ]; then
+      case $word in
+        --name) found=1 ;;
+        --name=*) found=1; value=${word#--name=} ;;
+      esac
+    else
+      case $word in
+        -*) ;;
+        *) value=$word ;;
+      esac
+      break
+    fi
+  done
+  if [[ $value =~ $LABEL_RE ]]; then printf '%s\n' "$value"; else printf 'pid:%s\n' "$pid"; fi
+}
+
+is_claude() {  # is_claude <comm>: the basename is exactly claude
+  [ "${1##*/}" = claude ]
+}
+
+iso_now() {
+  date -u +%Y-%m-%dT%H:%M:%SZ
+}
+
+log() {
+  mkdir -p "$(dirname "$LOG")"
+  printf '%s %s\n' "$(iso_now)" "$*" >> "$LOG"
+}
+
+list_sessions() {  # list_sessions <ps table>: "pid start label" per session, sorted by pid; a process that exits between the two ps calls is skipped
+  local pid dow mon day time year comm start label
+  while read -r pid dow mon day time year comm; do
+    is_claude "${comm:-}" || continue
+    start=$(start_of "$dow" "$mon" "$day" "$time" "$year")
+    [ -n "$start" ] || continue
+    label=$(label_of "$pid") || continue
+    printf '%s %s %s\n' "$pid" "$start" "$label"
+  done <<< "$1" | sort -n
+}
+
+session() {
+  local p=$PPID i=0 ppid comm line start label
+  while [ "$i" -lt "$MAX_WALK" ]; do
+    i=$((i + 1))
+    line=$(ps_run -o ppid=,comm= -p "$p" 2> /dev/null) || true
+    ppid=
+    comm=
+    read -r ppid comm <<< "$line" || true
+    if [ -n "$comm" ] && is_claude "$comm"; then
+      start=$(start_of_pid "$p")
+      label=$(label_of "$p") || label=
+      if [ -z "$start" ] || [ -z "$label" ]; then break; fi
+      if [ -n "${BB_SESSION:-}" ]; then
+        if [[ $BB_SESSION =~ $LABEL_RE ]]; then label=$BB_SESSION; else echo "temper-mac: ignoring BB_SESSION: not $LABEL_RE" >&2; fi
+      fi
+      printf 'BB_SESSION_PID=%s BB_SESSION_START=%s BB_SESSION_LABEL=%s\n' "$p" "$start" "$label"
+      return 0
+    fi
+    case ${ppid:-} in '' | 0 | 1) break ;; esac
+    p=$ppid
+  done
+  echo "temper-mac: no claude ancestor" >&2
+  return 3
+}
+
+configured_url() {  # TEMPER_MAC_URL, TEMPER_URL, else the url line of ~/.config/temper/config
+  if [ -n "${TEMPER_MAC_URL:-}" ]; then echo "$TEMPER_MAC_URL"; return; fi
+  if [ -n "${TEMPER_URL:-}" ]; then echo "$TEMPER_URL"; return; fi
+  [ -r "$HOME/.config/temper/config" ] || return 0
+  sed -n 's/^[[:space:]]*url[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$HOME/.config/temper/config" | head -n 1
+}
+
+body_json() {  # the post body from "pid start label" lines on stdin
+  local sessions=
+  while read -r pid start label; do
+    [ -n "$pid" ] || continue
+    sessions="${sessions:+$sessions,}{\"pid\":$pid,\"start\":$start,\"label\":\"$label\"}"
+  done
+  printf '{"v":1,"postedAt":"%s","processes":[%s]}' "$(iso_now)" "$sessions"
+}
+
+state_failing() {
+  [ -f "$STATE" ] && grep -qx 'failing=1' "$STATE"
+}
+
+post() {
+  local url token quoted table rows count http rc=0 text
+  url=$(configured_url)
+  [ -n "$url" ] || { echo "temper-mac: no controller URL (TEMPER_MAC_URL, TEMPER_URL or ~/.config/temper/config)" >&2; return 2; }
+  [ -r "$TOKEN_FILE" ] || { echo "temper-mac: no token file $TOKEN_FILE" >&2; return 2; }
+  url=${url%/}
+  token=$(tr -d '[:space:]' < "$TOKEN_FILE")
+  quoted=$(printf '%s' "$token" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')
+  mkdir -p "$STATE_DIR"
+  table=$(ps_run -A -o pid=,lstart=,comm= 2> /dev/null) || { log "ps failed: nothing posted"; return 1; }
+  rows=$(list_sessions "$table")
+  count=0
+  [ -z "$rows" ] || count=$(printf '%s\n' "$rows" | wc -l | tr -d ' ')
+  if [ "$count" -gt "$MAX_PROCESSES" ]; then
+    log "too many claude processes ($count): the first $MAX_PROCESSES are sent"
+    rows=$(printf '%s\n' "$rows" | head -n "$MAX_PROCESSES")
+  fi
+  BODY=$(mktemp "${TMPDIR:-/tmp}/temper-mac.XXXXXX")
+  REPLY=$(mktemp "${TMPDIR:-/tmp}/temper-mac.XXXXXX")
+  trap 'rm -f "$BODY" "$REPLY"' EXIT
+  printf '%s\n' "$rows" | body_json > "$BODY"
+  # the token goes on curl's stdin config (never an argv); the body from the 0600 file. No -f: the reply is logged.
+  http=$(printf 'header = "Authorization: Bearer %s"\n' "$quoted" \
+    | curl -sS --max-time 10 --config - -H 'Content-Type: application/json' --data-binary "@$BODY" -o "$REPLY" -w '%{http_code}' "$url/api/v1/fleet/mac" 2> /dev/null) || rc=$?
+  if [ "$rc" -eq 0 ] && [ "$http" = 200 ]; then
+    if state_failing; then log "post recovered"; fi
+    printf 'failing=0\n' > "$STATE"
+    return 0
+  fi
+  if ! state_failing; then
+    text=$(head -c 120 "$REPLY" | tr -c '[:print:]' ' ')
+    if [ "$rc" -ne 0 ]; then log "post failed: curl exit $rc $text"; else log "post failed: $http $text"; fi
+  fi
+  printf 'failing=1\n' > "$STATE"
+  return 1
+}
+
+case ${1:-post} in
+  post) post ;;
+  session) session ;;
+  *) echo "usage: temper-mac [post|session]" >&2; exit 2 ;;
+esac

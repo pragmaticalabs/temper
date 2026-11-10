@@ -1,0 +1,308 @@
+#!/usr/bin/env bash
+# bb-temper -- run a temper build on a remote build host through the shared bb tools (temper's own Maven/IT/acceptance/
+# Testcontainers runs happen on build hosts, not on the workstation). The hosts may not be able to fetch the repo, so
+# a git bundle of the ref is copied over and cloned; the checkout is seeded by copy (cp -a, never -al) from
+# ~/work/temper-m2-seed (third-party + pragmatica-lite; temper's own artifacts removed).
+#
+# Hosts come from the host config (~/.config/bb-temper/hosts, or BB_TEMPER_HOSTS; format: ops/bb/hosts.example): the ssh key,
+# and per host its name, user@address, jump host and pinned known_hosts file (a host reached THROUGH another one), and whether
+# the automatic pick may choose it. No config, or a malformed one: exit 78 before anything else runs.
+#
+# Host choice (automatic scheduling): BB_HOST unset or "auto" lets `checkout` pick the host; an explicit configured host name
+# or user@host is used as given and makes no controller call. The FIRST auto host of the config is the home host: the pick
+# reads the controller's /api/v1/hosts through it (curl on that host, ~/.config/temper/read-token) and chooses among the
+# config's auto hosts that are state=UP, link=UP, not retired, retireAt absent or > 2 h away, with >= 20 GiB free workspace
+# and >= 6 GiB available memory. Score = (load5 + 4*(bbRunning + bbWaiting + active)) / cores, lowest wins (a temper build
+# saturates about 4 cores); a tie goes by config order. A host with pick "explicit" (e.g. one reserved for timing runs, no
+# mixed load) is never auto-picked; only an explicit BB_HOST=<name> reaches it. Controller unreachable, unparseable or no
+# qualifying host: the home host, with a "fallback" line -- a build is never refused for want of the controller. A
+# successful checkout writes ~/.temper/bb-bind/<name> (the host key); build|wait|report|fetch|rm with BB_HOST unset/auto
+# follow it (none: exit 3), an explicit BB_HOST that differs from it is refused (exit 3); rm deletes it. checkout looks for
+# an existing binding's checkout on the BOUND host whatever BB_HOST says (found: exit 3; absent: stale, replaced with a
+# note) and holds ~/.temper/bb-bind/<name>.lock (mkdir) for its run (held: exit 3). BB_HOSTS_CMD (TEST ONLY): its stdout
+# replaces the ssh+curl hosts fetch.
+#
+# Usage (BB_OWNER=<agent> required; BB_HOST = auto (default) | <configured host name> | user@host, the same for every
+# command on one checkout; run inside a temper tree):
+#   bb-temper checkout <name> [<ref>]   bundle <ref> (a local branch or HEAD; committed only) and create ~/work/co/<name>;
+#                                       <name> must start with "$BB_OWNER-". Refuses an existing checkout.
+#   bb-temper build <name> [mvn args]   bb-build in that checkout (queued; default args: -B clean install), through
+#                                       ~/.local/bin/bb-submit (BB_SUBMIT) so the ticket carries this caller's Claude session.
+#                                       Optional BB_AGENT=<word>, BB_LANE=<word>, BB_PR=<number> go
+#                                       into the ticket too (a malformed one is refused, exit 2). Without bb-submit installed
+#                                       the old line runs, after a warning, and the ticket has no session fields.
+#   bb-temper wait <name>               block until .bb/rc exists, then print rc and the BUILD/Tests summary lines
+#   bb-temper report <name>             rc, wall time and per-module testcase/failure/skip counts from the XML reports
+#   bb-temper fetch <name> <local-dir>  copy build.log and all surefire/failsafe XML reports to <local-dir>
+#   bb-temper rm [--kill] <name>        remove your checkout (only "$BB_OWNER-" names). First, under the host's queue lock
+#                                       (`bb-queue release`), every WAITING ticket of the checkout is cancelled; a RUNNING one
+#                                       refuses the rm (exit 3, names the ticket and --kill) so a tree is never deleted under a
+#                                       live maven. --kill cancels the running ticket first (`bb-queue cancel --running`: its
+#                                       waiter tree and every process with its cwd in the checkout or below), then removes.
+# Exit: 0 ok; 2 usage; 3 refused; else the failing step's code. `wait` exits with maven's rc.
+# Exit: 0 ok; 2 usage; 3 refused; 78 host config missing or malformed; else the failing step's code. `wait` exits with maven's rc.
+set -euo pipefail
+PROG=bb-temper
+: "${BB_OWNER:?set BB_OWNER=<agent name, [A-Za-z0-9]>}"
+# ---- host config: this block is identical in bb-temper and bb-drift (BbDriftIT holds the two copies equal) --------------
+# The file is ~/.config/bb-temper/hosts, or the one BB_TEMPER_HOSTS names; format and a TEST-NET example: ops/bb/hosts.example.
+# load_hosts sets KEY and the parallel arrays H_NAME H_ADDR H_JUMP H_KNOWN H_PICK (file order). A missing file or any malformed
+# line is exit 78 with the line number: no host, address or key is ever guessed. bash 3.2 compatible.
+HOSTS_FILE=${BB_TEMPER_HOSTS:-$HOME/.config/bb-temper/hosts}
+cfg_die() { echo "$PROG: $HOSTS_FILE: $*" >&2; exit 78; }
+home_path() { case $1 in '~/'*) printf '%s\n' "$HOME/${1#'~/'}" ;; *) printf '%s\n' "$1" ;; esac; }
+host_index() {  # host_index <name>: print the configured host's index; fail when it is not configured
+  local i=0
+  while [ "$i" -lt "${#H_NAME[@]}" ]; do [ "${H_NAME[i]}" = "$1" ] && { echo "$i"; return 0; }; i=$((i + 1)); done
+  return 1
+}
+load_hosts() {
+  local n=0 line f re='^[a-z_][a-z0-9_-]{0,31}@[A-Za-z0-9.:-]+$'
+  KEY=; H_NAME=(); H_ADDR=(); H_JUMP=(); H_KNOWN=(); H_PICK=()
+  [ -r "$HOSTS_FILE" ] || cfg_die "no host config (copy ops/bb/hosts.example there and fill in your hosts)"
+  while IFS= read -r line || [ -n "$line" ]; do
+    n=$((n + 1)); line=${line%$'\r'}; line=${line%%#*}
+    read -r -a f <<< "$line"
+    [ "${#f[@]}" -gt 0 ] || continue
+    case ${f[0]}:${#f[@]} in
+      key:2) [ -z "$KEY" ] || cfg_die "line $n: key is listed twice"; KEY=$(home_path "${f[1]}") ;;
+      host:6)
+        [[ ${f[1]} =~ ^[a-z0-9][a-z0-9-]*$ ]] && [ "${f[1]}" != auto ] && [ "${f[1]}" != mac ] || cfg_die "line $n: bad host name '${f[1]}'"
+        ! host_index "${f[1]}" > /dev/null || cfg_die "line $n: host ${f[1]} is listed twice"
+        [[ ${f[2]} =~ $re ]] || cfg_die "line $n: the address must be user@address"
+        [ "${f[3]}" = - ] || [[ ${f[3]} =~ $re ]] || cfg_die "line $n: the jump must be - or user@address"
+        [ "${f[3]}" = - ] && [ "${f[4]}" = - ] || { [ "${f[3]}" != - ] && [ "${f[4]}" != - ]; } \
+          || cfg_die "line $n: a jump and a known_hosts file go together (both - or both set)"
+        case ${f[5]} in auto|explicit) ;; *) cfg_die "line $n: pick must be auto or explicit" ;; esac
+        H_NAME+=("${f[1]}"); H_ADDR+=("${f[2]}"); H_JUMP+=("${f[3]}"); H_KNOWN+=("$(home_path "${f[4]}")"); H_PICK+=("${f[5]}") ;;
+      *) cfg_die "line $n: expected 'key <path>' or 'host <name> <user@address> <jump> <known_hosts> <auto|explicit>'" ;;
+    esac
+  done < "$HOSTS_FILE"
+  [ -n "$KEY" ] || cfg_die "no 'key <path>' line"
+  [ "${#H_NAME[@]}" -gt 0 ] || cfg_die "no host line"
+}
+auto_hosts() {  # auto_hosts: AUTO = the hosts with pick auto, in file order (the tie order of bb-temper's pick)
+  local i=0
+  AUTO=()
+  while [ "$i" -lt "${#H_NAME[@]}" ]; do [ "${H_PICK[i]}" != auto ] || AUTO+=("${H_NAME[i]}"); i=$((i + 1)); done
+  [ "${#AUTO[@]}" -gt 0 ] || cfg_die "no host with pick auto"
+}
+# ---- end of the shared host-config block ----------------------------------------------------------------------------------
+# setup_host <key>: HOST and the ssh options for one host key (a configured name, or user@host: direct, ssh's own known_hosts).
+setup_host() {
+  local i=
+  case $1 in
+    *@*) HOST=$1 ;;
+    *) i=$(host_index "$1") || return 1; HOST=${H_ADDR[i]} ;;
+  esac
+  SSHO=(-i "$KEY" -o BatchMode=yes)
+  # bb-submit reads these (it runs its own ssh); the jump pair is set for a jumped host only, cleared otherwise so a stray
+  # value never applies.
+  export BB_SSH_KEY=$KEY
+  unset BB_SSH_PROXY BB_KNOWN_HOSTS
+  if [ -n "$i" ] && [ "${H_JUMP[i]}" != - ]; then
+    export BB_SSH_PROXY=${H_JUMP[i]} BB_KNOWN_HOSTS=${H_KNOWN[i]}
+    # the paths sit inside ssh -o values (the ProxyCommand one is re-read by a shell), so they are double-quoted: a HOME with spaces
+    SSHO+=(-o "UserKnownHostsFile=\"$BB_KNOWN_HOSTS\"" -o StrictHostKeyChecking=yes
+           -o "ProxyCommand=ssh -i \"$KEY\" -o BatchMode=yes -o ConnectTimeout=15 -W %h:%p $BB_SSH_PROXY")
+  fi
+}
+rsh() { ssh "${SSHO[@]}" -o ConnectTimeout=15 "$HOST" "$@"; }
+# Read-only remote commands retry ssh's own failure (rc 255: host down, timeout, dropped session) 5 times, 30 s apart.
+# Never used for checkout/build: a session dropped after the remote side acted would repeat a clone or an enqueue.
+rsh_ro() { local i rc; for i in 1 2 3 4 5 6; do rc=0; rsh "$@" || rc=$?; [ "$rc" -ne 255 ] && return "$rc"
+  [ "$i" -lt 6 ] && { echo "bb-temper: ssh failed (255), retry $i/5 in 30 s" >&2; sleep 30; }; done; return 255; }
+die() { echo "bb-temper: $2" >&2; exit "$1"; }
+# Remote snippet: prints "deduped onto ..." when the checkout's last build call was deduped and nothing was queued since
+# (bb-build rewrites .bb/build.log at every enqueue, so a later enqueue makes the mark older than the log).
+DEDUPED_NOTE='if [ -f .bb/deduped ] && { [ ! -f .bb/build.log ] || [ .bb/deduped -nt .bb/build.log ]; }; then cat .bb/deduped; fi'
+[ $# -ge 2 ] || die 2 "usage: bb-temper checkout|build|wait|report|fetch|rm <name> ..."
+cmd=$1; shift; KILL_RUNNING=
+if [ "$cmd" = rm ] && [ "$1" = --kill ]; then KILL_RUNNING=--kill; shift; fi
+[ $# -ge 1 ] || die 2 "usage: bb-temper rm [--kill] <name>"
+name=$1; shift
+[[ $name == "$BB_OWNER"-* && $name =~ ^[A-Za-z0-9._-]+$ ]] || die 3 "name must start with $BB_OWNER- and be [A-Za-z0-9._-]"
+CO="work/co/$name"
+case $cmd in checkout|build|wait|report|fetch|rm) ;; *) die 2 "unknown command $cmd" ;; esac
+load_hosts
+auto_hosts
+# The host config, then BB_HOST (an explicit value is used exactly as given, no controller call).
+case ${BB_HOST:-auto} in
+  auto|*@*) ;;
+  *) host_index "$BB_HOST" > /dev/null || { echo "bb-temper: BB_HOST must be auto, a host of $HOSTS_FILE (${H_NAME[*]}) or user@host" >&2; exit 2; } ;;
+esac
+BIND=$HOME/.temper/bb-bind/$name
+bound=; [ ! -f "$BIND" ] || bound=$(head -n 1 "$BIND")
+# pick_host: print the chosen host key on stdout, the "host ..." line on stderr (or "fallback"); never fails.
+pick_host() {
+  local json out verdict detail
+  setup_host "${AUTO[0]}"
+  if [ -n "${BB_HOSTS_CMD:-}" ]; then json=$(bash -c "$BB_HOSTS_CMD" 2> /dev/null) || json=
+  else json=$(rsh 'curl -sf -m 5 -H "Authorization: Bearer $(cat ~/.config/temper/read-token)" http://localhost:7070/api/v1/hosts' 2> /dev/null) || json=; fi
+  if [ -z "$json" ]; then echo "bb-temper: host ${AUTO[0]} (fallback: controller unreachable)" >&2; echo "${AUTO[0]}"; return; fi
+  read -r -d '' PICK_PY <<'PY' || true
+import sys, json, datetime
+names = sys.argv[1:]
+try:
+    data = json.load(sys.stdin)
+    assert isinstance(data, list)
+except Exception:
+    print("FALLBACK controller reply is not valid host JSON"); sys.exit(0)
+now = datetime.datetime.now(datetime.timezone.utc)
+by = dict((h["name"], h) for h in data if isinstance(h, dict) and isinstance(h.get("name"), str))
+GIB = 1024 ** 3
+ok, skipped = [], []
+for rank, n in enumerate(names):
+    h = by.get(n)
+    try:
+        if h is None: raise ValueError("not reported")
+        why = None
+        f = h["facts"]
+        if h.get("state") != "UP": why = "state " + str(h.get("state"))
+        elif h.get("link") != "UP": why = "link " + str(h.get("link"))
+        elif h.get("retired") is not False: why = "retired"
+        elif h.get("retireAt") is not None:
+            t = str(h["retireAt"]).replace("Z", "+00:00")
+            if "." in t:
+                head, rest = t.split(".", 1)
+                digits = ""
+                for ch in rest:
+                    if ch.isdigit(): digits += ch
+                    else: break
+                t = head + "." + digits[:6].ljust(6, "0") + rest[len(digits):]
+            if (datetime.datetime.fromisoformat(t) - now).total_seconds() <= 7200: why = "retires within 2 h"
+        if why is None and float(f["freeWorkspaceBytes"]) < 20 * GIB: why = "disk low"
+        if why is None and float(f["memAvailableKb"]) * 1024 < 6 * GIB: why = "memory low"
+        if why is not None: raise ValueError(why)
+        score = (float(f["load5"]) + 4 * (float(f["bbRunning"]) + float(f["bbWaiting"]) + float(h.get("active") or 0))) / float(f["cores"])
+        ok.append((round(score, 6), rank, n))
+    except ValueError as e:
+        skipped.append(n + " skip: " + str(e))
+    except Exception:
+        skipped.append(n + " skip: malformed facts")
+if not ok:
+    print("FALLBACK no host qualifies: " + ", ".join(skipped)); sys.exit(0)
+ok.sort()
+best = ok[0]
+others = ["%s %.2f" % (n, s) for s, r, n in ok[1:]] + skipped
+print("PICK " + best[2])
+print("(score %.2f%s)" % (best[0], "; " + ", ".join(others) if others else ""))
+PY
+  out=$(python3 -I -c "$PICK_PY" "${AUTO[@]}" <<< "$json") || out="FALLBACK candidate scoring failed"
+  verdict=$(printf '%s\n' "$out" | sed -n 1p); detail=$(printf '%s\n' "$out" | sed -n 2p)
+  case $verdict in
+    "PICK "*) echo "bb-temper: host ${verdict#PICK } $detail" >&2; echo "${verdict#PICK }" ;;
+    *) echo "bb-temper: host ${AUTO[0]} (fallback: ${verdict#FALLBACK })" >&2; echo "${AUTO[0]}" ;;
+  esac
+}
+# absent_on <hostkey>: succeed when ~/$CO is absent there; exit 3 "exists" (remote test rc 1) or the ssh failure (255 or other).
+absent_on() {
+  local rc=0
+  setup_host "$1" || die 3 "corrupt host binding for $name: $1"
+  rsh "test ! -e $CO" || rc=$?
+  case $rc in
+    0) return 0 ;;
+    1) die 3 "$name exists on $HOST; rm it first" ;;
+    *) die "$rc" "ssh to $HOST failed (rc $rc); cannot tell whether $name is there" ;;
+  esac
+}
+if [ "$cmd" = checkout ]; then
+  # One checkout per name at a time: mkdir is atomic, so two parallel checkouts cannot pick different hosts and orphan one.
+  mkdir -p "$HOME/.temper/bb-bind"
+  mkdir "$BIND.lock" 2> /dev/null || die 3 "another checkout of $name is running ($BIND.lock held; remove it if none is)"
+  trap 'rmdir "$BIND.lock" 2> /dev/null || true' EXIT
+  trap 'exit 1' INT TERM HUP
+  if [ -n "$bound" ]; then
+    # A binding names where the checkout lives, whatever BB_HOST says: exists there -> refuse; gone -> the binding is stale.
+    absent_on "$bound"
+    echo "bb-temper: note: stale binding $name -> $bound (no checkout there); replacing it" >&2
+  fi
+  if [ "${BB_HOST:-auto}" != auto ]; then hostkey=$BB_HOST
+  else hostkey=$(pick_host); fi
+else
+  if [ "${BB_HOST:-auto}" = auto ]; then
+    [ -n "$bound" ] || die 3 "no host binding for $name; set BB_HOST"
+    hostkey=$bound
+  else
+    hostkey=$BB_HOST
+    [ -z "$bound" ] || [ "$bound" = "$hostkey" ] || die 3 "$name is bound to $bound, not $hostkey; the checkout lives there"
+  fi
+fi
+setup_host "$hostkey" || die 3 "corrupt host binding for $name: $hostkey"
+case $cmd in
+  checkout)
+    ref=${1:-HEAD}
+    sha=$(git rev-parse --verify "$ref^{commit}") || die 2 "no commit $ref"
+    git show-ref -q --verify "refs/heads/$ref" || [ "$ref" = HEAD ] || die 2 "ref must be a local branch or HEAD (a bundle needs a ref name)"
+    absent_on "$hostkey"
+    b=$(mktemp -d)/t.bundle; git bundle create -q "$b" "$ref"
+    scp -q "${SSHO[@]}" "$b" "$HOST:work/co/$name.bundle"; rm -f "$b"
+    rsh "set -e; git clone -q --no-checkout ~/$CO.bundle ~/$CO; rm -f ~/$CO.bundle; git -C ~/$CO checkout -q --detach $sha
+         printf '%s\\n' .bb/ .wp-logs/ .wp-state.md >> ~/$CO/.git/info/exclude
+         cp -a ~/work/temper-m2-seed ~/$CO/.m2-local
+         test -z \"\$(find ~/$CO/.m2-local -type f -links +1 | head -1)\"
+         grep -qx -- '-Dmaven.repo.local=.m2-local' ~/$CO/.mvn/maven.config
+         echo \"checkout ~/$CO at \$(git -C ~/$CO rev-parse HEAD)\""
+    printf '%s\n' "$hostkey" > "$BIND.tmp.$$"; mv "$BIND.tmp.$$" "$BIND" ;;
+  build)
+    [ $# -gt 0 ] || set -- -B clean install
+    # BB_DEDUP / BB_QUEUE reach bb-build (before 2026-11-06 only BB_OWNER did, so BB_DEDUP=0 was silently dropped).
+    fwd=
+    for v in BB_DEDUP BB_QUEUE; do
+      val=${!v:-}; [ -z "$val" ] && continue
+      [[ $val =~ ^[01]$ ]] || die 2 "$v must be 0 or 1"
+      fwd="$fwd $v=$val"
+    done
+    SUBMIT=${BB_SUBMIT:-$HOME/.local/bin/bb-submit}
+    err=$(mktemp); trap 'rm -f "$err"' EXIT; rc=0
+    if [ -x "$SUBMIT" ]; then "$SUBMIT" "$HOST" "~/$CO" "$@" 2> "$err" || rc=$?  # bb-submit adds the caller's session to the ticket
+    else
+      echo "bb-temper: bb-submit not installed; ticket without session fields" >&2
+      rsh "BB_OWNER=$BB_OWNER$fwd ~/tools/bb-build ~/$CO $(printf '%q ' "$@")" 2> "$err" || rc=$?
+    fi
+    cat "$err" >&2
+    # bb-build exit 7/8: an identical build ran or runs elsewhere and NOTHING was queued here. Say so on stdout, and mark
+    # the checkout (.bb/deduped, newer than .bb/build.log until the next enqueue rewrites the log) so that report and
+    # wait refuse to show any result as this checkout's run.
+    if [ "$rc" = 7 ] || [ "$rc" = 8 ]; then
+      onto=$(sed -n 's/^dedup: identical build is .*: ticket=\([^ ]*\).*/ticket \1/p' "$err" | head -1)
+      [ -n "$onto" ] || onto=$(sed -n 's|^dedup: read its result at \(.*\)/\.bb.*|checkout \1|p' "$err" | head -1)
+      note="deduped onto ${onto:-an identical build}"
+      echo "bb-temper: $note: NO new run in $name (BB_DEDUP=0 for a fresh run)"
+      # The mark is what keeps report/wait from showing an earlier rc as this run's; writing it is idempotent, so the
+      # read-only retry applies. Unmarked, say so loudly: the exit code stays bb-build's (7/8, never 0).
+      marked=$(rsh_ro "mkdir -p ~/$CO/.bb && printf '%s\\n' $(printf '%q' "$note") > ~/$CO/.bb/deduped && echo marked") || marked=
+      [ "$marked" = marked ] || echo "bb-temper: could NOT mark $name as deduped: do not read its report or wait as a run" >&2
+    fi
+    exit "$rc" ;;
+  wait)
+    d=$(rsh_ro "cd ~/$CO && $DEDUPED_NOTE") || die 1 "cannot read the dedup mark of $name; not waiting on an unknown state"
+    [ -z "$d" ] || { echo "rc=$d"; echo "bb-temper: no run of $name to wait for (BB_DEDUP=0 for a fresh run)" >&2; exit 7; }
+    until rsh_ro "test -f ~/$CO/.bb/rc"; do sleep 30; done
+    rc=$(rsh_ro "cat ~/$CO/.bb/rc")
+    rsh_ro "grep -E 'BUILD (SUCCESS|FAILURE)|Tests run:.*Fail|ERROR\\]' ~/$CO/.bb/build.log | tail -15"
+    echo "rc=$rc"; exit "$rc" ;;
+  report)
+    rsh_ro "cd ~/$CO || exit 1; d=\$($DEDUPED_NOTE); if [ -n \"\$d\" ]; then echo \"rc=\$d\"; echo 'bb-temper: NOT a run of this checkout (BB_DEDUP=0 for a fresh run)'; exit 7; fi
+         echo rc=\$(cat .bb/rc 2>/dev/null || echo running) wall=\$(( \$(cat .bb/end 2>/dev/null || date +%s) - \$(cat .bb/start 2>/dev/null || date +%s) ))s
+         for m in */; do for d in surefire failsafe; do f=\$(find \${m}target/\$d-reports -maxdepth 1 -name 'TEST-*.xml' -newer .bb/run.marker 2>/dev/null); [ -n \"\$f\" ] || continue
+           echo \"\${m%/} \$d \$(cat \$f | grep -o '<testcase ' | wc -l) testcases, failures \$(cat \$f | grep -c '<failure') errors \$(cat \$f | grep -c '<error') skipped \$(cat \$f | grep -c '<skipped')\"; done; done
+         echo 'known on Linux: temper-worker 1 skip = JobGcTest#aDeleteFailingMidway (macOS uchg; ops/dev/known-skips)'" ;;
+  fetch)
+    [ $# -eq 1 ] || die 2 "fetch <name> <local-dir>"
+    mkdir -p "$1"
+    # The whole pipeline is retried (a partial stream from a dropped session would leave a broken archive)
+    for i in 1 2 3 4 5 6; do
+      rsh "cd ~/$CO && tar cf - .bb/build.log \$(find ./*/target/surefire-reports ./*/target/failsafe-reports -maxdepth 1 -name 'TEST-*.xml' -newer .bb/run.marker 2>/dev/null)" | tar xf - -C "$1" && break
+      [ "$i" -lt 6 ] || die 1 "fetch failed 6 times"
+      echo "bb-temper: fetch failed, retry $i/5 in 30 s" >&2; sleep 30
+    done
+    echo "fetched into $1" ;;
+  rm)
+    [ $# -eq 0 ] || die 2 "usage: bb-temper rm [--kill] <name>"
+    # The queue first: waiting tickets cancelled, a running one refuses (or, with --kill, is cancelled). Its exit code is passed
+    # on (3 running, 4 another owner's ticket, 5 a process survived); only a clean release is followed by the delete.
+    rsh "BB_OWNER=$BB_OWNER ~/tools/bb-queue release ~/$CO${KILL_RUNNING:+ $KILL_RUNNING}" || exit $?
+    rsh "rm -rf ~/$CO ~/$CO.bundle"; rm -f "$BIND" ;;
+  *) die 2 "unknown command $cmd" ;;
+esac

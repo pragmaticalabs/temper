@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# pre-push -- the commit rule of docs/developer-guide.md §7 on the messages git STORED, which commit-msg cannot see:
+# `-m "# ..."` keeps `#` lines, --cleanup=verbatim keeps everything, core.commentChar moves the comment marker, and
+# --no-verify skips commit-msg. Every commit pushed that no remote branch holds yet must have a message that is
+# exactly one line, `<type>[(<scope>)]: <subject>` with type feat, fix, refactor, chore, docs or test and one optional
+# scope; nothing after it but the line's own newline, and no carriage return. Commits a branch of the remote already
+# holds (`git ls-remote --heads <remote>`; when that fails, the local remote-tracking refs, with a warning) are not
+# judged again.
+# Installed by core.hooksPath=ops/dev/hooks (ops/dev/wt-new). Git passes <remote> <url> and, on stdin, one
+# `<local ref> <local sha> <remote ref> <remote sha>` line per ref. Exit 0 accepts, 1 rejects the push.
+set -euo pipefail
+
+. "$(cd "$(dirname "$0")/.." && pwd)/lib.sh"
+bad=
+
+# What the remote holds now, asked of it (`git ls-remote`), not the local remote-tracking refs, which may be stale: a
+# branch deleted there would otherwise still hide its commits. Heads not fetched here cannot be excluded and need not.
+if heads=$(git ls-remote --heads "${1:-origin}" 2> /dev/null); then
+  held=$(printf '%s\n' "$heads" | awk 'NF { print $1 }' | git cat-file --batch-check='%(objectname) %(objecttype)' \
+    | awk '$2 == "commit" { print "^" $1 }')
+else
+  echo "pre-push: warning: git ls-remote ${1:-origin} failed; judging against the local remote-tracking refs" >&2
+  held=$(git for-each-ref --format='^%(objectname)' refs/remotes)
+fi
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+  case "$local_sha" in *[!0]*) ;; *) continue ;; esac  # a deletion pushes no commit
+  exclude=$held
+  case "$remote_sha" in *[!0]*) git cat-file -e "$remote_sha^{commit}" 2> /dev/null && exclude=$exclude$'\n'^$remote_sha ;; esac
+  for commit in $(printf '%s\n%s\n' "$local_sha" "$exclude" | grep -v '^$' | git rev-list --stdin); do
+    why=$(message_fault "$commit")
+    [ -z "$why" ] || bad+="  $(git rev-parse --short "$commit") $why"$'\n'
+  done
+done
+
+[ -z "$bad" ] && exit 0
+echo "pre-push: rejected: these commits break the one-line rule (docs/developer-guide.md §7):" >&2
+printf '%s' "$bad" >&2
+echo "  the message must be exactly one line: <feat|fix|refactor|chore|docs|test>[(<scope>)]: <subject>" >&2
+echo "  reword them (git commit --amend -m \"fix: ...\", or git rebase -i), then push again" >&2
+exit 1

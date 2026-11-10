@@ -1,0 +1,52 @@
+#!/bin/sh
+# DeployLibIT shim: state under $HOME/shim/state/<svc>.<key>; every call is logged to $HOME/shim.log.
+echo "systemctl $*" >> "$HOME/shim.log"
+[ "$1" = "--user" ] && shift
+verb=$1
+shift
+S="$HOME/shim/state"
+mkdir -p "$S"
+get() { cat "$S/$1.$2" 2> /dev/null || echo "$3"; }
+put() { printf '%s\n' "$3" > "$S/$1.$2"; }
+bump() {  # a (re)start: new MainPID, active, NRestarts+1, the show counter reset; a migrating binary advances the schema once
+  svc=$1
+  put "$svc" pid $(( $(get "$svc" pid 0) + 1000 + $(get "$svc" gen 0) ))
+  put "$svc" gen $(( $(get "$svc" gen 0) + 1 ))
+  put "$svc" active active
+  # <svc>.restart-dead (once): this restart leaves the service not active, as a unit that exits at startup
+  if [ -f "$HOME/shim/$svc.restart-dead" ]; then rm -f "$HOME/shim/$svc.restart-dead"; put "$svc" active inactive; fi
+  put "$svc" nr $(( $(get "$svc" nr 0) + 1 ))
+  rm -f "$S/$svc.shows"
+  if [ -f "$HOME/shim/migrates" ]; then
+    if [ ! -f "$HOME/shim/migrated" ]; then
+      : > "$HOME/shim/migrated"
+      # a migrates file holding a number is the schema the migration reaches; an empty one advances by one
+      to=$(cat "$HOME/shim/migrates")
+      case "$to" in ''|*[!0-9]*) to=$(( $(cat "$HOME/shim/schema") + 1 )) ;; esac
+      printf '%s\n' "$to" > "$HOME/shim/schema"
+    fi
+  fi
+}
+case "$verb" in
+  show)
+    svc=$1
+    n=$(( $(get "$svc" shows 0) + 1 ))
+    put "$svc" shows "$n"
+    # <svc>.crash holds N: the Nth `show` after a restart sees a new MainPID, as a crash-and-restart in the settle window
+    if [ -f "$HOME/shim/$svc.crash" ] && [ "$n" -ge "$(cat "$HOME/shim/$svc.crash")" ]; then
+      rm -f "$HOME/shim/$svc.crash"
+      put "$svc" pid $(( $(get "$svc" pid 0) + 1 ))
+      put "$svc" nr $(( $(get "$svc" nr 0) + 1 ))
+    fi
+    echo "ActiveState=$(get "$svc" active inactive)"
+    echo "MainPID=$(get "$svc" pid 0)"
+    echo "NRestarts=$(get "$svc" nr 0)"
+    ;;
+  is-active) st=$(get "$1" active inactive); echo "$st"; [ "$st" = active ] ;;
+  is-enabled) echo enabled ;;
+  cat) ;;
+  restart | start) bump "$1" ;;
+  stop) put "$1" active inactive; put "$1" pid 0 ;;
+  disable) put "$2" active inactive ;;
+  *) echo "systemctl shim: unknown verb $verb" >&2; exit 1 ;;
+esac

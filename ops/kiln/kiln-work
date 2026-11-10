@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# kiln-work -- record one work ledger event (the kiln dashboard's Work tab) from the Mac.
+#
+#   kiln-work <item> <phase> --round N [--title TEXT] [--coder NAME] [--verifier NAME] [--note TEXT] [--at ISO-INSTANT]
+#
+# <item> is a work package id (T1-WP5, T2-WP-0T); <phase> one of design coding verify fixing accepted integrated in-pr
+# merged parked. The first event of an item creates it (submitted = that event's time); --title may be given on any
+# event and replaces the stored title. --at defaults to kiln's clock.
+#
+# The event goes as one JSON object on stdin to bigboy, through the dedicated key ~/.ssh/kiln_work, which sshd binds to
+# `exec ~/tools/kiln-ingest work` (ops/kiln/install-kiln-work.sh): no remote command is ever named here, and the key
+# reaches no other route. kiln validates every field (a refusal prints kiln's 400 naming the field, exit 22); this
+# script refuses, before anything is sent (exit 64), a missing or malformed id, phase, round, name or instant, an unknown
+# option, an option given twice, and a control character in a text (so its JSON needs only `\` and `"` escaped). Text lengths are kiln's to
+# judge: bash counts characters by the locale, kiln by code point.
+#
+# KILN_WORK_HOST (default: bigboy's user@address in the bb host config, ~/.config/bb-temper/hosts or BB_TEMPER_HOSTS,
+# ops/bb/hosts.example; neither: exit 78 before anything is sent) and KILN_WORK_KEY (default ~/.ssh/kiln_work) name the
+# target. The exit code is ssh's, which is kiln-ingest's: 0 recorded, 22 kiln refused it, 7 kiln not listening, 255 ssh failed.
+# bash 3.2 with BSD tools (macOS) and bash 5 with GNU tools (Linux).
+set -euo pipefail
+
+readonly PHASES=" design coding verify fixing accepted integrated in-pr merged parked "
+
+die() {  # die <exit code> <message...>
+  local code=$1
+  shift
+  echo "kiln-work: $*" >&2
+  exit "$code"
+}
+
+usage() {
+  die 64 "usage: kiln-work <item> <phase> --round N [--title TEXT] [--coder NAME] [--verifier NAME] [--note TEXT] [--at ISO]"
+}
+
+# The text as a JSON string: only `\` and `"` need escaping, since a control character was refused before.
+quoted() {
+  local text=$1
+  text=${text//\\/\\\\}
+  text=${text//\"/\\\"}
+  printf '"%s"' "$text"
+}
+
+# text <field> <value>: refused when it holds a control character.
+text() {
+  case "$2" in
+    *[[:cntrl:]]*) die 64 "refused: --$1 holds a control character" ;;
+  esac
+}
+
+main() {
+  [ "$#" -ge 2 ] || usage
+  local item=$1 phase=$2
+  shift 2
+  [[ $item =~ ^[A-Za-z0-9]+(-[A-Za-z0-9]+)*$ ]] && [ "${#item}" -le 64 ] || die 64 "refused: '$item' is not a work package id like T1-WP5"
+  case "$PHASES" in
+    *" $phase "*) ;;
+    *) die 64 "refused: '$phase' is not a phase (one of:$PHASES)" ;;
+  esac
+  local round="" fields="" seen=" " target hosts=${BB_TEMPER_HOSTS:-$HOME/.config/bb-temper/hosts}
+  while [ "$#" -gt 0 ]; do
+    [ "$#" -ge 2 ] || usage
+    case "$seen" in
+      *" $1 "*) die 64 "refused: $1 is given twice" ;;
+    esac
+    seen="$seen$1 "
+    case "$1" in
+      --round)
+        [[ $2 =~ ^[0-9]{1,9}$ ]] || die 64 "refused: --round must be an integer 0 or more"
+        round=$((10#$2)) ;;
+      --title) text title "$2"; fields="$fields,\"title\":$(quoted "$2")" ;;
+      --note) text note "$2"; fields="$fields,\"note\":$(quoted "$2")" ;;
+      --coder | --verifier)
+        [[ $2 =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] && [ "${#2}" -le 64 ] || die 64 "refused: $1 '$2' is not an agent name"
+        fields="$fields,\"${1#--}\":\"$2\"" ;;
+      --at)
+        [[ $2 =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+(Z|[+-][0-9]{2}:[0-9]{2})$ ]] || die 64 "refused: --at must be an ISO-8601 instant"
+        fields="$fields,\"at\":\"$2\"" ;;
+      *) usage ;;
+    esac
+    shift 2
+  done
+  [ -n "$round" ] || die 64 "refused: --round is required"
+  target=${KILN_WORK_HOST:-}
+  if [ -z "$target" ] && [ -r "$hosts" ]; then
+    target=$(sed 's/#.*//' "$hosts" | awk '$1 == "host" && $2 == "bigboy" { print $3; exit }')
+  fi
+  [ -n "$target" ] || die 78 "no target: set KILN_WORK_HOST or a bigboy line in $hosts"
+  printf '{"item":"%s","phase":"%s","round":%s%s}' "$item" "$phase" "$round" "$fields" \
+    | ssh -i "${KILN_WORK_KEY:-$HOME/.ssh/kiln_work}" -o IdentitiesOnly=yes -o BatchMode=yes -T "$target"
+}
+
+main "$@"

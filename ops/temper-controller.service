@@ -1,0 +1,31 @@
+# temper controller, systemd USER unit (m0-design §6, WP3).
+#
+# Install (as the controller's user on bigboy; an owner-visible step):
+#   install -D -m 0644 ops/temper-controller.service ~/.config/systemd/user/temper-controller.service
+#   install -D -m 0644 temper-controller/target/temper-controller-0.1.0-SNAPSHOT-all.jar ~/.temper/dist/temper-controller.jar
+#   systemctl --user daemon-reload && systemctl --user enable --now temper-controller
+#   loginctl enable-linger "$USER"     # keep the user manager (and the controller) running without a login session
+#
+# Needs: Java 25 on PATH, the Postgres container from ops/pg-up.sh, and ~/.config/temper/controller.toml
+# (example: temper-controller/controller.toml.example) with the token and pg-password files it names (mode 0600).
+[Unit]
+Description=temper controller
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/env java --enable-native-access=ALL-UNNAMED -Xmx1g -jar %h/.temper/dist/temper-controller.jar %h/.config/temper/controller.toml
+# SIGTERM stops the host links (workers shut down; unit containers keep running and are re-attached at the next
+# start) and the HTTP server.
+KillSignal=SIGTERM
+TimeoutStopSec=45
+Restart=on-failure
+RestartSec=5
+# Exit 78 (EX_CONFIG) is a refused configuration (no GitHub identity, an unsafe App key): restarting cannot fix it.
+RestartPreventExitStatus=78
+# The controller never needs cloud credentials (money guard).
+UnsetEnvironment=HCLOUD_TOKEN
+
+[Install]
+WantedBy=default.target

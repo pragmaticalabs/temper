@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# pre-commit -- the jbct format gate before the commit, not after a build: when Java is staged, `mvn -B
+# jbct:format-check` on the modules holding it, and the commit is refused if a file is unformatted. It only checks;
+# it never rewrites a file or the index. Nothing Java staged: exits at once.
+# A module is one the root pom declares (`<module>`, profiles included); a file inside none of them is not checked. A
+# fixture project with a pom.xml of its own, under temper-acceptance/src/test/resources, is not a module: the module
+# holding it, temper-acceptance, is checked.
+# The check reads the working tree; a staged file whose working copy differs from the index is named, since the
+# commit is not exactly what was checked then.
+# Maven needs a JDK: on macOS an unset JAVA_HOME is taken from `/usr/libexec/java_home -v 25` when that exists
+# (TEMPER_JAVA_HOME_CMD replaces the path, for the tests). When mvn cannot start (no mvn, or the launcher's first line
+# says there is no java), the commit is refused with one line saying so, not with the launcher's last lines.
+# Installed by core.hooksPath=ops/dev/hooks (ops/dev/wt-new). Exit 0 accepts, 1 rejects.
+set -euo pipefail
+
+java=()
+while IFS= read -r -d '' file; do java+=("$file"); done < <(git diff --cached --name-only -z --diff-filter=ACMR -- '*.java')
+[ ${#java[@]} -gt 0 ] || exit 0
+
+top=$(git rev-parse --show-toplevel)
+cd "$top"
+declared=$(sed -n 's|.*<module>[[:space:]]*\([^<]*[^<[:space:]]\)[[:space:]]*</module>.*|\1|p' pom.xml 2> /dev/null | sed 's|/*$||')
+modules=
+for file in "${java[@]}"; do
+  module=
+  while read -r candidate; do  # the longest declared module holding the file
+    if [ -n "$candidate" ] && [ "${file#"$candidate"/}" != "$file" ] && [ ${#candidate} -gt ${#module} ]; then
+      module=$candidate
+    fi
+  done <<< "$declared"
+  [ -n "$module" ] || continue  # in no declared module: nothing the gate checks
+  case ",$modules," in *",$module,"*) ;; *) modules=${modules:+$modules,}$module ;; esac
+done
+[ -n "$modules" ] || exit 0
+
+partial=$(git diff --name-only -- "${java[@]/#/:(literal)}" 2> /dev/null || true)
+[ -z "$partial" ] || {
+  echo "pre-commit: note: these staged files also have unstaged changes; the check reads the working tree:" >&2
+  printf '%s\n' "$partial" | sed 's/^/  /' >&2
+}
+
+profiles=
+grep -q '<id>acceptance</id>' pom.xml 2> /dev/null && profiles=-Pacceptance  # temper-acceptance is only in that profile
+log=$(mktemp "${TMPDIR:-/tmp}/temper-pre-commit.XXXXXX")
+trap 'rm -f "$log"' EXIT
+java_home=${TEMPER_JAVA_HOME_CMD:-/usr/libexec/java_home}
+if [ -z "${JAVA_HOME:-}" ] && [ "$(uname -s)" = Darwin ] && [ -x "$java_home" ]; then
+  JAVA_HOME=$("$java_home" -v 25 2> /dev/null) && export JAVA_HOME || unset JAVA_HOME
+fi
+echo "pre-commit: jbct format check of $modules" >&2
+rc=0
+mvn -B $profiles -pl "$modules" jbct:format-check > "$log" 2>&1 || rc=$?
+[ "$rc" -ne 0 ] || exit 0
+first=$(grep -m 1 -v '^[[:space:]]*$' "$log" || true)  # the launcher fails before Maven prints a line of its own
+launcher='^(The JAVA_HOME environment variable is not defined correctly|Error: JAVA_HOME is not defined correctly|.*Unable to locate a Java Runtime|.*java: (command )?not found)'
+if [ "$rc" -eq 127 ] || [[ "$first" =~ $launcher ]]; then
+  echo "pre-commit: cannot run mvn (JAVA_HOME unset or no java): ${first:-exit $rc}" >&2
+elif grep -q 'not properly formatted' "$log"; then
+  echo "pre-commit: rejected: unformatted Java:" >&2
+  sed -n 's/^\[ERROR\]   //p' "$log" | sort -u | sed 's/^/  /' >&2
+  echo "  run mvn -B jbct:format, re-stage the files, and commit again" >&2
+else
+  echo "pre-commit: rejected: the jbct format check did not run cleanly (mvn failed); last lines:" >&2
+  tail -n 15 "$log" | sed 's/^/  /' >&2
+fi
+exit 1

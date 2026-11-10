@@ -1,0 +1,7 @@
+#!/bin/sh
+# logs argv, then execs the real curl
+echo "curl $*" >> "$HOME/shim.log"
+for c in /usr/bin/curl /bin/curl /usr/local/bin/curl /opt/homebrew/bin/curl; do
+  [ -x "$c" ] && exec "$c" "$@"
+done
+exit 127

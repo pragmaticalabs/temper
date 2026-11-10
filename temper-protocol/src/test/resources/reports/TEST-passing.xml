@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="org.example.CalcTest" tests="2" failures="0" errors="0" skipped="0" time="0.012">
+  <properties><property name="java.version" value="25"/></properties>
+  <testcase name="adds" classname="org.example.CalcTest" time="0.004"/>
+  <testcase name="subtracts" classname="org.example.CalcTest" time="0.008">
+    <system-out><![CDATA[noise <failure> in text is not an element]]></system-out>
+  </testcase>
+</testsuite>

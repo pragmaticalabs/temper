@@ -1,0 +1,178 @@
+#!/usr/bin/env bash
+# wt-prune -- remove the worktrees whose work has landed, keeping a copy of anything not committed. A dry run unless
+# --apply. (85 trees were made by hand and 35 removed by hand; the disk filled up on 2026-10-19.)
+#
+# Usage: ops/dev/wt-prune [--apply] [--include-dirty] [--keep <name>,...]
+#
+# After `git fetch origin`, a worktree is removed only when all of these hold; otherwise it is kept, with the first
+# reason that keeps it:
+#   - it is not the main checkout, not the tree this script runs from, not named in --keep, not locked (git worktree
+#     lock), and its directory exists (a missing one is left to `git worktree prune`);
+#   - its HEAD is an ancestor of the fetched origin/main (its commits, if any, have landed);
+#   - its .wp-logs/build.lock is not held (ops/dev/lib.sh: a live listed pid, or no pid yet within 10 s);
+#   - it is clean: no tracked change, and no untracked file (ignored ones included) other than .m2-local/, .wp-logs/
+#     and the target/ of a Maven module (a directory beside a pom.xml). --include-dirty drops this rule: what is not
+#     committed is archived first;
+#   - it is idle: no file in it, outside .m2-local/, was modified within the last ${TEMPER_PRUNE_IDLE_HOURS:-2}
+#     hours (.wp-state.md and .wp-logs/ count: an agent is still working there; module target/ dirs count: a build
+#     run without a lock is still writing there);
+#   - its branch has no open PR (`gh pr list --head <branch> --state open`; a detached HEAD has no PR). Without gh, or
+#     when gh fails, the answer is unknown and the tree is kept.
+# Before a removal, the tree's untracked files (ignored ones too, but not .m2-local/, .m2-local.partial/ or module
+# target/ dirs) and its
+# modified tracked files are copied to ${TEMPER_WT_ROOT:-$HOME/temper-wt}/_archive/<name>/ (<name>.<epoch>/ when that
+# exists), with `HEAD` (commit and branch) and `tracked.diff` (`git diff HEAD --binary`). A failed archive keeps the
+# tree. Right before `git worktree remove` the lock, the cleanliness (unless --include-dirty) and that no file changed
+# since the activity check are checked again; a clean tree is removed without --force, so git itself refuses one that
+# turned dirty in between. Once at the end `git worktree prune`. Branches are never deleted.
+#
+# Prints a table: name, removed / would remove / kept, reason. Exit codes: 0 done, 2 usage, 4 a fetch, archive or
+# removal failed (that tree is kept and the rest continue).
+set -euo pipefail
+
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/lib.sh"
+
+usage() { echo "usage: $0 [--apply] [--include-dirty] [--keep <name>,...]" >&2; exit 2; }
+
+apply=0
+dirty_too=0
+keep=,
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --apply) apply=1; shift ;;
+    --include-dirty) dirty_too=1; shift ;;
+    --keep) [ $# -ge 2 ] || usage; keep=",$2,"; shift 2 ;;
+    *) usage ;;
+  esac
+done
+idle_hours=${TEMPER_PRUNE_IDLE_HOURS:-2}
+[[ "$idle_hours" =~ ^[0-9]+$ ]] || { echo "usage: TEMPER_PRUNE_IDLE_HOURS '$idle_hours' is not a whole number" >&2; exit 2; }
+
+self=$(git -C "$here" rev-parse --show-toplevel)
+self=$(cd "$self" && pwd -P)
+root=${TEMPER_WT_ROOT:-$HOME/temper-wt}
+archives=$root/_archive
+
+git -C "$self" fetch --quiet origin || { echo "FAILED: git fetch origin" >&2; exit 4; }
+main=$(git -C "$self" rev-parse --verify origin/main)
+has_gh=0
+command -v gh > /dev/null 2>&1 && has_gh=1
+[ "$has_gh" -eq 1 ] || echo "note: gh is not on PATH: open PRs are unknown, so every candidate is kept" >&2
+
+markers=$(mktemp -d "${TMPDIR:-/tmp}/wt-prune.XXXXXX")
+trap 'rm -rf "$markers"' EXIT
+rc=0
+row() { printf '%-28s %-14s %s\n' "$1" "$2" "$3"; }
+row NAME ACTION REASON
+
+open_prs() {  # open_prs <tree> <branch>: the number of open PRs with head <branch>; fails when unknown
+  [ "$has_gh" -eq 1 ] || return 1
+  local count
+  count=$(cd "$1" && gh pr list --head "$2" --state open --json number --jq length 2> /dev/null) || return 1
+  [[ "$count" =~ ^[0-9]+$ ]] || return 1
+  echo "$count"
+}
+
+dirt() {  # dirt <tree>: the first tracked change or disallowed untracked path; empty when clean
+  local status entry
+  status=$(git -C "$1" status --porcelain --untracked-files=no) || { echo "git status failed"; return; }
+  [ -z "$status" ] || { echo "tracked change ${status:3}" | head -n 1; return; }
+  while IFS= read -r -d '' entry; do
+    case "$entry" in
+      .m2-local/*|.wp-logs/*) continue ;;
+      target/|*/target/) [ -f "$1/${entry%target/}pom.xml" ] && continue ;;
+    esac
+    echo "untracked $entry"
+    return
+  done < <(git -C "$1" ls-files --others --directory -z)
+}
+
+touched() {  # touched <tree> <find test...>: the first path of <tree> passing the test, outside .m2-local/ (a cache
+            # every build writes); a path inside before the tree's own directory. Module target/ dirs count: a build
+            # not run through a lock writes nothing else.
+  (cd "$1" && shift && find . -path ./.m2-local -prune -o "$@" -print) \
+    | awk '$0 == "." { dot = 1; next } !found { sub(/^\.\//, ""); print; found = 1 }
+           END { if (!found && dot) print "the tree directory" }'
+}
+
+activity() {  # activity <tree>: a path modified within idle_hours; empty if none
+  touched "$1" -mmin -$((idle_hours * 60))
+}
+
+changed_since() {  # changed_since <tree> <marker>: a path modified after <marker>; empty if none
+  touched "$1" -newer "$2"
+}
+
+archived() {  # archived <tree> <name> <head> <branch>: copies what is not committed; prints the archive directory.
+  local dir=$archives/$2  # A failed copy removes its partial directory, so the next run does not move to <name>.<epoch>
+  [ ! -e "$dir" ] || dir=$archives/$2.$(date +%s)
+  mkdir -p "$dir" || return 1
+  archive_into "$1" "$dir" "$3" "$4" || { rm -rf "$dir"; return 1; }
+  echo "$dir"
+}
+
+archive_into() {  # archive_into <tree> <dir> <head> <branch>
+  local tree=$1 dir=$2 list target excludes
+  printf '%s %s\n' "$3" "${4:-(detached)}" > "$dir/HEAD" || return 1
+  git -C "$tree" diff HEAD --binary > "$dir/tracked.diff" || return 1
+  list=$dir/.files
+  excludes=(':(exclude,glob).m2-local/**' ':(exclude,glob).m2-local.partial/**')  # .partial: a wt-new copy cut short
+  while read -r target; do
+    [ -z "$target" ] || excludes+=(":(exclude,literal)$target")
+  done <<< "$(module_targets "$tree")"
+  { git -C "$tree" diff HEAD --name-only -z --diff-filter=d \
+      && git -C "$tree" ls-files --others -z -- . "${excludes[@]}"; } > "$list" || return 1
+  if [ -s "$list" ]; then
+    (cd "$tree" && tar -cf - --null -T "$list") | tar -xf - -C "$dir" || return 1
+  fi
+  rm -f "$list"
+}
+
+while read -r tree <&3; do
+  name=$(basename "$tree")
+  info=$(git -C "$self" worktree list --porcelain | awk -v t="worktree $tree" '$0 == t { on = 1; next } on && $0 == "" { exit } on')
+  head=$(printf '%s\n' "$info" | sed -n 's/^HEAD //p')
+  branch=$(printf '%s\n' "$info" | sed -n 's|^branch refs/heads/||p')
+  if [ "$(cd "$tree" 2> /dev/null && pwd -P)" = "$self" ]; then row "$name" kept "the tree running wt-prune"; continue; fi
+  case "$keep" in *",$name,"*) row "$name" kept "--keep"; continue ;; esac
+  [ -d "$tree" ] || { row "$name" kept "directory missing (git worktree prune clears it)"; continue; }
+  # a here-string, not a pipe: under pipefail grep -q's early exit can SIGPIPE the writer and read a lock as absent
+  if grep -q '^locked' <<< "$info"; then row "$name" kept "locked (git worktree lock)"; continue; fi
+  git -C "$self" merge-base --is-ancestor "$head" "$main" || { row "$name" kept "not merged into origin/main"; continue; }
+  if why=$(lock_held "$tree"); then row "$name" kept "build lock held $why"; continue; fi
+  if [ "$dirty_too" -eq 0 ]; then
+    why=$(dirt "$tree")
+    [ -z "$why" ] || { row "$name" kept "dirty: $why (--include-dirty archives it and removes the tree)"; continue; }
+  fi
+  marker=$markers/$name
+  : > "$marker"  # changes after it are found again before the removal; changes before it, by the activity check
+  why=$(activity "$tree")
+  [ -z "$why" ] || { row "$name" kept "active: $why modified within ${idle_hours}h (TEMPER_PRUNE_IDLE_HOURS)"; continue; }
+  if [ -n "$branch" ]; then
+    count=$(open_prs "$tree" "$branch") || { row "$name" kept "open PR unknown (gh unavailable or failed)"; continue; }
+    [ "$count" -eq 0 ] || { row "$name" kept "branch $branch has $count open PR"; continue; }
+  fi
+  if [ "$apply" -eq 0 ]; then row "$name" "would remove" "merged into origin/main, idle, no open PR"; continue; fi
+  dir=$(archived "$tree" "$name" "$head" "$branch") || { row "$name" kept "FAILED to archive"; rc=4; continue; }
+  # The checks again, right before the removal: a build or an agent may have started since.
+  why=
+  if held=$(lock_held "$tree"); then why="build lock taken since checked: $held"; fi
+  if [ -z "$why" ] && [ "$dirty_too" -eq 0 ]; then
+    why=$(dirt "$tree")
+    [ -z "$why" ] || why="dirty since checked: $why"
+  fi
+  if [ -z "$why" ]; then
+    why=$(changed_since "$tree" "$marker")
+    [ -z "$why" ] || why="changed since checked: $why"
+  fi
+  [ -z "$why" ] || { row "$name" kept "$why (archived to $dir)"; continue; }
+  force=
+  [ "$dirty_too" -eq 0 ] || force=--force
+  git -C "$self" worktree remove $force "$tree" > /dev/null 2>&1 \
+    || { row "$name" kept "FAILED: git worktree remove (archived to $dir)"; rc=4; continue; }
+  row "$name" removed "merged into origin/main, idle, no open PR; archived to $dir"
+done 3< <(git -C "$self" worktree list --porcelain | sed -n 's/^worktree //p' | tail -n +2)
+
+[ "$apply" -eq 0 ] || git -C "$self" worktree prune
+exit $rc

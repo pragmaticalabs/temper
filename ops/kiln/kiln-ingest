@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# kiln-ingest -- the ONLY command kiln's ingest keys may run on bigboy (kiln-f1-design §5, §6; pr-tracker-spec §5.4).
+#
+# Installed as ~/tools/kiln-ingest and bound to each key by a forced command in ~/.ssh/authorized_keys, one key per verb:
+#   restrict,command="exec ~/tools/kiln-ingest mac" ssh-ed25519 AAAA... kiln-ingest
+#   restrict,command="exec ~/tools/kiln-ingest work" ssh-ed25519 AAAA... kiln-work
+# (no from=: the Mac's LAN address is not fixed, Q-16). The Mac pushes its scan as
+#   ~/tools/kiln-scan scan <root>... | ssh -i ~/.ssh/kiln_ingest builder@<bigboy>
+# and the team lead's work ledger event (ops/kiln/kiln-work) as one JSON object on stdin through ~/.ssh/kiln_work,
+# both with no remote command. The verb is the forced command's, so a key reaches exactly one route.
+#
+# It takes exactly one argument, `mac` or `work` (the forced command's), and refuses a non-empty $SSH_ORIGINAL_COMMAND:
+# the key runs this one request, never one the client names (64). stdin is read up to its verb's cap (8 MiB for a scan,
+# 16 KiB for a ledger event) into a private temporary file (umask 077, removed on exit); more than that is refused (65)
+# and nothing is sent. Then the file goes verbatim to kiln on the loopback address:
+#   curl -sS --fail-with-body --max-time <300|30> -H 'X-Kiln-Ingest: 1' --data-binary @<file> \
+#        http://127.0.0.1:${KILN_PORT:-7171}/api/v1/ingest/<mac|work>
+# kiln's answer (`mac`: {"outcome":"COMPLETE"|"INCOMPLETE","rows":N}; `work`: {"event":N,...}) is printed, and the exit
+# code is curl's: 0, or 22 when kiln answered an HTTP error (its body is printed too: a refused event names its field),
+# 7 when kiln is not listening.
+#
+# Nothing of the input is ever evaluated, expanded or passed as an argument: it is data in a file. KILN_PORT is the
+# owner's (a forced command's `KILN_PORT=... exec ...`); the client cannot set it (sshd's AcceptEnv matches no KILN_*
+# variable and PermitUserEnvironment is off, as for worker-launch), and it must be a port number. bash 3.2 with BSD
+# tools (macOS) and bash 5 with GNU tools (Linux).
+set -euo pipefail
+
+readonly MAC_MAX_BYTES=$((8 * 1024 * 1024))
+readonly WORK_MAX_BYTES=$((16 * 1024))
+
+die() {  # die <exit code> <message...>
+  local code=$1
+  shift
+  echo "kiln-ingest: $*" >&2
+  exit "$code"
+}
+
+main() {
+  [ -z "${SSH_ORIGINAL_COMMAND:-}" ] || die 64 "refused: this key runs no command; push the scan on stdin"
+  [ "$#" -eq 1 ] || die 64 "usage: kiln-ingest mac|work"
+  local verb=$1 max timeout
+  case "$verb" in
+    mac) max=$MAC_MAX_BYTES; timeout=300 ;;
+    work) max=$WORK_MAX_BYTES; timeout=30 ;;
+    *) die 64 "usage: kiln-ingest mac|work" ;;
+  esac
+  local port=${KILN_PORT:-7171}
+  [[ $port =~ ^[1-9][0-9]{0,4}$ ]] && [ "$port" -le 65535 ] || die 64 "refused: KILN_PORT must be a port number"
+  umask 077
+  BODY=$(mktemp "${TMPDIR:-/tmp}/kiln-ingest.XXXXXX") || die 73 "cannot create a temporary file"
+  trap 'rm -f -- "$BODY"' EXIT
+  head -c "$((max + 1))" > "$BODY"
+  local size
+  size=$(wc -c < "$BODY")
+  [ "$size" -le "$max" ] || die 65 "refused: the push is over $max bytes; nothing was sent"
+  local rc=0
+  curl -sS --fail-with-body --max-time "$timeout" -H 'X-Kiln-Ingest: 1' --data-binary "@$BODY" "http://127.0.0.1:$port/api/v1/ingest/$verb" || rc=$?
+  exit "$rc"
+}
+
+main "$@"

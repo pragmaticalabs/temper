@@ -1,0 +1,5 @@
+#!/bin/sh
+echo "java $*" >> "$HOME/shim.log"
+for last; do :; done
+sha=$(sha256sum < "$last" 2> /dev/null | cut -d' ' -f1)
+exit "$(cat "$HOME/shim/java-rc-$sha" 2> /dev/null || echo 0)"
