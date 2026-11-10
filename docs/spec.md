@@ -34,7 +34,7 @@ rationale; this file is the contract. v0.2 folds in the maintainer's review of v
 ## 1. Components and repo layout
 
 ```
-temper/                          pragmaticalabs/temper (private)
+temper/                          pragmaticalabs/temper (public)
   pom.xml                        parent; Java 25; Pragmatica 1.0.0-rc4 from ~/.m2 via .m2-local seed
   .mvn/maven.config              -Dmaven.repo.local=.m2-local (skip-worktree, per global rules)
   temper-domain/                 values, recipes, verdict rules, planner, refusals, manifest, report parser
