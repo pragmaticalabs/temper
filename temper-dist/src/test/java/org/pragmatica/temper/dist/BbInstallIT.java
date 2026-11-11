@@ -172,11 +172,26 @@ class BbInstallIT {
         assertThat(pin("BB_QUEUE_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-queue")));
         assertThat(pin("BB_TICKETS_OLD")).isEqualTo(BbFixtures.md5(ticketsPrevious()));
         assertThat(pin("BB_LIB_OLD")).isEqualTo(BbFixtures.BB_LIB_OLD).isEqualTo(BbFixtures.md5(libOld()));
-        assertThat(pin("BB_QUEUE_OLD")).isEqualTo(BbFixtures.BB_QUEUE_OLD)
-                  .isEqualTo(BbFixtures.md5(BbFixtures.originalBbQueue()));
-        assertThat(pin("BB_BUILD_OLD")).isEqualTo(BbFixtures.BB_BUILD_OLD)
-                  .isEqualTo(BbFixtures.md5(BbFixtures.originalBbBuild()));
+        assertThat(pin("BB_QUEUE_OLD")).isEqualTo(BbFixtures.BB_QUEUE_OLD).isEqualTo(BbFixtures.md5(BbFixtures.originalBbQueue()));
+        assertThat(pin("BB_BUILD_OLD")).isEqualTo(BbFixtures.BB_BUILD_OLD).isEqualTo(BbFixtures.md5(BbFixtures.originalBbBuild()));
+        assertThat(pin("BB_BUILD_PREV")).isEqualTo(BbFixtures.md5(prev("bb-build")));
+        assertThat(pin("BB_LIB_PREV")).isEqualTo(BbFixtures.md5(prev("bb-queue-lib.sh")));
+        assertThat(pin("BB_QUEUE_PREV")).isEqualTo(BbFixtures.md5(prev("bb-queue")));
+        assertThat(pin("BB_HOLD_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-hold")));
+        assertThat(pin("BB_WAIT_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-wait")));
+        assertThat(pin("BB_NETNS_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-netns-run")));
+        assertThat(pin("BB_PORTGROUP_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-portgroup.py")));
     }
+
+    /// The 2026-11-09 repo version of bb-build, bb-queue-lib.sh or bb-queue (what cloudbb-3 holds), vendored verbatim as `bb/<name>.prev`.
+    private static byte[] prev(String name) throws IOException {
+        try (var in = BbInstallIT.class.getResourceAsStream("/bb/" + name + ".prev")) {
+            assertThat(in).as("test resource bb/" + name + ".prev").isNotNull();
+            return in.readAllBytes();
+        }
+    }
+
+    private static final List<String> NEW_FILES = List.of("bb-hold", "bb-wait", "bb-netns-run", "bb-portgroup.py");
 
     @Test
     void success_installsAllFourFiles_keepsBackups_andASecondRunChangesNothing() throws Exception {
@@ -187,15 +202,21 @@ class BbInstallIT {
         var first = install("builder@h1");
 
         assertThat(first.rc()).as(first.stdout() + first.stderr()).isZero();
-        assertThat(first.stdout().lines().toList()).containsExactly("installed builder@h1 bb-tickets before=absent after=" + pin("BB_TICKETS_NEW"),
-                                                                    "installed builder@h1 bb-queue-lib.sh before=" + BbFixtures.BB_LIB_OLD
-                                                                   + " after=" + pin("BB_LIB_NEW"),
-                                                                    "installed builder@h1 bb-queue before=" + BbFixtures.BB_QUEUE_OLD
-                                                                   + " after=" + pin("BB_QUEUE_NEW"),
-                                                                    "installed builder@h1 bb-build before=" + BbFixtures.BB_BUILD_OLD
-                                                                   + " after=" + pin("BB_BUILD_NEW"));
+        assertThat(first.stdout().lines().toList()).containsExactly(
+            "installed builder@h1 bb-tickets before=absent after=" + pin("BB_TICKETS_NEW"),
+            "installed builder@h1 bb-hold before=absent after=" + pin("BB_HOLD_NEW"),
+            "installed builder@h1 bb-wait before=absent after=" + pin("BB_WAIT_NEW"),
+            "installed builder@h1 bb-netns-run before=absent after=" + pin("BB_NETNS_NEW"),
+            "installed builder@h1 bb-portgroup.py before=absent after=" + pin("BB_PORTGROUP_NEW"),
+            "installed builder@h1 bb-queue-lib.sh before=" + BbFixtures.BB_LIB_OLD + " after=" + pin("BB_LIB_NEW"),
+            "installed builder@h1 bb-queue before=" + BbFixtures.BB_QUEUE_OLD + " after=" + pin("BB_QUEUE_NEW"),
+            "installed builder@h1 bb-build before=" + BbFixtures.BB_BUILD_OLD + " after=" + pin("BB_BUILD_NEW"));
         assertThat(tools.resolve("bb-build")).hasBinaryContent(Files.readAllBytes(OPS_BB.resolve("bb-build")));
         assertThat(tools.resolve("bb-tickets")).hasBinaryContent(Files.readAllBytes(OPS_BB.resolve("bb-tickets")));
+        for (var f : NEW_FILES) {
+            assertThat(tools.resolve(f)).hasBinaryContent(Files.readAllBytes(OPS_BB.resolve(f)));
+            assertThat(PosixFilePermissions.toString(Files.getPosixFilePermissions(tools.resolve(f)))).as(f).isEqualTo("rwxr-xr-x");
+        }
         assertThat(tools.resolve("bb-build.bak-" + BbFixtures.BB_BUILD_OLD)).hasBinaryContent(oldBuild);
         assertThat(PosixFilePermissions.toString(Files.getPosixFilePermissions(tools.resolve("bb-build")))).isEqualTo("rwxr-xr-x");
         assertThat(PosixFilePermissions.toString(Files.getPosixFilePermissions(tools.resolve("bb-tickets")))).isEqualTo("rwxr-xr-x");
@@ -218,12 +239,58 @@ class BbInstallIT {
         var second = install("builder@h1");
 
         assertThat(second.rc()).as(second.stdout() + second.stderr()).isZero();
-        assertThat(second.stdout().lines().toList()).containsExactly("unchanged builder@h1 bb-tickets " + pin("BB_TICKETS_NEW"),
-                                                                     "unchanged builder@h1 bb-queue-lib.sh " + pin("BB_LIB_NEW"),
-                                                                     "unchanged builder@h1 bb-queue " + pin("BB_QUEUE_NEW"),
-                                                                     "unchanged builder@h1 bb-build " + pin("BB_BUILD_NEW"));
+        assertThat(second.stdout().lines().toList()).containsExactly(
+            "unchanged builder@h1 bb-tickets " + pin("BB_TICKETS_NEW"),
+            "unchanged builder@h1 bb-hold " + pin("BB_HOLD_NEW"),
+            "unchanged builder@h1 bb-wait " + pin("BB_WAIT_NEW"),
+            "unchanged builder@h1 bb-netns-run " + pin("BB_NETNS_NEW"),
+            "unchanged builder@h1 bb-portgroup.py " + pin("BB_PORTGROUP_NEW"),
+            "unchanged builder@h1 bb-queue-lib.sh " + pin("BB_LIB_NEW"),
+            "unchanged builder@h1 bb-queue " + pin("BB_QUEUE_NEW"),
+            "unchanged builder@h1 bb-build " + pin("BB_BUILD_NEW"));
         assertThat(listing(tools)).isEqualTo(after);
         assertThat(sshCalls()).as("the second run only probes").hasSize(calls + 1);
+    }
+
+    /// cloudbb-3 shape: the 2026-11-09 repo set (bb-build/lib/queue at PREV, bb-hold at the host snapshot, no bb-wait/bb-netns-run) is an
+    /// accepted upgrade source; every file ends at the live pin and the replaced ones are backed up under their old md5.
+    @Test
+    void aHostAtThePreviousRepoSet_isUpgraded() throws Exception {
+        var tools = host("h1");
+
+        Files.write(tools.resolve("bb-build"), prev("bb-build"));
+        Files.write(tools.resolve("bb-queue-lib.sh"), prev("bb-queue-lib.sh"));
+        Files.write(tools.resolve("bb-queue"), prev("bb-queue"));
+        Files.writeString(tools.resolve("bb-hold"), "the snapshot hold\n");
+        var run = install(INSTALL, Map.of(), "builder@h1");
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isEqualTo(65);
+        assertThat(run.stdout()).as("an off-pin bb-hold is still refused").contains("refused builder@h1 bb-hold installed=");
+        Files.delete(tools.resolve("bb-hold"));
+
+        var ok = install("builder@h1");
+
+        assertThat(ok.rc()).as(ok.stdout() + ok.stderr()).isZero();
+        assertThat(ok.stdout()).contains("installed builder@h1 bb-build before=" + pin("BB_BUILD_PREV") + " after=" + pin("BB_BUILD_NEW"),
+                                         "installed builder@h1 bb-queue-lib.sh before=" + pin("BB_LIB_PREV") + " after=" + pin("BB_LIB_NEW"),
+                                         "installed builder@h1 bb-queue before=" + pin("BB_QUEUE_PREV") + " after=" + pin("BB_QUEUE_NEW"));
+        assertThat(tools.resolve("bb-build.bak-" + pin("BB_BUILD_PREV"))).hasBinaryContent(prev("bb-build"));
+    }
+
+    /// c4/d1 shape: a host already holding the live set is accepted and nothing is written.
+    @Test
+    void aHostAtTheLiveSet_isAccepted_andNothingIsWritten() throws Exception {
+        var tools = host("h1");
+
+        for (var f : List.of("bb-build", "bb-queue-lib.sh", "bb-queue", "bb-tickets", "bb-hold", "bb-wait", "bb-netns-run", "bb-portgroup.py")) {
+            Files.copy(OPS_BB.resolve(f), tools.resolve(f), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        }
+        var before = listing(tools);
+        var run = install("builder@h1");
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        assertThat(run.stdout().lines()).allMatch(l -> l.startsWith("unchanged "));
+        assertThat(listing(tools)).isEqualTo(before);
     }
 
     @Test
@@ -249,9 +316,8 @@ class BbInstallIT {
         var run = install("builder@h1", "builder@h2");
 
         assertThat(run.rc()).as(run.stdout() + run.stderr()).isEqualTo(65);
-        assertThat(run.stdout().lines().toList()).containsExactly("refused builder@h2 bb-build installed=" + BbFixtures.md5("a diverged copy\n".getBytes())
-                                                                 + " expected=" + BbFixtures.BB_BUILD_OLD
-                                                                 + "|a1100c916b866ad3716bc4095ddb1991|cae49573d06f632d3081f7d5be1e9b66");
+        assertThat(run.stdout().lines().toList()).containsExactly(
+            "refused builder@h2 bb-build installed=" + BbFixtures.md5("a diverged copy\n".getBytes()) + " expected=" + BbFixtures.BB_BUILD_OLD + "|a1100c916b866ad3716bc4095ddb1991|cae49573d06f632d3081f7d5be1e9b66|" + pin("BB_BUILD_NEW"));
         assertThat(listing(good)).isEqualTo(goodBefore);
         assertThat(listing(diverged)).isEqualTo(divergedBefore);
         assertThat(sshCalls()).as("phase 1 only: one probe per target").hasSize(2);
@@ -265,28 +331,24 @@ class BbInstallIT {
         Files.writeString(h1.resolve("bb-queue-lib.sh"), "other lib\n");
         Files.writeString(h1.resolve("bb-tickets"), "someone else's tickets\n");
         Files.writeString(h1.resolve("bb-queue"), "unrelated tool\n");
+        Files.writeString(h1.resolve("bb-hold"), "a hold of its own\n");
         var h2 = host("h2");
 
         Files.delete(h2.resolve("bb-build"));
         var run = install("builder@h1", "builder@h2");
 
         assertThat(run.rc()).isEqualTo(65);
-        assertThat(run.stdout()
-                      .lines()
-                      .map(line -> line.replaceAll("installed=[0-9a-z]+", "installed=X")
-                                       .replaceAll("expected=[0-9a-f|]+", "expected=Y"))
-                      .toList()).containsExactly("refused builder@h1 bb-queue-lib.sh installed=X expected=Y",
-                                                 "refused builder@h1 bb-queue installed=X expected=Y",
-                                                 "refused builder@h1 bb-tickets installed=X expected=Y",
-                                                 "refused builder@h2 bb-build installed=X expected=Y");
+        assertThat(run.stdout().lines().map(line -> line.replaceAll("installed=[0-9a-z]+", "installed=X").replaceAll("expected=[0-9a-f|]+", "expected=Y")).toList())
+            .containsExactly("refused builder@h1 bb-queue-lib.sh installed=X expected=Y", "refused builder@h1 bb-queue installed=X expected=Y",
+                             "refused builder@h1 bb-tickets installed=X expected=Y",
+                             "refused builder@h1 bb-hold installed=X expected=Y",
+                             "refused builder@h2 bb-build installed=X expected=Y");
         assertThat(run.stdout()).contains("bb-build installed=absent");
         assertThat(run.stdout()).as("every accepted pin is named")
-                  .contains("bb-queue-lib.sh installed=" + BbFixtures.md5("other lib\n".getBytes())
-                           + " expected=" + BbFixtures.BB_LIB_OLD
-                           + "|621b2252c3da05e7dd1161d076908864")
-                  .contains("bb-queue installed=" + BbFixtures.md5("unrelated tool\n".getBytes())
-                           + " expected=" + BbFixtures.BB_QUEUE_OLD
-                           + "|a04b7be02f840d4f1e2bd19c54c52b3f");
+                  .contains("bb-queue-lib.sh installed=" + BbFixtures.md5("other lib\n".getBytes()) + " expected=" + BbFixtures.BB_LIB_OLD
+                            + "|621b2252c3da05e7dd1161d076908864|" + pin("BB_LIB_NEW"))
+                  .contains("bb-queue installed=" + BbFixtures.md5("unrelated tool\n".getBytes()) + " expected=" + BbFixtures.BB_QUEUE_OLD
+                            + "|a04b7be02f840d4f1e2bd19c54c52b3f|" + pin("BB_QUEUE_NEW"));
     }
 
     @Test
@@ -326,8 +388,7 @@ class BbInstallIT {
     void aLocalFileNotAtThePin_isRefused_withoutAnySshCall() throws Exception {
         host("h1");
         var copy = Files.createDirectories(dir.resolve("checkout/ops/bb"));
-
-        for (var name : List.of("bb-build", "bb-tickets", "bb-queue-lib.sh", "bb-queue", "install-bb-fields.sh")) {
+        for (var name : List.of("bb-build", "bb-tickets", "bb-queue-lib.sh", "bb-queue", "bb-hold", "bb-wait", "bb-netns-run", "bb-portgroup.py", "install-bb-fields.sh")) {
             Files.copy(OPS_BB.resolve(name), copy.resolve(name));
         }
 

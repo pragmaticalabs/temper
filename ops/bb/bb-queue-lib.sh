@@ -7,8 +7,19 @@ Q=${BB_TEST_QUEUE_ROOT:-$HOME/work/queue}
 PRIO=${BB_TEST_PRIORITIES:-$HOME/work/priorities}
 PAT=${BB_TEST_REACTOR_PATTERN:-[c]lassworlds.launcher.Launcher}
 PGM=${BB_TEST_PORT_MODULES:-$HOME/work/port-group-modules}
+PGS=${BB_TEST_PG_SLOTS_FILE:-$HOME/work/port-group-slots}   # number of concurrent ISOLATED port-group tickets (default 3)
 # backfill starvation bound (2026-09-29, "backfill"): a ticket blocked by its own cap for this long stops all backfill
 STARVE=${BB_STARVE_SECS:-1200}
+# LOAD ADMISSION (2026-11-11, CTO ruling): a ticket is granted only while load5/cores < LOAD_MAX (in addition to its cap). Load
+# from processes outside the queue must not block it forever: once the oldest grantable ticket has waited more than LOAD_STARVE
+# seconds AND fewer than LOAD_STARVE_REACTORS reactors run, that ticket is granted regardless of load. Read by each waiter, so the
+# values in force for a ticket are its enqueuer's environment.
+LOAD_MAX=${BB_LOAD_MAX:-1.2}
+LOAD_STARVE=${BB_LOAD_STARVE_SECS:-1200}
+LOAD_STARVE_REACTORS=${BB_LOAD_STARVE_REACTORS:-2}
+LOADAVG=${BB_TEST_LOADAVG:-/proc/loadavg}   # TEST ONLY: a file in /proc/loadavg format, read instead
+# TICKET LOG (2026-11-11): one TSV line per ticket when it reaches done/ (see ticket_log).
+TLOG=${BB_TEST_TICKET_LOG:-$HOME/work/bb-ticket-log.tsv}
 mkdir -p "$Q/waiting" "$Q/running" "$Q/done"
 
 field() { sed -n "s/^$2=//p" "$1" 2>/dev/null | tail -1; }
@@ -71,6 +82,9 @@ kill_set() {
 # else's now. Prints two lines on stdout: the PIDs it signalled, and "notours=<pids>" (identity changed, not signalled), space separated.
 stop_ticket_processes() {
   local all="" no="" set e p round i left
+  # An isolated ticket's container processes (tini, maven, forks) have their cwd in the checkout, so the kill set holds them and the
+  # waiter tree together: all die in one round and the waiter never writes the container's 137 as the build's rc. The docker kill
+  # comes AFTER, as a mop-up (2026-11-11: killing the container first let the waiter record rc=137 and cancel reported "too late").
   for round in 1 2 3; do
     set=$(kill_set "$1" "$2"); [ -n "$set" ] || break
     for e in $set; do
@@ -84,6 +98,7 @@ stop_ticket_processes() {
     for e in $left; do still_ours "$e" "$2" && kill -KILL "${e%%:*}" 2>/dev/null; done
     sleep 0.2
   done
+  timeout 20 docker kill "bb-$1" > /dev/null 2>&1 || true   # isolated ticket: the container (named bb-<id> by bb-netns-run), if still up
   printf '%s\n' "$(printf '%s\n' $all | sort -un | tr '\n' ' ' | sed 's/ $//')"
   printf 'notours=%s\n' "$(printf '%s\n' $no | sort -un | tr '\n' ' ' | sed 's/ $//')"
   for e in $(kill_set "$1" "$2"); do still_ours "$e" "$2" && return 1; done
@@ -111,16 +126,49 @@ order() {
   done | sort -k1,1nr -k2,2n -k3,3 | awk '{print $3}'
 }
 
-# Port group (2026-09-29): tickets with group=1 bind FIXED test ports, so at most one of them runs at a time; other
-# tickets are unaffected. The group is held by any running/ ticket with group=1 -- and reap keeps a ticket in running/
-# while its waiter OR its maven reactor lives, so a kill -9 releases the group exactly when the ports are free.
-group_holder() { local f; for f in "$Q"/running/*; do [ -f "$f" ] && [ "$(field "$f" group)" = 1 ] && { echo "${f##*/}"; return 0; }; done; return 0; }
-# grantable (under lock, after reap): order, minus group tickets while the group is held. Tickets written before the
-# group existed have no group= line and count as non-group.
+# Port group (2026-09-29, isolated slots 2026-11-11): tickets with group=1 bind FIXED test ports. Two classes:
+#  - ISOLATED (iso=1, written by bb-build): the maven run executes in its own docker network namespace (bb-netns-run), so
+#    identical fixed ports cannot collide; up to pg_slots() (file $PGS, default 3) of them run at once, each holding a slot
+#    number (group_slot=K) from grant to the end of its maven.
+#  - HOST (group=1 without iso=1: bb-hold containers, tickets of waiters started before 2026-11-11, BB_PG_ISOLATE=0): bind
+#    the host's ports, so a host ticket runs only while NO group ticket of either class runs (the old exclusive rule), and a
+#    waiting host ticket stops later isolated tickets from being granted, so it cannot starve.
+# reap keeps a ticket in running/ while its waiter OR its maven reactor lives, so a kill -9 frees its slot exactly when its
+# processes are gone. Tickets written before the group existed have no group= line and count as non-group.
+pg_slots() { local n; n=$(sed -n 's/^[[:space:]]*\([1-9][0-9]*\)[[:space:]]*$/\1/p' "$PGS" 2>/dev/null | head -1); echo "${n:-3}"; }
+# group_holder: running group tickets, "<id>[slot K|host]" space separated (empty = none).
+group_holder() {
+  local f s; for f in "$Q"/running/*; do
+    [ -f "$f" ] && [ "$(field "$f" group)" = 1 ] || continue
+    if [ "$(field "$f" iso)" = 1 ]; then s="slot $(field "$f" group_slot)"; else s=host; fi
+    printf '%s[%s] ' "${f##*/}" "$s"
+  done; return 0
+}
+# pg_free_slot: lowest slot number in 1..pg_slots not held by a running isolated ticket (0 if none).
+pg_free_slot() {
+  local n i used=" " f; n=$(pg_slots)
+  for f in "$Q"/running/*; do [ -f "$f" ] && [ "$(field "$f" iso)" = 1 ] && used="$used$(field "$f" group_slot) "; done
+  for i in $(seq "$n"); do case "$used" in *" $i "*) ;; *) echo "$i"; return 0;; esac; done
+  echo 0
+}
+# grantable (under lock, after reap): order, minus the group tickets that may not start now.
 grantable() {
-  local id held; held=$(group_holder)
+  local id f n ni=0 ng=0 drain=0; n=$(pg_slots)
+  for f in "$Q"/running/*; do
+    [ -f "$f" ] && [ "$(field "$f" group)" = 1 ] || continue
+    ng=$((ng + 1)); [ "$(field "$f" iso)" = 1 ] && ni=$((ni + 1))
+  done
   for id in $(order); do
-    [ -n "$held" ] && [ "$(field "$Q/waiting/$id" group)" = 1 ] && continue
+    f=$Q/waiting/$id
+    if [ "$(field "$f" group)" = 1 ]; then
+      if [ "$(field "$f" iso)" = 1 ]; then
+        [ "$drain" = 1 ] && continue
+        [ "$ni" -ge "$n" ] && continue
+      else
+        drain=1
+        [ "$ng" -gt 0 ] && continue
+      fi
+    fi
     echo "$id"
   done
 }
@@ -144,11 +192,11 @@ reap() {
     # Not never_started: that would recreate the vanished directory.
     if [ -n "$co" ] && [ ! -d "$co" ]; then
       for p in $(waiter_pids "$id"); do kill -TERM "$p" 2>/dev/null; done
-      printf 'state=abandoned\nended=%s\n' "$(date +%s)" >> "$f"; mv "$f" "$Q/done/$id"; continue
+      printf 'state=abandoned\nended=%s\n' "$(date +%s)" >> "$f"; to_done "$f"; continue
     fi
     waiter_alive "$id" && continue
     [ "$(cat "$co/.bb/queued" 2>/dev/null)" = "$id" ] && never_started "$co" 9 "ticket $id abandoned (waiter process gone)"
-    printf 'state=abandoned\nended=%s\n' "$(date +%s)" >> "$f"; mv "$f" "$Q/done/$id"
+    printf 'state=abandoned\nended=%s\n' "$(date +%s)" >> "$f"; to_done "$f"
   done
   for f in "$Q"/running/*; do
     [ -f "$f" ] || continue; id=${f##*/}; waiter_alive "$id" && continue
@@ -158,7 +206,7 @@ reap() {
     else
       printf 'state=orphaned\nended=%s\n' "$(date +%s)" >> "$f"
     fi
-    mv "$f" "$Q/done/$id"
+    to_done "$f"
   done
 }
 
@@ -169,12 +217,55 @@ reap() {
 # (first time only); once any skipped ticket has been blocked for STARVE seconds, nothing behind it is granted, so the
 # host drains and it runs.
 pick() {
-  local r id f c bs now; r=$(reactors); now=$(date +%s)
+  local r id f c bs now cand="" oldest="" ocr=0 cr; r=$(reactors); now=$(date +%s)
   for id in $(grantable); do
     f=$Q/waiting/$id; c=$(field "$f" cap); case "$c" in ''|*[!0-9]*) c=3;; esac
-    [ "$r" -lt "$c" ] && { echo "$id"; return 0; }
+    cr=$(created_s "$f"); if [ -z "$oldest" ] || [ "$cr" -lt "$ocr" ]; then oldest=$id; ocr=$cr; fi
+    [ -z "$cand" ] || continue
+    [ "$r" -lt "$c" ] && { cand=$id; continue; }
     bs=$(field "$f" blocked_since); case "$bs" in ''|*[!0-9]*) bs=$now; echo "blocked_since=$now" >> "$f";; esac
     [ $((now - bs)) -ge "$STARVE" ] && return 0
   done
+  [ -n "$cand" ] || return 0
+  [ -z "$(load_held)" ] && { echo "$cand"; return 0; }
+  # LOAD GATE held. Starvation bound: the OLDEST grantable ticket goes regardless of load once it has waited > LOAD_STARVE s, fewer
+  # than LOAD_STARVE_REACTORS reactors run, and its own cap allows a start; the override is recorded on the ticket (load_override=).
+  [ $((now - ocr)) -gt "$LOAD_STARVE" ] && [ "$r" -lt "$LOAD_STARVE_REACTORS" ] || return 0
+  f=$Q/waiting/$oldest; c=$(field "$f" cap); case "$c" in ''|*[!0-9]*) c=3;; esac
+  [ "$r" -lt "$c" ] || return 0
+  echo "load_override=$now waited=$((now - ocr))s reactors=$r $(load_held)" >> "$f"; echo "$oldest"
   return 0
+}
+# created_s <ticket>: enqueue time in epoch seconds (created= is nanoseconds); 0 if unreadable.
+created_s() { local c; c=$(field "$1" created); case "$c" in ''|*[!0-9]*) echo 0;; *) echo $((c / 1000000000));; esac; }
+# load_held: nothing when load5/cores < LOAD_MAX, else the reason ("held: load 1.60/core (ceiling 1.2; load5 25.6, 16 cores)").
+# An unreadable or malformed load source never holds the queue.
+load_held() {
+  local cores; cores=$(nproc 2>/dev/null); case "$cores" in ''|*[!0-9]*|0) cores=1;; esac
+  awk -v c="$cores" -v m="$LOAD_MAX" 'NR == 1 { if ($2 ~ /^[0-9]+(\.[0-9]+)?$/ && $2 / c >= m + 0) printf "held: load %.2f/core (ceiling %s; load5 %s, %d cores)\n", $2 / c, m, $2, c; exit }' "$LOADAVG" 2>/dev/null || true
+}
+
+# to_done <ticket file>: move a ticket that has just got its terminal state lines to done/, then log it. Caller holds the queue lock.
+to_done() { local id=${1##*/}; mv "$1" "$Q/done/$id" && ticket_log "$Q/done/$id"; return 0; }
+# utc <epoch>: ISO-8601 UTC, or '-' for an empty/zero value.
+utc() { case "$1" in ''|0|*[!0-9]*) echo -;; *) date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ;; esac; }
+# ticket_log <done file>: append ONE line to $TLOG (append-only, never rewritten): a single printf of < 4000 bytes (below PIPE_BUF) to
+# an O_APPEND fd, issued under the queue lock. A header line is written first if the file is empty. Columns, tab separated:
+#   host ticket owner checkout port_group group_id enqueued granted ended wait_s run_s rc state args
+# times ISO-8601 UTC; group_id = isolated slot number, "host" (host-exclusive group ticket) or '-'; wait_s = granted-enqueued (never
+# granted: ended-enqueued); run_s = ended-granted; rc '-' when the ticket has none (abandoned, expired, orphaned); state = the
+# ticket's last state=; args with tabs/newlines folded to spaces and cut so the line fits.
+ticket_log() {
+  local f=$1 cr st en g gid rc ws=- rs=- line a
+  cr=$(created_s "$f"); st=$(field "$f" started); en=$(field "$f" ended); g=$(field "$f" group); rc=$(field "$f" rc)
+  case "$st" in *[!0-9]*) st="";; esac; case "$en" in *[!0-9]*) en="";; esac
+  gid=-; if [ "$g" = 1 ]; then if [ "$(field "$f" iso)" = 1 ]; then gid=$(field "$f" group_slot); gid=${gid:--}; else gid=host; fi; fi
+  if [ "$cr" != 0 ]; then if [ -n "$st" ]; then ws=$((st - cr)); elif [ -n "$en" ]; then ws=$((en - cr)); fi; fi
+  if [ -n "$st" ] && [ -n "$en" ]; then rs=$((en - st)); fi
+  a=$(field "$f" args | tr '\t\n\r' '   ')
+  line=$(printf '%s\t' "$(hostname -s 2>/dev/null || hostname)" "${f##*/}" "$(field "$f" owner)" "$(field "$f" co)" "${g:-0}" "$gid" \
+    "$(utc "$cr")" "$(utc "$st")" "$(utc "$en")" "$ws" "$rs" "${rc:--}" "$(field "$f" state)")
+  a=${a:0:$((3990 - ${#line}))}
+  [ -s "$TLOG" ] || printf 'host\tticket\towner\tcheckout\tport_group\tgroup_id\tenqueued\tgranted\tended\twait_s\trun_s\trc\tstate\targs\n' >> "$TLOG"
+  printf '%s%s\n' "$line" "$a" >> "$TLOG"
 }
