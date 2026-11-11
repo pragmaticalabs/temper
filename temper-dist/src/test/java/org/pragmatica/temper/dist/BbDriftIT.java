@@ -238,6 +238,24 @@ class BbDriftIT {
                                                                   "ok builder@h3 10 files");
     }
 
+    /// A host still carrying the bb-tickets from before `progressAt` (the vendored `bb/bb-tickets.previous`, installer pin BB_TICKETS_OLD)
+    /// is drift: reported against the new pin, nothing else.
+    @Test
+    void aHostWithThePreviousBbTickets_isReportedAgainstTheNewOne() throws Exception {
+        var h1 = host("h1");
+
+        try (var in = BbDriftIT.class.getResourceAsStream("/bb/bb-tickets.previous")) {
+            assertThat(in).as("test resource bb/bb-tickets.previous").isNotNull();
+            Files.write(h1.resolve("bb-tickets"), in.readAllBytes());
+        }
+        var previous = BbFixtures.md5(h1.resolve("bb-tickets"));
+        var run = drift("builder@h1");
+
+        assertThat(run.rc()).isEqualTo(1);
+        assertThat(previous).isNotEqualTo(expected("bb-tickets"));
+        assertThat(run.stdout().lines().toList()).containsExactly(line("builder@h1", "bb-tickets", previous, expected("bb-tickets")));
+    }
+
     @Test
     void theCheckWritesNothing_onAnyPlace() throws Exception {
         var h1 = host("h1");
