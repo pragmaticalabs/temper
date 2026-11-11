@@ -11,10 +11,11 @@ Events (per host, from consecutive samples; transition detector: a condition alr
   LINK-LOST <host>   controller state != UP or link != UP (or host unreported) for LOST_SAMPLES consecutive samples
 --once: print the current classification of every host, exit 0.
 --pick: print exactly ONE host name on stdout (exit 0), or nothing and exit 3 if no host is eligible; the reason goes to stderr in
-  one line. Eligible: controller state UP and link UP, load5/core <= --sat-load, queue readable (pick=explicit hosts included: the
-  caller passes BB_HOST=<name>). Rank: hosts with a free slot (cap - running > 0) before full ones; then
-  waiting / max(cap - running, 1) (running = RUNNING rows of the host's bb-queue, never the controller's bbRunning); then
-  load5/core, both lower first. Hosts with an equal ratio and load5/core within 0.2 of the best are chosen among uniformly at
+  one line. Eligible: controller state UP and link UP, load5/core <= --sat-load, and a bb-queue listing that parses (both its
+  RUNNING and WAITING headers present; empty or garbage output is UNKNOWN: excluded and named on stderr; a header-only listing
+  is a genuinely empty queue and eligible). pick=explicit hosts are included: the caller passes BB_HOST=<name>.
+  Rank, in this exact order: (1) hosts with a free slot (cap - running > 0) before full ones; (2) waiting / max(cap - running, 1),
+  lower first (running = RUNNING rows of the host's bb-queue, never the controller's bbRunning); (3) load5/core, lower first. Hosts with an equal ratio and load5/core within 0.2 of the best are chosen among uniformly at
   random (SystemRandom; --seed N makes it deterministic, for tests), so lanes reading at the same moment do not herd.
 --pick --group: for port-group (whole-reactor) runs, same ranking but only among eligible hosts with a FREE port-group slot
   (slots - group tickets running, from the bb-queue RUNNING header, all three forms; a [host] ticket = 0 free); exit 3 if none.
@@ -122,7 +123,10 @@ def parse_queue(text):
     'port group held by: <t|empty>' (1 slot); 'port-group slots: N; group tickets running: t[slot k] t[host]'; 'port-group slots: N; port
     group held by: <tickets>'. A [host] ticket = 0 free; no group info in the header = None."""
     holder, waiting, running, sect, widx, gfree = None, [], 0, None, None, None
+    seen = set()  # section headers met; a listing without both RUNNING and WAITING is not a bb-queue listing (valid=False)
     for line in text.splitlines():
+        if line.startswith('RUNNING ('): seen.add('R')
+        if line.startswith('WAITING ('): seen.add('W')
         if line.startswith('RUNNING'):
             sect = 'R'
             m = re.search(r'port group held by:\s*([^)]*)\)', line) or re.search(r'group tickets running:\s*([^)]*)\)', line)  # pre/post 2026-11-11 bb-queue
@@ -141,7 +145,7 @@ def parse_queue(text):
                 s = dur_s(f[widx])
                 if s is not None: waiting.append(s)
         elif sect == 'R' and f[0] != 'TICKET' and not line.lstrip().startswith('+'): running += 1
-    return dict(waiting=waiting, holder=holder, running=running, group_free=gfree, stale=[])
+    return dict(waiting=waiting, holder=holder, running=running, group_free=gfree, stale=[], valid=seen == {'R', 'W'})
 
 def fmt_s(s): return "%dh%02dm" % (s // 3600, s % 3600 // 60)
 
@@ -234,10 +238,12 @@ TIE_LOAD = 0.2
 
 def pick_host(names, ctrl, qs, rng, group=False):
     """-> (host|None, one-line reason). See the docstring header for the ruling."""
-    cands = []
+    cands, unknown = [], []
     for n in names:
         c = (ctrl or {}).get(n); q = qs.get(n); f = facts(c) if c else None
         if c is None or c.get('state') != 'UP' or c.get('link') != 'UP' or f is None or q is None: continue
+        # v-t16c: empty or garbage output with rc 0 parsed as an idle host and won; an unparsable listing is UNKNOWN, never picked
+        if not q.get('valid', True): unknown.append(n); warn("host %s: bb-queue listing unparsable (no RUNNING/WAITING headers), excluded from --pick" % n); continue
         lpc = f['load5'] / f['cores']
         if lpc > A.sat_load: continue
         if group and not (q.get('group_free') or 0) > 0: continue
@@ -245,13 +251,14 @@ def pick_host(names, ctrl, qs, rng, group=False):
         # a host with no free slot ranks after every host with one (v-t16: a full host with an empty wait queue scored 0 and
         # won on load, so the next ticket waited while another host had room)
         cands.append((round(len(q['waiting']) / max(free, 1), 9), lpc, n, len(q['waiting']), free, 0 if free > 0 else 1))
-    if not cands: return None, "no eligible host (UP+link UP, not saturated, queue readable%s) among %s" % (', free port-group slot' if group else '', ','.join(names))
+    unk = '; unknown=%s' % ','.join(unknown) if unknown else ''
+    if not cands: return None, "no eligible host (UP+link UP, not saturated, queue readable%s) among %s%s" % (', free port-group slot' if group else '', ','.join(names), unk)
     cands.sort(key=lambda r: (r[5], r[0], r[1], r[2]))
     best = cands[0]
     tied = [r for r in cands if r[5] == best[5] and r[0] == best[0] and r[1] <= best[1] + TIE_LOAD]
     ch = rng.choice(tied)
-    return ch[2], "picked %s ratio=%.2f (waiting=%d free=%d%s) load5/core=%.2f; tied=%s; eligible=%s" % (
-        ch[2], ch[0], ch[3], ch[4], ', no host has a free slot' if ch[5] else '', ch[1], ','.join(r[2] for r in tied), ','.join(r[2] for r in cands))
+    return ch[2], "picked %s ratio=%.2f (waiting=%d free=%d%s) load5/core=%.2f; tied=%s; eligible=%s%s" % (
+        ch[2], ch[0], ch[3], ch[4], ', no host has a free slot' if ch[5] else '', ch[1], ','.join(r[2] for r in tied), ','.join(r[2] for r in cands), unk)
 
 def evaluate(names, ctrl, qs):
     conds = {}

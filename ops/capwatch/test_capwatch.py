@@ -114,6 +114,14 @@ rc, out, _ = run([{'a': (host('a', load5=1), None), 'b': hp('b', 1.0, 5, 5)[1]}]
 full = ('full', (host('full', load5=16 * 0.1, running=0), q_rw(5, 0)))
 got = seeds([full, hp('roomy', 0.5, 1, 0)], 20); check("PICK: full host with empty queue loses to a host with a free slot", got == {'roomy'}, str(got))
 rc, out, err = pick([full], '--seed', '1'); check("PICK: only full hosts -> still picks one, says no free slot", (rc, out) == (0, 'full') and 'no host has a free slot' in err, out + err)
+# v-t16c blocker: a listing that does not parse (rc 0, empty or garbage stdout) must not read as an idle host. It is UNKNOWN:
+# excluded and named on stderr. A header-only listing is a genuinely empty queue and stays eligible.
+busy = hp('busy', 1.0, 4, 3)
+for label, text in (("empty output", ""), ("garbage output", "bash: line 1: syntax error\nsomething else\n")):
+    rc, out, err = pick([('g', (host('g', load5=16 * 0.1, running=None), text)), busy], '--seed', '1')
+    check("PICK: %s is UNKNOWN, never picked, named on stderr" % label, (rc, out) == (0, 'busy') and 'host g' in err and 'unknown=g' in err, out + err)
+rc, out, err = pick([('g', (host('g', load5=16 * 0.1, running=None), ""))], '--seed', '1'); check("PICK: only an unparsable host -> exit 3", (rc, out) == (3, '') and 'unknown=g' in err, out + err)
+rc, out, _ = pick([('h', (host('h', load5=16 * 0.1, running=None), Q_EMPTY)), busy], '--seed', '1'); check("PICK: header-only listing = empty queue, eligible", (rc, out) == (0, 'h'), out)
 
 # --- --pick --group: free port-group slot required (headers: old 'held by', new 'slots/group tickets running', transitional 'slots/held by')
 def gq(hdr): return q_rw().replace("port group held by: )", hdr + ")")
