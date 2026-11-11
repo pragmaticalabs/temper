@@ -49,7 +49,8 @@ sealed interface MigrationRunner {
                                          new Migration(15, "t3_tickets"),
                                          new Migration(16, "gh_identities"),
                                          new Migration(17, "s1_alarms"),
-                                         new Migration(18, "i111_grant_fence"));
+                                         new Migration(18, "i111_grant_fence"),
+                                         new Migration(19, "portgroup_long"));
 
     record Migration(int version, String name) {
         public String resource() {
