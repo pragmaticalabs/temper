@@ -304,7 +304,7 @@ class TicketAlarmsTest {
         var fired = rounds.round(AT + 120, progressing("r1", 361 * 60, 10));
 
         assertThat(kinds(fired)).containsExactly("portgroup-long");
-        assertThat(payload(fired.getFirst()).path("ageMin").intValue()).isEqualTo(362);
+        assertThat(payload(fired.getFirst()).path("ageMin").intValue()).isEqualTo(363);
         assertThat(payload(fired.getFirst()).path("limitMin").intValue()).isEqualTo(360);
         assertThat(rounds.round(AT + 7200, progressing("r1", 480 * 60, 10))).isEmpty();
         assertThat(kinds(new Rounds().round(AT, progressing("r2", 400 * 60, 90 * 60)))).containsExactly("portgroup-held",
