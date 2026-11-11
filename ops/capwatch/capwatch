@@ -12,7 +12,8 @@ Events (per host, from consecutive samples; transition detector: a condition alr
 --once: print the current classification of every host, exit 0.
 --pick: print exactly ONE host name on stdout (exit 0), or nothing and exit 3 if no host is eligible; the reason goes to stderr in
   one line. Eligible: controller state UP and link UP, load5/core <= --sat-load, queue readable (pick=explicit hosts included: the
-  caller passes BB_HOST=<name>). Rank: waiting / max(cap - running, 1) (running = RUNNING rows of the host's bb-queue), then
+  caller passes BB_HOST=<name>). Rank: hosts with a free slot (cap - running > 0) before full ones; then
+  waiting / max(cap - running, 1) (running = RUNNING rows of the host's bb-queue, never the controller's bbRunning); then
   load5/core, both lower first. Hosts with an equal ratio and load5/core within 0.2 of the best are chosen among uniformly at
   random (SystemRandom; --seed N makes it deterministic, for tests), so lanes reading at the same moment do not herd.
 --pick --group: for port-group (whole-reactor) runs, same ranking but only among eligible hosts with a FREE port-group slot
@@ -241,14 +242,16 @@ def pick_host(names, ctrl, qs, rng, group=False):
         if lpc > A.sat_load: continue
         if group and not (q.get('group_free') or 0) > 0: continue
         free = (c.get('cap') or 0) - q['running']
-        cands.append((round(len(q['waiting']) / max(free, 1), 9), lpc, n, len(q['waiting']), free))
+        # a host with no free slot ranks after every host with one (v-t16: a full host with an empty wait queue scored 0 and
+        # won on load, so the next ticket waited while another host had room)
+        cands.append((round(len(q['waiting']) / max(free, 1), 9), lpc, n, len(q['waiting']), free, 0 if free > 0 else 1))
     if not cands: return None, "no eligible host (UP+link UP, not saturated, queue readable%s) among %s" % (', free port-group slot' if group else '', ','.join(names))
-    cands.sort(key=lambda r: (r[0], r[1], r[2]))
+    cands.sort(key=lambda r: (r[5], r[0], r[1], r[2]))
     best = cands[0]
-    tied = [r for r in cands if r[0] == best[0] and r[1] <= best[1] + TIE_LOAD]
+    tied = [r for r in cands if r[5] == best[5] and r[0] == best[0] and r[1] <= best[1] + TIE_LOAD]
     ch = rng.choice(tied)
-    return ch[2], "picked %s ratio=%.2f (waiting=%d free=%d) load5/core=%.2f; tied=%s; eligible=%s" % (
-        ch[2], ch[0], ch[3], ch[4], ch[1], ','.join(r[2] for r in tied), ','.join(r[2] for r in cands))
+    return ch[2], "picked %s ratio=%.2f (waiting=%d free=%d%s) load5/core=%.2f; tied=%s; eligible=%s" % (
+        ch[2], ch[0], ch[3], ch[4], ', no host has a free slot' if ch[5] else '', ch[1], ','.join(r[2] for r in tied), ','.join(r[2] for r in cands))
 
 def evaluate(names, ctrl, qs):
     conds = {}

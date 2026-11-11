@@ -108,6 +108,12 @@ got = seeds([hp('a', 0.5), hp('b', 0.8)]); check("PICK: load gap > 0.2 is not a 
 got = seeds([hp('a', 0.5), hp('b', 0.5, 5, 1)], 20); check("PICK: unequal ratio is not a tie (running=5 waiting=1 -> 1/1)", got == {'a'}, str(got))
 rc, out, _ = pick([hp('d1', 0.1), hp('x', 1.0, 5, 6)], '--seed', '1'); check("PICK: explicit-pick host (config not consulted) is eligible", (rc, out) == (0, 'd1'), out)
 rc, out, _ = run([{'a': (host('a', load5=1), None), 'b': hp('b', 1.0, 5, 5)[1]}], '--pick'); check("PICK: unreadable queue is ineligible", (rc, out) == (0, 'b'), out)
+# v-t16 HIGH + MEDIUM: a FULL host (queue shows 5 running = cap) with an empty wait queue and lower load, whose controller facts
+# claim bbRunning=0, must lose to a host with a free slot -- red if free slots are not ranked first, red if running is read from
+# the controller's bbRunning instead of the queue
+full = ('full', (host('full', load5=16 * 0.1, running=0), q_rw(5, 0)))
+got = seeds([full, hp('roomy', 0.5, 1, 0)], 20); check("PICK: full host with empty queue loses to a host with a free slot", got == {'roomy'}, str(got))
+rc, out, err = pick([full], '--seed', '1'); check("PICK: only full hosts -> still picks one, says no free slot", (rc, out) == (0, 'full') and 'no host has a free slot' in err, out + err)
 
 # --- --pick --group: free port-group slot required (headers: old 'held by', new 'slots/group tickets running', transitional 'slots/held by')
 def gq(hdr): return q_rw().replace("port group held by: )", hdr + ")")
