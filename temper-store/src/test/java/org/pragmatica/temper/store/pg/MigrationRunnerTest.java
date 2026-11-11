@@ -126,6 +126,42 @@ class MigrationRunnerTest {
         assertRefused(MigrationRunner.pending(migrations(1, 2, 3), applied(1, 2, 3, 5, 17)), StoreError.MigrationNotInBuild.FACTORY.apply(5));
     }
 
+    /// The public-history squash d3140d89 edited comments of shipped V5; a database that applied the old bytes
+    /// carries the legacy sha, which is accepted (and not queued for re-apply), the current sha is accepted, any other is tampering.
+    @Test
+    void pending_acceptsTheLegacyShaOfAShippedMigration() {
+        var current = loadedShipped(5);
+        var applied = Map.of(5, "50ff0f603a1f592438d87a16b436d792f3daf45300be6236cca08415303cd7a9");
+
+        assertThat(MigrationRunner.pending(List.of(current), applied).unwrap()).isEmpty();
+    }
+
+    @Test
+    void pending_acceptsTheCurrentShaOfAShippedMigration() {
+        var current = loadedShipped(5);
+
+        assertThat(MigrationRunner.pending(List.of(current), Map.of(5, current.sha256())).unwrap()).isEmpty();
+    }
+
+    @Test
+    void pending_isMigrationTampered_whenTheShaIsNeitherCurrentNorLegacy() {
+        var current = loadedShipped(5);
+
+        assertRefused(MigrationRunner.pending(List.of(current), Map.of(5, "0".repeat(64))), StoreError.MigrationTampered.FACTORY.apply(5));
+    }
+
+    /// A legacy sha of one version is no excuse for another version.
+    @Test
+    void pending_isMigrationTampered_whenALegacyShaIsAppliedToAnotherVersion() {
+        var other = loadedShipped(1);
+
+        assertRefused(MigrationRunner.pending(List.of(other), Map.of(1, "50ff0f603a1f592438d87a16b436d792f3daf45300be6236cca08415303cd7a9")), StoreError.MigrationTampered.FACTORY.apply(1));
+    }
+
+    private static MigrationRunner.Loaded loadedShipped(int version) {
+        return MigrationRunner.load(MigrationRunner.MIGRATIONS.get(version - 1)).unwrap();
+    }
+
     /// Synthetic migrations whose sha256 is `sha<version>`, matching [#applied].
     private static List<MigrationRunner.Loaded> migrations(int... versions) {
         return IntStream.of(versions)

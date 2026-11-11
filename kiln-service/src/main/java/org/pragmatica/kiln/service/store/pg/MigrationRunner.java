@@ -20,6 +20,9 @@ import org.pragmatica.postgres.PgResultSet;
 import org.pragmatica.postgres.net.Transaction;
 import org.pragmatica.kiln.service.store.KilnStoreError;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 
 /// Applies `kiln/db/migration/V<n>__<name>.sql` at kiln start, copied from temper-store's runner with two changes
 /// (kiln-f1-design §1): the resources live under `kiln/db/migration/`, so no temper migration can ever be found on
@@ -30,6 +33,7 @@ import org.pragmatica.kiln.service.store.KilnStoreError;
 /// contiguous from V1 (`MigrationGap`), a database carrying a version the build lacks (`MigrationNotInBuild`), and a
 /// pending version below the highest applied one (`MigrationOutOfOrder`) all abort startup.
 sealed interface MigrationRunner {
+    Logger LOG = LoggerFactory.getLogger(MigrationRunner.class);
     long LOCK = 7171L;
 
     /// Every migration, in order. A new file is added here; `MigrationRunnerTest` fails when a file under
@@ -41,6 +45,15 @@ sealed interface MigrationRunner {
                                          new Migration(5, "work_ledger"),
                                          new Migration(6, "base_tip"),
                                          new Migration(7, "pipeline_baseline"));
+
+    /// sha256 of the PRE-squash bytes of shipped migrations whose comments the public-history squash d3140d89 edited
+    /// (the bytes at commit 4edb67d2). A database that applied those bytes carries these shas; an applied row equal to
+    /// the legacy sha of its version is accepted, never rewritten. Any other mismatch is still tampering. Shipped files
+    /// are immutable (`ShippedMigrationsPinTest`), so this list never grows.
+    Map<Integer, String> LEGACY_SHA256 = Map.of(3,
+                                                "46cf1140530e0296849643d3526a8b8d0c42aa855ee7b12263a2658f417d7236",
+                                                6,
+                                                "19a13d493bbdb11e5dc13e5db5e35def959ec254cc0dd183d27cc63242026745");
 
     record Migration(int version, String name) {
         public String resource() {
@@ -143,7 +156,8 @@ sealed interface MigrationRunner {
     /// file changed, the first applied version `loaded` lacks, and the first pending version below the highest applied
     /// one each fail startup.
     static Result<List<Loaded>> pending(List<Loaded> loaded, Map<Integer, String> applied) {
-        return untampered(loaded, applied).flatMap(_ -> allInBuild(loaded, applied))
+        return untampered(loaded, applied).onSuccess(_ -> logLegacy(loaded, applied))
+                         .flatMap(_ -> allInBuild(loaded, applied))
                          .map(_ -> unapplied(loaded, applied))
                          .flatMap(unapplied -> afterApplied(unapplied, applied));
     }
@@ -155,9 +169,23 @@ sealed interface MigrationRunner {
     }
 
     private static boolean changed(Loaded migration, Map<Integer, String> applied) {
-        return Option.option(applied.get(migration.migration().version()))
+        return Option.option(applied.get(version(migration)))
                      .filter(sha -> !sha.equals(migration.sha256()))
+                     .filter(sha -> !isLegacy(migration, sha))
                      .isPresent();
+    }
+
+    private static boolean isLegacy(Loaded migration, String sha) {
+        return sha.equals(LEGACY_SHA256.get(version(migration)));
+    }
+
+    private static void logLegacy(List<Loaded> loaded, Map<Integer, String> applied) {
+        loaded.stream()
+              .filter(migration -> Option.option(applied.get(version(migration)))
+                                         .filter(sha -> !sha.equals(migration.sha256()))
+                                         .isPresent())
+              .forEach(migration -> LOG.info("migration V{} applied with its pre-squash bytes (legacy sha256 accepted, row left as is)",
+                                             version(migration)));
     }
 
     private static Result<Unit> allInBuild(List<Loaded> loaded, Map<Integer, String> applied) {
