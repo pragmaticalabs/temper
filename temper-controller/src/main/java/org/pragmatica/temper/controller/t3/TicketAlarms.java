@@ -318,7 +318,11 @@ public final class TicketAlarms {
 
     /// The ticket's last progress, epoch seconds on the host clock: `progressAt` when the listing has it, else `started`.
     static Option<Long> progress(BbTicket ticket) {
-        return number(ticket, PROGRESS_AT).or(() -> number(ticket, "started"));
+        var reported = number(ticket, PROGRESS_AT);
+
+        return reported.isPresent()
+               ? reported
+               : number(ticket, "started");
     }
 
     /// The due thresholds (`age ≥ limit × 60`, at exactly the limit it fires) without a mark: one event at the highest
