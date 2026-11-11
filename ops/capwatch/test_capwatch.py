@@ -109,4 +109,16 @@ got = seeds([hp('a', 0.5), hp('b', 0.5, 5, 1)], 20); check("PICK: unequal ratio 
 rc, out, _ = pick([hp('d1', 0.1), hp('x', 1.0, 5, 6)], '--seed', '1'); check("PICK: explicit-pick host (config not consulted) is eligible", (rc, out) == (0, 'd1'), out)
 rc, out, _ = run([{'a': (host('a', load5=1), None), 'b': hp('b', 1.0, 5, 5)[1]}], '--pick'); check("PICK: unreadable queue is ineligible", (rc, out) == (0, 'b'), out)
 
+# --- --pick --group: free port-group slot required (headers: old 'held by', new 'slots/group tickets running', transitional 'slots/held by')
+def gq(hdr): return q_rw().replace("port group held by: )", hdr + ")")
+def gh(name, hdr, lpc=0.5): return (name, (host(name, load5=16 * lpc, running=None), gq(hdr)))
+def gpick(hosts, *f): return run([dict(hosts)], '--pick', '--group', *f)
+rc, out, _ = gpick([gh('full', 'port-group slots: 2; group tickets running: a[slot 1] b[slot 2]', 0.1), gh('ok', 'port-group slots: 2; group tickets running: a[slot 1]', 0.9)]); check("GROUP: skips a host with full slots", (rc, out) == (0, 'ok'), out)
+rc, out, _ = gpick([gh('hx', 'port-group slots: 2; group tickets running: a[host]', 0.1), gh('ok', 'port-group slots: 2; group tickets running: ', 0.9)]); check("GROUP: skips a host with a [host] ticket", (rc, out) == (0, 'ok'), out)
+rc, out, _ = gpick([gh('half', 'port-group slots: 2; group tickets running: a[slot 2]')]); check("GROUP: 1 of 2 slots free is pickable", (rc, out) == (0, 'half'), out)
+rc, out, _ = gpick([gh('old', 'port group held by: ')]); check("GROUP: old format, empty holder = 1 free", (rc, out) == (0, 'old'), out)
+rc, out, _ = gpick([gh('oldheld', 'port group held by: 123-4')]); check("GROUP: old format, held = none free -> exit 3", (rc, out) == (3, ''), out)
+rc, out, _ = gpick([gh('t', 'port-group slots: 2; port group held by: a[slot 1] b[slot 2]', 0.1), gh('t2', 'port-group slots: 2; port group held by: a[host]'), gh('t3', 'port-group slots: 2; port group held by: a[slot 1]', 0.9)]); check("GROUP: transitional header form (slots + held by)", (rc, out) == (0, 't3'), out)
+rc, out, _ = pick([gh('full', 'port-group slots: 1; group tickets running: a[slot 1]', 0.1)]); check("GROUP: plain --pick ignores the port group", (rc, out) == (0, 'full'), out)
+
 print("\n%d checks, %d failed" % (total, fails)); sys.exit(1 if fails else 0)

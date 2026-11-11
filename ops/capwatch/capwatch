@@ -15,6 +15,8 @@ Events (per host, from consecutive samples; transition detector: a condition alr
   caller passes BB_HOST=<name>). Rank: waiting / max(cap - running, 1) (running = RUNNING rows of the host's bb-queue), then
   load5/core, both lower first. Hosts with an equal ratio and load5/core within 0.2 of the best are chosen among uniformly at
   random (SystemRandom; --seed N makes it deterministic, for tests), so lanes reading at the same moment do not herd.
+--pick --group: for port-group (whole-reactor) runs, same ranking but only among eligible hosts with a FREE port-group slot
+  (slots - group tickets running, from the bb-queue RUNNING header, all three forms; a [host] ticket = 0 free); exit 3 if none.
 --fixture DIR: canned data + fake clock (see test.sh).
 Fixture: DIR/NNN.json = controller reply of sample NNN; DIR/NNN.<host>.queue = bb-queue text (absent = host unreachable);
 clock = sample index * --interval.
@@ -115,13 +117,19 @@ def dur_s(tok):
     return sum(int(a) * {'h': 3600, 'm': 60, 's': 1}[b] for a, b in ms)
 
 def parse_queue(text):
-    """-> dict(waiting=[seconds waited], holder=str|None, running=int)"""
-    holder, waiting, running, sect, widx = None, [], 0, None, None
+    """-> dict(waiting=[seconds waited], holder=str|None, running=int, group_free=int|None). Header forms of the port group:
+    'port group held by: <t|empty>' (1 slot); 'port-group slots: N; group tickets running: t[slot k] t[host]'; 'port-group slots: N; port
+    group held by: <tickets>'. A [host] ticket = 0 free; no group info in the header = None."""
+    holder, waiting, running, sect, widx, gfree = None, [], 0, None, None, None
     for line in text.splitlines():
         if line.startswith('RUNNING'):
             sect = 'R'
             m = re.search(r'port group held by:\s*([^)]*)\)', line) or re.search(r'group tickets running:\s*([^)]*)\)', line)  # pre/post 2026-11-11 bb-queue
-            holder = (' '.join(m.group(1).split()) or None) if m else None; continue
+            holder = (' '.join(m.group(1).split()) or None) if m else None
+            if m:
+                sl = re.search(r'port-group slots:\s*(\d+)', line); tk = re.findall(r'[^\s\[\]]+(?:\[[^\]]*\])?', holder or '')
+                gfree = 0 if '[host]' in (holder or '') else max(0, int(sl.group(1)) - len(tk)) if sl else (0 if holder else 1)
+            continue
         if line.startswith('WAITING'): sect = 'W'; widx = None; continue
         if line.startswith('FINISHED'): sect = 'F'; continue
         if not line.strip(): continue
@@ -132,7 +140,7 @@ def parse_queue(text):
                 s = dur_s(f[widx])
                 if s is not None: waiting.append(s)
         elif sect == 'R' and f[0] != 'TICKET' and not line.lstrip().startswith('+'): running += 1
-    return dict(waiting=waiting, holder=holder, running=running, stale=[])
+    return dict(waiting=waiting, holder=holder, running=running, group_free=gfree, stale=[])
 
 def fmt_s(s): return "%dh%02dm" % (s // 3600, s % 3600 // 60)
 
@@ -223,7 +231,7 @@ def fixture_sample(d, i, names):
 
 TIE_LOAD = 0.2
 
-def pick_host(names, ctrl, qs, rng):
+def pick_host(names, ctrl, qs, rng, group=False):
     """-> (host|None, one-line reason). See the docstring header for the ruling."""
     cands = []
     for n in names:
@@ -231,9 +239,10 @@ def pick_host(names, ctrl, qs, rng):
         if c is None or c.get('state') != 'UP' or c.get('link') != 'UP' or f is None or q is None: continue
         lpc = f['load5'] / f['cores']
         if lpc > A.sat_load: continue
+        if group and not (q.get('group_free') or 0) > 0: continue
         free = (c.get('cap') or 0) - q['running']
         cands.append((round(len(q['waiting']) / max(free, 1), 9), lpc, n, len(q['waiting']), free))
-    if not cands: return None, "no eligible host (UP+link UP, not saturated, queue readable) among %s" % ','.join(names)
+    if not cands: return None, "no eligible host (UP+link UP, not saturated, queue readable%s) among %s" % (', free port-group slot' if group else '', ','.join(names))
     cands.sort(key=lambda r: (r[0], r[1], r[2]))
     best = cands[0]
     tied = [r for r in cands if r[0] == best[0] and r[1] <= best[1] + TIE_LOAD]
@@ -257,7 +266,7 @@ def main():
     ap.add_argument('--free-mem', type=float, default=FREE_MEM_GIB); ap.add_argument('--free-sustain', type=int, default=FREE_SUSTAIN)
     ap.add_argument('--lost-samples', type=int, default=LOST_SAMPLES); ap.add_argument('--stale-sustain', type=int, default=STALE_SUSTAIN)
     ap.add_argument('--report-initial', action='store_true'); ap.add_argument('--once', action='store_true')
-    ap.add_argument('--pick', action='store_true'); ap.add_argument('--seed', type=int, help='--pick tie-break seed (tests only)')
+    ap.add_argument('--pick', action='store_true'); ap.add_argument('--group', action='store_true', help='with --pick: only hosts with a free port-group slot'); ap.add_argument('--seed', type=int, help='--pick tie-break seed (tests only)')
     ap.add_argument('--fixture'); ap.add_argument('--fixture-hosts', help='comma list of host names (fixture mode; default: from --hosts)')
     A = ap.parse_args()
     key, hosts = load_hosts(A.hosts) if not (A.fixture and A.fixture_hosts) else (None, [dict(name=n) for n in A.fixture_hosts.split(',')])
@@ -273,7 +282,7 @@ def main():
         if A.pick:
             if ctrl is None: print("controller unreachable", file=sys.stderr); return 1
             rng = random.Random(A.seed) if A.seed is not None else random.SystemRandom()
-            h, why = pick_host(names, ctrl, qs, rng)
+            h, why = pick_host(names, ctrl, qs, rng, A.group)
             print(why, file=sys.stderr)
             if h is None: return 3
             print(h); return 0
