@@ -1,0 +1,195 @@
+#!/usr/bin/env bash
+# bb-build <checkout-dir> [mvn args...]  (default args: clean install)
+# QUEUED since 2026-09-28: after the guards below, the build is DEDUPED against identical builds, then ENQUEUED and
+# this command returns at once; a detached waiter launches maven when its ticket is granted (priority order from
+# ~/work/priorities, FIFO among equals, under the reactor cap). Poll for .bb/rc exactly as before.
+# Writes in <checkout>/.bb/: queued (ticket id, while waiting), run.marker (at launch), build.log, start/end
+# epochs, rc (maven's own exit code, written INSIDE the job; 5 = queue wait expired, 9 = cancelled/abandoned
+# before maven started). Call rc: 0 queued; 2 usage; 3 already running/queued here; 4 owner; 6 #1553 guard;
+# 7 identical build running/queued elsewhere; 8 identical build already finished (paths printed); 10 -Dtest without
+# -Dit.test on forge-tests (failsafe ignores -Dtest). BB_DEDUP=0
+# skips dedup. BB_QUEUE=0 runs the pre-queue script (bb-build-direct) unchanged -- it also bypasses the port group.
+# PORT GROUP (2026-09-29): a run that will execute tests of a fixed-port module (~/work/port-group-modules; decided by
+# bb-portgroup.py from the checkout's own poms and the args) is granted only while no other port-group run is running.
+# BB_PORT_GROUP=1 forces membership, BB_PORT_GROUP=0 forces exclusion.
+# TICKET OWNER FIELDS (T3, 2026-11): the ticket gains optional key=value lines after group_reason= and before args= (readers
+# take the LAST line of a key, so every existing reader ignores them): session_pid, session_start (epoch s) and session_label
+# from BB_SESSION_PID / BB_SESSION_START / BB_SESSION_LABEL (all three or none), agent, lane, pr from BB_AGENT, BB_LANE, BB_PR,
+# output (always <checkout>/.bb/build.log) and detached_reader from `bb-build --detached --reader <label> <checkout> [args]`
+# (those three words first, in that order; refused with rc 2 under BB_QUEUE=0 or without --reader; the flag is not part of the
+# maven args or the dedup key). A malformed value never blocks a build: "bb-build: ignoring BB_<NAME>: not <regex>" on stderr,
+# the field is omitted. Old callers set none of these.
+set -euo pipefail
+SELF=$(readlink -f "$0")
+DETACHED_READER=""
+if [ "${1:-}" = --detached ]; then
+  [ "${BB_QUEUE:-1}" != 0 ] || { echo "refusing: --detached needs the queue" >&2; exit 2; }
+  [ "${2:-}" = --reader ] && [ -n "${3:-}" ] || { echo "refusing: --detached needs --reader <label> right after it" >&2; exit 2; }
+  [[ $3 =~ ^[A-Za-z0-9._:-]{1,64}$ ]] || { echo "refusing: --reader label must match ^[A-Za-z0-9._:-]{1,64}\$" >&2; exit 2; }
+  DETACHED_READER=$3; shift 3
+fi
+if [ "${1:-}" != __run ] && [ "${BB_QUEUE:-1}" = 0 ]; then exec "$(dirname "$SELF")/bb-build-direct" "$@"; fi
+. "$(dirname "$SELF")/bb-queue-lib.sh"
+MVN=${BB_TEST_MVN:-$HOME/tools/maven/bin/mvn}
+
+if [ "${1:-}" = __run ]; then
+  # ---- waiter: one detached process per ticket; becomes the maven job wrapper when granted ----
+  set +e
+  ID=$2; shift 2
+  exec 8> "$Q/.lock"
+  T=$Q/waiting/$ID; CO=$(field "$T" co); CAP=$(field "$T" cap); LIMIT=$(field "$T" limit); B=$CO/.bb
+  WAITED=0
+  while :; do
+    flock 8
+    [ -f "$T" ] || exit 0   # cancelled or reaped while we slept
+    reap
+    if [ "$(pick)" = "$ID" ]; then break; fi   # backfill + starvation bound, see pick() in bb-queue-lib.sh
+    if [ "$LIMIT" -gt 0 ] && [ "$WAITED" -ge "$LIMIT" ]; then
+      never_started "$CO" 5 "queue wait expired after ${WAITED}s (BB_CAP_WAIT_SECS=$LIMIT)"
+      printf 'state=expired\nended=%s\n' "$(date +%s)" >> "$T"; mv "$T" "$Q/done/$ID"; exit 0
+    fi
+    flock -u 8; sleep 5; WAITED=$((WAITED + 5))
+  done
+  # granted (lock held): launch, and keep the lock until the reactor is visible so the next grant counts it
+  NOW=$(date +%s)
+  rm -f "$B/queued" "$B/rc" "$B/end"; touch "$B/run.marker"; echo "$NOW" > "$B/start"; printf '%q ' "$@" > "$B/args"   # for bb-report's EMPTY RUN check
+  printf 'started=%s\nwaited=%s\n' "$NOW" "$WAITED" >> "$T"; mv "$T" "$Q/running/$ID"; T=$Q/running/$ID
+  (
+    cd "$CO"
+    env -u HCLOUD_TOKEN JAVA_HOME=/usr/lib/jvm/java-25-openjdk-amd64 "$MVN" "$@" > "$B/build.log" 2>&1
+    rc=$?; date +%s > "$B/end"; echo $rc > "$B/rc"
+  ) 8>&- &
+  C=$!
+  for _ in $(seq 120); do
+    kill -0 "$C" 2>/dev/null || break
+    for p in $(pgrep -u "$USER" -f "$PAT"); do [ "$(readlink "/proc/$p/cwd" 2>/dev/null)" = "$CO" ] && break 3; done
+    sleep 0.5
+  done
+  flock -u 8
+  wait "$C"
+  flock 8
+  [ -f "$T" ] || exit 0   # cancel or reap already finalized this ticket (first writer wins): do not recreate running/<id> or overwrite done/<id>
+  printf 'state=finished\nrc=%s\nended=%s\n' "$(cat "$B/rc" 2>/dev/null || echo unknown)" "$(cat "$B/end" 2>/dev/null)" >> "$T"
+  mv "$T" "$Q/done/$ID"
+  exit 0
+fi
+
+CO=$(cd "$1" && pwd); shift
+# Ownership guard (2026-09-27, after a cross-agent build into another agent's checkout):
+# every caller declares BB_OWNER (its agent prefix, e.g. s5, v1552); a checkout belongs to the
+# owner whose "<owner>-" prefix its directory name carries. No match -> refuse, before any write.
+: "${BB_OWNER:?refusing: set BB_OWNER=<your agent prefix>; checkout names must start with <prefix>-}"
+case "$BB_OWNER" in *[!A-Za-z0-9_]*|"") echo "refusing: BB_OWNER must be [A-Za-z0-9_]+" >&2; exit 4;; esac
+case "$(basename "$CO")" in "$BB_OWNER"-*) ;; *) echo "refusing: $CO is not owned by BB_OWNER=$BB_OWNER (name must start with $BB_OWNER-)" >&2; exit 4;; esac
+[ $# -gt 0 ] || set -- clean install
+B=$CO/.bb; mkdir -p "$B"
+[ -f "$B/rc" ] || [ ! -f "$B/start" ] || { echo "refusing: a build appears to be running in $CO (.bb/start without .bb/rc)" >&2; exit 3; }
+# Host-killing test guard (2026-09-27, #1553): StreamPublishReshuffleTest leaks sockets without bound and
+# exhausted this host's ephemeral ports twice. Unless this checkout's copy carries the #1553 @Disabled, refuse
+# any invocation that names it or that selects Heavy forge tests without explicitly excluding it.
+SPRT="$CO/aether/forge/forge-tests/src/test/java/org/pragmatica/aether/forge/StreamPublishReshuffleTest.java"
+if [ -f "$SPRT" ] && ! grep -q '@Disabled("#1553' "$SPRT"; then
+  ARGS=" $* "
+  if printf '%s' "$ARGS" | grep -Eq '[^!]StreamPublishReshuffleTest'; then
+    echo "refusing: this run names StreamPublishReshuffleTest (#1553 host-killing leak; see runbook 0c)" >&2; exit 6; fi
+  # the exclusion must sit in -Dit.test: forge-tests runs through failsafe, which ignores -Dtest (2026-09-29)
+  if printf '%s' "$ARGS" | grep -Eq 'groups=[^ ]*Heavy|excludedGroups= |-Pwith-e2e' && ! printf '%s' "$ARGS" | grep -Eq -- ' -Dit\.test=[^ ]*!StreamPublishReshuffleTest'; then
+    echo "refusing: Heavy/e2e forge selection without '-Dit.test=…,!StreamPublishReshuffleTest' (#1553; see runbook 0c; -Dtest does not reach failsafe)" >&2; exit 6; fi
+fi
+# Failsafe filter guard (2026-09-29, s3's forge run at 36b5c3d42): forge-tests skips surefire and runs every test through
+# failsafe, which reads -Dit.test and IGNORES -Dtest. A run that names forge-tests (-pl or -f), reaches integration-test,
+# and filters with -Dtest but not -Dit.test would run the whole IT suite. Refuse (rc 10); BB_IT_UNFILTERED=1 overrides.
+A=" $* "
+if [ "${BB_IT_UNFILTERED:-0}" != 1 ] && printf '%s' "$A" | grep -Eq -- ' (-pl|--projects|-f|--file)[= ]?[^ ]*forge-tests' \
+   && printf '%s' "$A" | grep -Eq -- ' -Dtest=' && ! printf '%s' "$A" | grep -Eq -- ' -Dit\.test=' \
+   && printf '%s' "$A" | grep -Eq ' (integration-test|verify|install|deploy) '; then
+  echo "refusing: forge-tests runs through failsafe, which ignores -Dtest; filter with -Dit.test=… (BB_IT_UNFILTERED=1 to run the whole IT suite)" >&2; exit 10
+fi
+# Concurrency cap (2026-09-27): above 3 concurrent reactors, fixed-port tests collide (BindException)
+# and Testcontainers fails to start, so results are environmental noise. The queue grants a ticket only while
+# fewer than CAP reactors run. Override the cap only with BB_MAX_REACTORS. BB_CAP_WAIT_SECS > 0 bounds the
+# queue wait (then .bb/rc = 5); unset = wait until granted.
+CAP=${BB_MAX_REACTORS:-5}; LIMIT=${BB_CAP_WAIT_SECS:-0}
+case "$CAP$LIMIT" in *[!0-9]*) echo "refusing: BB_MAX_REACTORS / BB_CAP_WAIT_SECS must be non-negative integers" >&2; exit 2;; esac
+# cap=1 is for ROOT builds only (2026-09-29): a module build (-pl/-f) with BB_MAX_REACTORS=1 would wait for an EMPTY host
+# and, before backfill, blocked every ticket behind it. Warn and use the default cap.
+if [ "$CAP" = 1 ] && printf ' %s ' "$*" | grep -Eq -- ' (-pl|--projects|-f|--file)([= ]|[^ ]*/)'; then
+  echo "WARNING: BB_MAX_REACTORS=1 is for root builds only; this is a module build (-pl/-f), so the default cap 5 is used" >&2
+  CAP=5
+fi
+
+# Dedup key: HEAD + maven.config (minus the per-checkout repo.local line) + args. Only for a CLEAN tree: a dirty
+# tree (a mutation probe, local edits) is the same SHA with different content, so it is never deduped.
+case "${BB_PORT_GROUP:-}" in
+  1|0) GROUP="$BB_PORT_GROUP forced by BB_PORT_GROUP=$BB_PORT_GROUP";;
+  "") GROUP=$(python3 "$(dirname "$SELF")/bb-portgroup.py" "$PGM" "$CO" "$@" 2>/dev/null) || GROUP="1 classifier failed"
+      case "$GROUP" in [01]\ *) ;; *) GROUP="1 classifier gave no answer";; esac;;
+  *) echo "refusing: BB_PORT_GROUP must be 0, 1 or unset" >&2; exit 2;;
+esac
+
+SHA=$(git -C "$CO" rev-parse HEAD)
+KEY=""
+if [ -z "$(git -C "$CO" status --porcelain --untracked-files=normal)" ]; then
+  KEY=$( { printf '%s\n' "$SHA"; grep -v '^-Dmaven.repo.local=' "$CO/.mvn/maven.config" 2>/dev/null; printf '%s\0' "$@"; } | sha256sum | cut -c1-16)
+else
+  echo "dedup: skipped (working tree has changes vs $SHA)"
+fi
+
+exec 8> "$Q/.lock"; flock 8
+reap
+QD=$(cat "$B/queued" 2>/dev/null || true)
+if [ -n "$QD" ] && [ -f "$Q/waiting/$QD" ]; then echo "refusing: $CO already has queued ticket $QD" >&2; exit 3; fi
+if [ -n "$KEY" ] && [ "${BB_DEDUP:-1}" != 0 ]; then
+  for f in "$Q"/running/* "$Q"/waiting/*; do
+    [ -f "$f" ] && [ "$(field "$f" key)" = "$KEY" ] || continue
+    echo "dedup: identical build is $(basename "${f%/*}"): ticket=${f##*/} owner=$(field "$f" owner)" >&2
+    echo "dedup: read its result at $(field "$f" co)/.bb (poll for rc); BB_DEDUP=0 to run anyway" >&2; exit 7
+  done
+  for f in $(ls -t "$Q"/done/ 2>/dev/null); do
+    f=$Q/done/$f
+    [ "$(field "$f" key)" = "$KEY" ] && [ "$(field "$f" state)" = finished ] || continue
+    o=$(field "$f" co)
+    [ -f "$o/.bb/rc" ] && [ "$(cat "$o/.bb/start" 2>/dev/null)" = "$(field "$f" started)" ] || continue   # since rebuilt/removed
+    echo "dedup: identical build already finished: rc=$(field "$f" rc) ended=$(date -d @"$(field "$f" ended)" -Is) owner=$(field "$f" owner)" >&2
+    echo "dedup: read its result at $o/.bb (bb-report $o); BB_DEDUP=0 to run anyway" >&2; exit 8
+  done
+fi
+
+# Ticket owner fields (T3): each optional, each validated; a bad value is dropped with a notice and never blocks the build.
+OWNER_FIELDS=""
+ownerval() {  # ownerval <BB_NAME> <regex> -> value on stdout when set and valid; notice on stderr when set and malformed
+  local v=${!1:-}
+  [ -n "$v" ] || return 1
+  [[ $v =~ $2 ]] && { printf '%s' "$v"; return 0; }
+  echo "bb-build: ignoring $1: not $2" >&2; return 1
+}
+LABEL_RE='^[A-Za-z0-9._:-]{1,64}$'; WORD_RE='^[A-Za-z0-9._-]{1,64}$'
+SP=$(ownerval BB_SESSION_PID '^[1-9][0-9]{0,9}$') || SP=""
+SS=$(ownerval BB_SESSION_START '^[1-9][0-9]{8,10}$') || SS=""
+SL=$(ownerval BB_SESSION_LABEL "$LABEL_RE") || SL=""
+if [ -n "$SP" ] && [ -n "$SS" ] && [ -n "$SL" ]; then
+  OWNER_FIELDS=$(printf 'session_pid=%s\nsession_start=%s\nsession_label=%s\n' "$SP" "$SS" "$SL")$'\n'
+elif [ -n "${BB_SESSION_PID:-}${BB_SESSION_START:-}${BB_SESSION_LABEL:-}" ]; then
+  echo "bb-build: ignoring BB_SESSION_PID/BB_SESSION_START/BB_SESSION_LABEL: need all three, each valid" >&2
+fi
+AG=$(ownerval BB_AGENT "$WORD_RE") && OWNER_FIELDS+="agent=$AG"$'\n'
+LN=$(ownerval BB_LANE "$WORD_RE") && OWNER_FIELDS+="lane=$LN"$'\n'
+PRN=$(ownerval BB_PR '^[1-9][0-9]{0,9}$') && OWNER_FIELDS+="pr=$PRN"$'\n'
+OWNER_FIELDS+="output=$B/build.log"$'\n'
+[ -z "$DETACHED_READER" ] || OWNER_FIELDS+="detached_reader=$DETACHED_READER"$'\n'
+
+ID=$(date +%s%N)-$$
+T=$Q/waiting/$ID
+rm -f "$B/rc" "$B/end" "$B/start"
+echo "bb-build: queued ticket $ID at $(date -Is); maven has not started (bb-queue shows position)" > "$B/build.log"
+echo "$ID" > "$B/queued"
+{ printf 'id=%s\nowner=%s\nco=%s\nsha=%s\nkey=%s\ncap=%s\nlimit=%s\ncreated=%s\n' \
+    "$ID" "$BB_OWNER" "$CO" "$SHA" "$KEY" "$CAP" "$LIMIT" "$(date +%s%N)"
+  printf 'group=%s\ngroup_reason=%s\n' "${GROUP%% *}" "${GROUP#* }"
+  printf '%s' "$OWNER_FIELDS"
+  printf 'args='; printf '%q ' "$@"; printf '\n'; } > "$T"
+setsid nohup bash "$SELF" __run "$ID" "$@" < /dev/null > /dev/null 2>&1 8>&- &
+for _ in $(seq 50); do waiter_alive "$ID" && break; sleep 0.1; done
+waiter_alive "$ID" || { rm -f "$T" "$B/queued"; echo "error: waiter for $ID did not start" >&2; exit 1; }
+POS=$(order | grep -nx -- "$ID" | cut -d: -f1 || true)
+echo "queued ticket=$ID position=$POS priority=$(prio "$BB_OWNER" "$SHA") reactors=$(reactors) cap=$CAP port-group=${GROUP%% *} (${GROUP#* }) held-by=$(group_holder) log=$B/build.log args: $*"
