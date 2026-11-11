@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # bb-checkout <name> <sha-or-ref> -- isolated pragmatica checkout at ~/work/co/<name>, own .m2-local.
 # Fetches the mirror from GitHub first, so any pushed SHA resolves. Refuses to reuse an existing dir.
+# Probe commits (probes-init.sh): if ~/work/probes.git exists its refs/probes/* are fetched into the checkout as
+# refs/remotes/probes/*, so <ref> may also be a SHA that exists only there or probes/<owner>/<name>. The mirror is tried
+# first; a ref that resolves in neither makes the run fail and leaves no checkout dir. At most once per 24 h a best-effort
+# bb-probe-reap runs afterwards; its failure never fails the checkout.
 set -euo pipefail
 [ $# -eq 2 ] || { echo "usage: bb-checkout <name> <sha-or-ref>" >&2; exit 2; }
 NAME=$1; REF=$2
@@ -14,9 +18,26 @@ MIRROR=$HOME/work/pragmatica.git
 CO=$HOME/work/co/$NAME
 [ -e "$CO" ] && { echo "refusing: $CO exists (one dir per agent/SHA; remove it yourself if it is yours)" >&2; exit 3; }
 git -C "$MIRROR" fetch -q --prune origin
-SHA=$(git -C "$MIRROR" rev-parse --verify "$REF^{commit}")
+PROBES=$HOME/work/probes.git
+MADE=
+# a failed run removes only the dir this run created
+trap 'rc=$?; [ "$rc" = 0 ] || [ -z "$MADE" ] || rm -rf "$CO"' EXIT
+SHA=$(git -C "$MIRROR" rev-parse --verify "$REF^{commit}" 2> /dev/null) || SHA=
+[ -n "$SHA" ] || [ -d "$PROBES" ] || { echo "refusing: $REF is not in the mirror (and there is no $PROBES)" >&2; exit 5; }
 mkdir -p "$HOME/work/co"
 git clone -q --no-checkout "$MIRROR" "$CO"
+MADE=1
+if [ -d "$PROBES" ]; then
+  git -C "$CO" remote add probes "$PROBES"
+  if ! git -C "$CO" fetch -q probes '+refs/probes/*:refs/remotes/probes/*'; then
+    [ -n "$SHA" ] || { echo "refusing: $REF is not in the mirror and fetching $PROBES failed" >&2; exit 5; }
+    echo "warning: fetching $PROBES failed; continuing with the mirror's $REF" >&2
+  fi
+fi
+if [ -z "$SHA" ]; then
+  SHA=$(git -C "$CO" rev-parse --verify "$REF^{commit}" 2> /dev/null) \
+    || { echo "refusing: $REF resolves neither in the mirror nor in $PROBES (nothing created)" >&2; exit 5; }
+fi
 git -C "$CO" checkout -q --detach "$SHA"
 printf '%s\n' '-T 1C' '--no-transfer-progress' "-Dmaven.repo.local=$CO/.m2-local" > "$CO/.mvn/maven.config"
 git -C "$CO" update-index --skip-worktree .mvn/maven.config
@@ -25,3 +46,10 @@ printf '%s\n' /.bb/ /.m2-local/ >> "$CO/.git/info/exclude"
 if [ -d "$HOME/work/m2-seed" ]; then cp -a "$HOME/work/m2-seed" "$CO/.m2-local"; fi
 echo "checkout=$CO sha=$SHA"
 cat "$CO/.mvn/maven.config"
+# Best-effort probes reaper, at most once per 24 h per host (stamp is touched first: a failing reaper is not retried per checkout).
+REAP=$(dirname "$0")/bb-probe-reap
+STAMP=$HOME/work/.probes-reap.stamp
+if [ -d "$PROBES" ] && [ -x "$REAP" ] && { [ ! -e "$STAMP" ] || [ -n "$(find "$STAMP" -mmin +1440 2> /dev/null)" ]; }; then
+  touch "$STAMP" 2> /dev/null || true
+  "$REAP" >&2 || echo "warning: bb-probe-reap failed (ignored)" >&2
+fi
