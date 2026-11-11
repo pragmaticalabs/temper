@@ -157,7 +157,7 @@ class TicketAlarmsTest {
         var rounds = new Rounds();
 
         assertThat(rounds.round(AT, waiting("w1", AT, 61 * 60))).hasSize(1);
-        rounds.limits = TicketAlarms.Limits.limits(30, 120);
+        rounds.limits = TicketAlarms.Limits.limits(30, 30, 360);
         var again = rounds.round(AT + 30, waiting("w1", AT, 61 * 60));
 
         assertThat(again).hasSize(1);
@@ -166,7 +166,7 @@ class TicketAlarmsTest {
     }
 
     /// S1.25: a waiting ticket at 60 → `limitMin` 60; at 180 → a second event, `limitMin` 180; then nothing more.
-    /// `portgroup-held` alike at 120 and 240. Mutation: no second threshold → nothing at 180, red.
+    /// Mutation: no second threshold → nothing at 180, red.
     @Test
     void s1_25_aSecondThreshold_firesOnceMore() {
         var rounds = new Rounds();
@@ -182,17 +182,6 @@ class TicketAlarmsTest {
                   .containsExactly(180);
         assertThat(rounds.round(start + 300 * 60, waiting("w1", start, 60 * 60))).isEmpty();
         assertThat(rounds.round(start + 900 * 60, waiting("w1", start, 60 * 60))).isEmpty();
-        var group = new Rounds();
-
-        assertThat(group.round(AT,
-                               groupRun("r1", AT, 120 * 60))).extracting(event -> payload(event).path("limitMin")
-                                                                                         .intValue())
-                  .containsExactly(120);
-        assertThat(group.round(AT + 120 * 60,
-                               groupRun("r1", AT, 120 * 60))).extracting(event -> payload(event).path("limitMin")
-                                                                                         .intValue())
-                  .containsExactly(240);
-        assertThat(group.round(AT + 600 * 60, groupRun("r1", AT, 120 * 60))).isEmpty();
     }
 
     /// S1.26: first seen at 200 min → one event, `limitMin` 180, and no 60 event ever after; both marks written.
@@ -215,7 +204,7 @@ class TicketAlarmsTest {
     void s1_27_aFirstLimitAboveTheSecond_dropsTheSecond() {
         var rounds = new Rounds();
 
-        rounds.limits = TicketAlarms.Limits.limits(200, 120);
+        rounds.limits = TicketAlarms.Limits.limits(200, 30, 360);
         assertThat(rounds.round(AT, waiting("w1", AT, 190 * 60))).isEmpty();
         assertThat(rounds.round(AT + 600,
                                 waiting("w1", AT, 190 * 60))).extracting(event -> payload(event).path("limitMin")
@@ -225,20 +214,23 @@ class TicketAlarmsTest {
     }
 
     // ---- portgroup-held -----------------------------------------------------------------------------------------
-    /// S1.5: running `group=1`, `at − started = 7200`, limit 120: fires, with `groupWaiting`; 7199: nothing; a running
-    /// ticket without `group=1` at 10 h: nothing. Mutations: `>` → 7200 silent, red; group ignored → the 10 h one fires, red.
+    /// S1.5 (stall form): a running `group=1` ticket without `progressAt` is judged from `started` (the fallback for an old
+    /// host script): `at − started = 1800`, stall limit 30, fires with `groupWaiting`; 1799: nothing; a running ticket
+    /// without `group=1` at 10 h: nothing. Mutations: `>` → 1800 silent, red; group ignored → the 10 h one fires, red.
     @Test
-    void s1_5_portGroupHeld_firesForAGroupHolderAtTheLimit() {
+    void s1_5_portGroupHeld_withoutProgressAt_fallsBackToStarted_andFiresAtTheStallLimit() {
         var fired = new Rounds().round(AT,
-                                       groupRun("r1", AT, 7200),
+                                       groupRun("r1", AT, 1800),
                                        waiting("w1", AT, 10, "group", "1"),
                                        waiting("w2", AT, 10, "group", "0"));
 
         assertThat(fired).hasSize(1);
         assertThat(fired.getFirst().kind()).isEqualTo("portgroup-held");
         assertThat(payload(fired.getFirst()).path("groupWaiting").intValue()).isEqualTo(1);
-        assertThat(payload(fired.getFirst()).path("ageMin").intValue()).isEqualTo(120);
-        assertThat(new Rounds().round(AT, groupRun("r2", AT, 7199))).isEmpty();
+        assertThat(payload(fired.getFirst()).path("stallMin").intValue()).isEqualTo(30);
+        assertThat(payload(fired.getFirst()).path("limitMin").intValue()).isEqualTo(30);
+        assertThat(payload(fired.getFirst()).has("progressAt")).as("no progressAt in an old listing").isFalse();
+        assertThat(new Rounds().round(AT, groupRun("r2", AT, 1799))).isEmpty();
         assertThat(new Rounds().round(AT,
                                       ticket("r3",
                                              "running",
@@ -248,6 +240,104 @@ class TicketAlarmsTest {
                                              "group",
                                              "0"),
                                       ticket("r4", "running", "alive", "started", Long.toString(AT - 36000)))).isEmpty();
+    }
+
+    /// A running group holder whose host listing carries `progressAt`.
+    private static BbTicket progressing(String id, long startedAgoS, long progressAgoS) {
+        return ticket(id,
+                      "running",
+                      "alive",
+                      "started",
+                      Long.toString(AT - startedAgoS),
+                      "progressAt",
+                      Long.toString(AT - progressAgoS),
+                      "group",
+                      "1");
+    }
+
+    private static List<String> kinds(List<NewFleetEvent> events) {
+        return events.stream()
+                     .map(NewFleetEvent::kind)
+                     .toList();
+    }
+
+    /// The issue's case: 5 h old (under the 360 backstop) but a report 1 min ago: no alarm at all, in any later round
+    /// while it keeps progressing. Mutation: age instead of stall -> `portgroup-held` fires, red.
+    @Test
+    void portGroupHeld_aLongButProgressingTicket_firesNothing() {
+        var rounds = new Rounds();
+
+        assertThat(rounds.round(AT, progressing("r1", 300 * 60, 60))).isEmpty();
+        assertThat(rounds.round(AT + 600, progressing("r1", 310 * 60, 30))).isEmpty();
+        assertThat(rounds.rows).isEmpty();
+    }
+
+    /// A stalled one: 3 h old, last progress 45 min ago: one `portgroup-held`, with the stall, the limit and `progressAt`;
+    /// not again while stalled; a progress clears the mark and the next stall fires once more.
+    /// Mutation: compare the stall with `>` the other way (`<`) -> the stalled one is silent, red.
+    @Test
+    void portGroupHeld_aStalledTicket_firesOncePerStall_andReArmsOnProgress() {
+        var rounds = new Rounds();
+        var first = rounds.round(AT, progressing("r1", 180 * 60, 45 * 60));
+
+        assertThat(kinds(first)).containsExactly("portgroup-held");
+        assertThat(payload(first.getFirst()).path("stallMin").intValue()).isEqualTo(45);
+        assertThat(payload(first.getFirst()).path("limitMin").intValue()).isEqualTo(30);
+        assertThat(payload(first.getFirst()).path("progressAt").longValue()).isEqualTo(AT - 45 * 60);
+        assertThat(payload(first.getFirst()).path("ageMin").intValue()).isEqualTo(180);
+        assertThat(rounds.round(AT + 600, progressing("r1", 190 * 60, 55 * 60))).isEmpty();
+        // a report lands: progress 1 min ago -> the mark goes
+        assertThat(rounds.round(AT + 1200, progressing("r1", 200 * 60, 60))).isEmpty();
+        assertThat(rounds.rows).isEmpty();
+        // and stalls again
+        assertThat(kinds(rounds.round(AT + 4000, progressing("r1", 250 * 60, 40 * 60)))).containsExactly("portgroup-held");
+        assertThat(rounds.count("portgroup-held")).isEqualTo(2);
+    }
+
+    /// `at − started ≥ 360 min` fires `portgroup-long` whatever the progress, once, with the held alarm only when
+    /// the stall also holds. Mutation: age limit applied to `portgroup-held` events, or no mark -> red.
+    @Test
+    void portGroupLong_firesAtTheAgeLimit_whateverTheProgress_once() {
+        var rounds = new Rounds();
+
+        assertThat(rounds.round(AT, progressing("r1", 359 * 60, 10))).isEmpty();
+        var fired = rounds.round(AT + 120, progressing("r1", 361 * 60, 10));
+
+        assertThat(kinds(fired)).containsExactly("portgroup-long");
+        assertThat(payload(fired.getFirst()).path("ageMin").intValue()).isEqualTo(362);
+        assertThat(payload(fired.getFirst()).path("limitMin").intValue()).isEqualTo(360);
+        assertThat(rounds.round(AT + 7200, progressing("r1", 480 * 60, 10))).isEmpty();
+        assertThat(kinds(new Rounds().round(AT, progressing("r2", 400 * 60, 90 * 60)))).containsExactly("portgroup-held",
+                                                                                                        "portgroup-long");
+        assertThat(kinds(new Rounds().round(AT,
+                                            ticket("w",
+                                                   "running",
+                                                   "alive",
+                                                   "started",
+                                                   Long.toString(AT - 400 * 60))))).as("no group, no alarm")
+                  .isEmpty();
+    }
+
+    /// A mark an older controller wrote for the age form (`portgroup-held` at 120) is cleared when the ticket is not
+    /// stalled, so `fleet/alarms` does not keep listing it. Mutation: leave other-limit marks alone -> red.
+    @Test
+    void portGroupHeld_anOldAgeMark_isClearedWhileTheTicketProgresses() {
+        var rounds = new Rounds();
+
+        rounds.rows.add(BbAlarm.bbAlarm(HOST, BbAlarm.PORTGROUP_HELD, "r1", "120", Instant.ofEpochSecond(AT - 100)));
+        assertThat(rounds.round(AT, progressing("r1", 200 * 60, 30))).isEmpty();
+        assertThat(rounds.rows).isEmpty();
+    }
+
+    /// The age backstop's mark goes with the ticket, like the others.
+    @Test
+    void portGroupLong_markIsClearedWhenTheTicketLeaves() {
+        var rounds = new Rounds();
+
+        rounds.round(AT, progressing("r1", 400 * 60, 10));
+        assertThat(rounds.rows).extracting(BbAlarm::kind).containsExactly("portgroup-long");
+        rounds.round(AT + 30, ticket("r1", "done", null));
+        assertThat(rounds.rows).isEmpty();
     }
 
     /// A waiting `group=1` ticket's `queue-wait` names the holder; one without `group=1` does not.
@@ -327,7 +417,10 @@ class TicketAlarmsTest {
         assertThat(TicketAlarms.skew(t0, t1, Instant.ofEpochSecond(970))).isEqualTo(-30);
         assertThat(TicketAlarms.skew(t0, t1, Instant.ofEpochSecond(1005))).isEqualTo(0);
         assertThat(TicketAlarms.skew(t0, t1.plusMillis(1), Instant.ofEpochSecond(1041))).as("⌈t1⌉ = 1011").isEqualTo(30);
-        assertThat(TicketAlarms.skew(t0.plusMillis(500), t1, Instant.ofEpochSecond(969))).as("⌊t0⌋ = 1000, not ⌈t0⌉").isEqualTo(-31);
+        assertThat(TicketAlarms.skew(t0.plusMillis(500),
+                                     t1,
+                                     Instant.ofEpochSecond(969))).as("⌊t0⌋ = 1000, not ⌈t0⌉")
+                  .isEqualTo(-31);
         assertThat(skewEvents(TicketAlarms.skew(t0, t1, Instant.ofEpochSecond(1040)))).isEmpty();
         assertThat(skewEvents(TicketAlarms.skew(t0, t1, Instant.ofEpochSecond(970)))).isEmpty();
         assertThat(skewEvents(TicketAlarms.skew(t0, t1, Instant.ofEpochSecond(1041)))).containsExactly(31);

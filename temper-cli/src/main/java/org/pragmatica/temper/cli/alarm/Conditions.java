@@ -4,6 +4,7 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -18,6 +19,8 @@ import org.pragmatica.temper.protocol.api.MaintenanceRunDto;
 /// Each condition's decision from what the check read; pure. `controller-down` is decided by [AlarmCheck], from
 /// whether the controller answered at all.
 public sealed interface Conditions {
+    /// The age backstop of a running group=1 ticket: listed, but never the reason `host-alarms` fires.
+    String PORTGROUP_LONG = "portgroup-long";
     /// The `GET /hosts` state of a link that grants work.
     String UP = "UP";
 
@@ -69,15 +72,20 @@ public sealed interface Conditions {
     }
 
     /// `host-alarms`: any host lists a current alarm. The detail is one line per alarm,
-    /// hosts and alarms in reply order, then `route` as a link. Clear only when every host's list is empty.
+    /// hosts and alarms in reply order, then `route` as a link. Clear only when every host's list is empty, `portgroup-long`
+    /// (the lower-severity age backstop) aside: it alone does not fire, but it is listed with the alarms that do.
     static Condition hostAlarms(FleetAlarmsView view, String route) {
-        var lines = view.hosts()
-                        .stream()
-                        .flatMap(host -> host.alarms()
-                                             .stream()
-                                             .map(alarm -> alarmLine(host.host(),
-                                                                     alarm)))
-                        .toList();
+        var alarms = view.hosts()
+                         .stream()
+                         .flatMap(host -> host.alarms()
+                                              .stream()
+                                              .map(alarm -> Map.entry(host.host(),
+                                                                      alarm)))
+                         .toList();
+        var fires = alarms.stream().anyMatch(entry -> !PORTGROUP_LONG.equals(entry.getValue().kind()));
+        var lines = fires
+                    ? alarms.stream().map(entry -> alarmLine(entry.getKey(), entry.getValue())).toList()
+                    : List.<String> of();
 
         return lines.isEmpty()
                ? Condition.clear(AlarmCode.HOST_ALARMS)

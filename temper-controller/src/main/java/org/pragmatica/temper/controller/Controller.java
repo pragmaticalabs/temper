@@ -278,7 +278,9 @@ public record Controller(ControllerConfig config,
                                                                            TicketAlarms.Limits.limits(config.fleet()
                                                                                                             .queueWaitAlarmMin(),
                                                                                                       config.fleet()
-                                                                                                            .portGroupHeldAlarmMin())),
+                                                                                                            .portGroupStallAlarmMin(),
+                                                                                                      config.fleet()
+                                                                                                            .portGroupHeldAgeAlarmMin())),
                                                         TicketCollector.READ_BOUND);
         var retire = RetireWarn.retireWarn(store.bb(),
                                            fleet.writer(),

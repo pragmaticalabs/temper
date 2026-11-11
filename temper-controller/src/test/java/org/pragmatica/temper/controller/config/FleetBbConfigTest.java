@@ -5,11 +5,12 @@ import java.nio.file.Path;
 import org.pragmatica.config.toml.TomlParser;
 import org.pragmatica.lang.Result;
 
+import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
+
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
-import org.junit.jupiter.api.Test;
-import org.slf4j.LoggerFactory;
 
 import static org.pragmatica.lang.Option.none;
 import static org.pragmatica.lang.Option.some;
@@ -86,7 +87,7 @@ class FleetBbConfigTest {
         try {
             assertThat(parse("bbHost = [\"oldbox\"]\n").unwrap().fleet().bbHosts()).isEmpty();
             assertThat(appender.list).extracting(ILoggingEvent::getFormattedMessage)
-                                     .containsExactly("[fleet] ?: unknown key 'bbHost' ignored (misspelt or misplaced?)");
+                      .containsExactly("[fleet] ?: unknown key 'bbHost' ignored (misspelt or misplaced?)");
             appender.list.clear();
             parse("bbHosts = [\"oldbox\"]\n" + KEYS).unwrap();
             assertThat(appender.list).isEmpty();
@@ -104,7 +105,8 @@ class FleetBbConfigTest {
         appender.start();
         logger.addAppender(appender);
         try {
-            parse("kilnUrl = \"http://kiln:9\"\nstateDir = \"/var/lib/temper\"\nbbHosts = [\"oldbox\"]\n" + KEYS).unwrap();
+            parse("kilnUrl = \"http://kiln:9\"\nstateDir = \"/var/lib/temper\"\nbbHosts = [\"oldbox\"]\n" + KEYS
+                 + "queueWaitAlarmMin = 60\nportGroupStallAlarmMin = 30\nportGroupHeldAgeAlarmMin = 360\n").unwrap();
             assertThat(appender.list).isEmpty();
         } finally {
             logger.detachAppender(appender);

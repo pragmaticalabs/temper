@@ -328,17 +328,41 @@ class ConfigLoaderTest {
                   .onFailure(cause -> assertThat(cause.message()).contains("Invalid [hosts] memFloorGiB: " + reason));
     }
 
-    /// S1.15: `[fleet] queueWaitAlarmMin` and `portGroupHeldAlarmMin` absent → 60 and 120;
-    /// 1 and 10080 are accepted. Mutation: a default other than 60/120, or a range that refuses an end → red.
+    /// S1.15: `[fleet] queueWaitAlarmMin`, `portGroupStallAlarmMin` and `portGroupHeldAgeAlarmMin` absent → 60, 30 and
+    /// 360; 1 and 10080 are accepted. Mutation: a default other than 60/30/360, or a range that refuses an end → red.
     @ParameterizedTest
     @ValueSource(strings = {"1", "10080", "200"})
     void s1_15_parse_readsTheAlarmLimits_whenSet(String value) {
-        var fleet = parse(FULL + "[fleet]\nqueueWaitAlarmMin = " + value + "\nportGroupHeldAlarmMin = " + value + "\n").fleet();
+        var fleet = parse(FULL
+                         + "[fleet]\nqueueWaitAlarmMin = " + value
+                         + "\nportGroupStallAlarmMin = " + value
+                         + "\nportGroupHeldAgeAlarmMin = " + value
+                         + "\n").fleet();
 
         assertThat(fleet.queueWaitAlarmMin()).isEqualTo(Integer.parseInt(value));
-        assertThat(fleet.portGroupHeldAlarmMin()).isEqualTo(Integer.parseInt(value));
+        assertThat(fleet.portGroupStallAlarmMin()).isEqualTo(Integer.parseInt(value));
+        assertThat(fleet.portGroupHeldAgeAlarmMin()).isEqualTo(Integer.parseInt(value));
         assertThat(parse(FULL).fleet().queueWaitAlarmMin()).as("absent").isEqualTo(60);
-        assertThat(parse(FULL).fleet().portGroupHeldAlarmMin()).as("absent").isEqualTo(120);
+        assertThat(parse(FULL).fleet().portGroupStallAlarmMin()).as("absent").isEqualTo(30);
+        assertThat(parse(FULL).fleet().portGroupHeldAgeAlarmMin()).as("absent").isEqualTo(360);
+    }
+
+    /// Issue #10: a controller.toml written before the stall alarm sets only `portGroupHeldAlarmMin` (any value, even one
+    /// the new keys would refuse): it still loads, the key is ignored and the new limits keep their defaults.
+    /// Mutation: drop the key from the known set and refuse it, or read it into a limit -> red.
+    @ParameterizedTest
+    @ValueSource(strings = {"120", "0", "99999", "\"x\""})
+    void oldPortGroupHeldAlarmMin_stillLoads_andIsIgnored(String value) {
+        var fleet = new ControllerConfig[1];
+
+        assertThat(logged(() -> fleet[0] = parse(FULL
+                                                + "[fleet]\nqueueWaitAlarmMin = 45\nportGroupHeldAlarmMin = " + value
+                                                + "\n"))).singleElement()
+                  .asString()
+                  .startsWith("WARN [fleet] portGroupHeldAlarmMin is deprecated and ignored");
+        assertThat(fleet[0].fleet().queueWaitAlarmMin()).isEqualTo(45);
+        assertThat(fleet[0].fleet().portGroupStallAlarmMin()).isEqualTo(30);
+        assertThat(fleet[0].fleet().portGroupHeldAgeAlarmMin()).isEqualTo(360);
     }
 
     /// S1.15: 0, -1, 10081, a string, a float and a boolean each refuse the start, naming the section, the key and the
@@ -346,7 +370,7 @@ class ConfigLoaderTest {
     @ParameterizedTest
     @ValueSource(strings = {"0", "-1", "10081", "\"60\"", "1.5", "true"})
     void s1_15_parse_refusesABadAlarmLimit_namingTheKey(String value) {
-        for (var key : List.of("queueWaitAlarmMin", "portGroupHeldAlarmMin")) {
+        for (var key : List.of("queueWaitAlarmMin", "portGroupStallAlarmMin", "portGroupHeldAgeAlarmMin")) {
             TomlParser.parse(FULL + "[fleet]\n" + key + " = " + value + "\n")
                       .flatMap(doc -> ConfigLoader.parse(doc, HOME, BUILD))
                       .onSuccess(config -> Assertions.fail("expected a failure for " + key

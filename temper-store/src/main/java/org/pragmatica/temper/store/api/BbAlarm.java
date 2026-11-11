@@ -10,7 +10,10 @@ import java.time.Instant;
 /// `host-retiring`. `firedAt` is on the controller clock.
 public record BbAlarm(String host, String kind, String subject, String threshold, Instant firedAt) {
     public static final String QUEUE_WAIT = "queue-wait";
+    /// A running `group=1` ticket with no progress for the stall limit.
     public static final String PORTGROUP_HELD = "portgroup-held";
+    /// A running `group=1` ticket past the age backstop, whatever its progress; lower severity than `portgroup-held`.
+    public static final String PORTGROUP_LONG = "portgroup-long";
     public static final String WAITER_GONE = "waiter-gone";
     public static final String CLOCK_SKEW = "clock-skew";
     public static final String HOST_RETIRING = "host-retiring";

@@ -327,7 +327,7 @@ is parsed as TOML, so the `url` must be quoted (`…/cli/config/AlarmConfig.java
 | `dump-failed` | the latest `pg_dump` run failed (`GET /maintenance`) |
 | `dump-stale` | no good dump ended within `stale-after` (`GET /maintenance`) |
 | `worker-lost` | a host's link is not UP in `GET /hosts`; no grace period, so a reconnecting link counts |
-| `host-alarms` | any host lists a current alarm in `GET /fleet/alarms` (queue-wait, portgroup-held, waiter-gone, host-retiring, clock-skew); the issue body has one line per alarm, `<host> <kind> <ticket\|-> age=<n>m limit=<n>m` (or `days=<d>`, `skew=<s>s`), then the route link. Clear when every host's list is empty; a controller without the route (404) or an answer that does not decode leaves it undetermined (`check-blind`), never clear |
+| `host-alarms` | any host lists a current alarm in `GET /fleet/alarms` (queue-wait, portgroup-held, waiter-gone, host-retiring, clock-skew; `portgroup-long`, the lower-severity age backstop, is listed beside them but never opens the issue alone); the issue body has one line per alarm, `<host> <kind> <ticket\|-> age=<n>m limit=<n>m` (or `days=<d>`, `skew=<s>s`), then the route link. Clear when every host's list is empty; a controller without the route (404) or an answer that does not decode leaves it undetermined (`check-blind`), never clear |
 | `disk-low` | a path in `paths` has fewer than `min-free-gib` GiB usable |
 | `dump-file-stale` | the newest `temper-*.dump` in `dump-dir` is older than `stale-after`, or there is none (disk only) |
 | `check-blind` | another condition could not be evaluated (a 401, a route the controller lacks, an undecodable answer, an unmeasurable path, an expired skip) |
@@ -603,18 +603,21 @@ transaction as the event, so a restart never repeats one:
 | Kind | Subject | Fires when | Payload (beyond `host`, `ticket`, `owner`, `agent`, `lane`, `pr`, `sessionLabel`, `co`) |
 |---|---|---|---|
 | `queue-wait` | `<host>/<id>` | a waiting ticket's age (`at − created`, the host's clock) reaches `queueWaitAlarmMin` (default 60), and again at 180 min when that is above the limit | `ageMin`, `limitMin`, `group`, `holder` (a group ticket's running holder), `blockedSince` |
-| `portgroup-held` | `<host>/<id>` | a running `group=1` ticket's age (`at − started`) reaches `portGroupHeldAlarmMin` (default 120), and again at 240 min when that is above the limit | `ageMin`, `limitMin`, `groupWaiting` |
+| `portgroup-held` | `<host>/<id>` | a running `group=1` ticket has made no progress for `portGroupStallAlarmMin` (default 30): `at −` its progress time, the listing's `progressAt` (the newest `TEST-*.xml` mtime under `target/surefire-reports` or `target/failsafe-reports` of its checkout, never older than `started`), else `started` when the listing has none (an old host script, or no report yet: the stall clock then runs from the start). Once per stall: a new report clears the mark and the next stall fires again | `stallMin`, `limitMin`, `progressAt` (absent without one), `ageMin` (since `started`), `groupWaiting` |
+| `portgroup-long` | `<host>/<id>` | the age backstop: a running `group=1` ticket's age (`at − started`) reaches `portGroupHeldAgeAlarmMin` (default 360), whatever its progress; once. Lower severity: listed in `fleet/alarms` and on the stream, but `alarm-check`'s `host-alarms` does not open an issue for it alone | `ageMin`, `limitMin`, `groupWaiting`, `progressAt` (absent without one) |
 | `waiter-gone` | `<host>/<id>` | a running or waiting ticket reads `waiter=gone` in two successful listings at least 30 s apart (host clock) | `dir`, `goneSinceAt` |
 | `clock-skew` | `<host>` | the host's `at` lies more than 30 s outside the controller's read interval; once per episode, re-armed at ≤ 20 s | `host`, `skewS` (positive: host ahead) only |
 | `host-retiring` | `<host>` | a `[[hosts]]` entry's `retireAt` is 3 days, then 1 day, away (controller clock, checked every 60 s); a controller started inside the last day says `1` only | `host`, `days`, `retireAt`, `remainingH` only |
 
-A ticket first seen above both of its thresholds fires the higher one only. The first four are evaluated in the
+A `queue-wait` ticket first seen above both of its thresholds fires the higher one only. The first five are evaluated in the
 `tickets:<host>` collection round, only when it succeeds, so `--until` with `--match host=<h>` depends on `tickets:<h>`
 (exit 4 when it is stale); `host-retiring` is the controller's own and depends on no source. The current alarms, those
 whose condition still holds on each host's latest listing, are `GET /api/v1/fleet/alarms` (READ scope; one row per
-expected host, in the `fleet/tickets` order). The limits are the controller config's `[fleet] queueWaitAlarmMin` and
-`portGroupHeldAlarmMin`, whole minutes from 1 to 10080; anything else refuses the controller's start, and there is no
-off switch. Nobody is paged unless someone follows the stream, watches kiln, or runs `alarm-check`.
+expected host, in the `fleet/tickets` order). The limits are the controller config's `[fleet] queueWaitAlarmMin`
+(default 60), `portGroupStallAlarmMin` (30) and `portGroupHeldAgeAlarmMin` (360), whole minutes from 1 to 10080; anything else refuses the controller's start, and there is no
+off switch. The former `portGroupHeldAlarmMin` is still accepted, warned about at start and ignored. A build log's size or
+mtime is never progress, and maven's log lines carry no timestamp, so only report files count: one test class that runs
+longer than the stall limit shows as stalled until its report is written. Nobody is paged unless someone follows the stream, watches kiln, or runs `alarm-check`.
 
 **`--until` is the agent form.** Run it as a background job and be woken by its exit; parse nothing. It prints the
 first matching event line as the controller sent it and exits 0. A line matches when its `kind` is one of `--until`,
@@ -629,7 +632,7 @@ head the heartbeat names. There is no cursor and no ack: an agent that dies lose
 |---|---|
 | 0 | the matching line printed |
 | 3 | no heartbeat line received for 110 s (2 × 55 s), counted by this process's receipt time: the controller, its database or the network is gone, or replies arrive without their heartbeat. Failures in between (unreachable, 5xx, an undecodable reply) are retried, 1 s doubling to 30 s |
-| 4 | a source the wait depends on is stale in the heartbeat, or missing from it: `kiln` and `kiln:github` for every kind kiln produces (a kind this CLI does not know counts as one); `hostlink:<h>` for a host kind, `h` from `--match subject=…` or `host=…`, else every `hostlink:*`; `tickets:<h>` for a ticket kind and for `queue-wait`, `portgroup-held`, `waiter-gone`, `clock-skew`, `h` from `--match host=…`, else every `tickets:*`; nothing for the controller's own kinds (`host-retiring` among them) |
+| 4 | a source the wait depends on is stale in the heartbeat, or missing from it: `kiln` and `kiln:github` for every kind kiln produces (a kind this CLI does not know counts as one); `hostlink:<h>` for a host kind, `h` from `--match subject=…` or `host=…`, else every `hostlink:*`; `tickets:<h>` for a ticket kind and for `queue-wait`, `portgroup-held`, `portgroup-long`, `waiter-gone`, `clock-skew`, `h` from `--match host=…`, else every `tickets:*`; nothing for the controller's own kinds (`host-retiring` among them) |
 | 5 | `--timeout` reached (and stdout closed while printing, as for every command) |
 | 6 | the heartbeat's `selfCheck.ok` is false (`ssh-banner` or `loopback` failed on bigboy); stderr names the probe |
 | 7 | the epoch changed: `--after` names an epoch the controller no longer has (a restored or replaced database, HTTP 409 `EPOCH_CHANGED`, or a line of another epoch). Start again without `--after` |

@@ -23,17 +23,18 @@ import static org.pragmatica.lang.Option.some;
 
 
 /// The `fleet/alarms` reply, pure. A `bb_alarm` mark is listed only while its condition
-/// still holds on the host's latest snapshot: `queue-wait` while the ticket waits, `portgroup-held` while it runs with
-/// `group=1`, `waiter-gone` while it is running or waiting with its waiter gone, `clock-skew` while the mark exists,
+/// still holds on the host's latest snapshot: `queue-wait` while the ticket waits, `portgroup-held` and `portgroup-long`
+/// while it runs with `group=1`, `waiter-gone` while it is running or waiting with its waiter gone, `clock-skew` while the mark exists,
 /// `host-retiring` while its subject is the configured `retireAt` and `now < retireAt`; a host past its `retireAt` lists
 /// none of its collected marks (#103: it is no longer collected). A ticket is listed once, at its
 /// highest fired threshold; `host-retiring` once, at its tightest. Order: `clock-skew`, then `queue-wait`,
-/// `portgroup-held`, `waiter-gone` by ticket id, then `host-retiring`.
+/// `portgroup-held`, `portgroup-long`, `waiter-gone` by ticket id, then `host-retiring`.
 public final class FleetAlarms {
     private static final long NANOS = 1_000_000_000L;
 
     private static final List<String> TICKET_KINDS = List.of(BbAlarm.QUEUE_WAIT,
                                                              BbAlarm.PORTGROUP_HELD,
+                                                             BbAlarm.PORTGROUP_LONG,
                                                              BbAlarm.WAITER_GONE);
 
     private FleetAlarms() {}
@@ -128,7 +129,7 @@ public final class FleetAlarms {
     private static boolean holds(String kind, BbTicket ticket) {
         return switch (kind) {
             case BbAlarm.QUEUE_WAIT -> ticket.dir().equals("waiting");
-            case BbAlarm.PORTGROUP_HELD -> ticket.dir().equals("running") && ticket.field("group").filter("1"::equals).isPresent();
+            case BbAlarm.PORTGROUP_HELD, BbAlarm.PORTGROUP_LONG -> ticket.dir().equals("running") && ticket.field("group").filter("1"::equals).isPresent();
             default -> ticket.waiterState().filter("gone"::equals).isPresent();
         };
     }
@@ -136,7 +137,8 @@ public final class FleetAlarms {
     private static FleetAlarmsView.Alarm ticketAlarm(BbSnapshot snapshot, BbAlarm row, BbTicket ticket) {
         var since = switch (row.kind()) {
             case BbAlarm.QUEUE_WAIT -> TicketAlarms.number(ticket, "created").map(created -> created / NANOS);
-            case BbAlarm.PORTGROUP_HELD -> TicketAlarms.number(ticket, "started");
+            case BbAlarm.PORTGROUP_HELD -> TicketAlarms.progress(ticket);
+            case BbAlarm.PORTGROUP_LONG -> TicketAlarms.number(ticket, "started");
             default -> Option.<Long> none();
         };
         var age = since.flatMap(start -> snapshot.hostAt()
