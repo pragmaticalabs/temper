@@ -88,4 +88,25 @@ rc, out = run_stale([[]] + [S] * 11); check("JAVA-STALE: fires at 10m (t=660) na
 rc, out = run_stale([[]] + [S] * 5 + [[]] + [S] * 10); check("JAVA-STALE: a restart (clear) resets the window", out == "FIXTURE-END no event", out)
 rc, out = run_stale([[]] * 20); check("JAVA-STALE: no stale services, no event", out == "FIXTURE-END no event", out)
 
+# --- --pick: ratio waiting/max(cap-running,1), then load; ties within 0.2 load/core are random
+def q_rw(running=0, waiting=0):
+    r = "".join("  %d-1  me  0  1h  co  -B\n" % i for i in range(running)); w = "".join("  %d  9-%d  me  0  0h01m  co  -B\n" % (i + 1, i) for i in range(waiting))
+    return ("RUNNING (reactors on host: 0; cap 5 unless a ticket overrides; port group held by: )\nTICKET OWNER PRIO AGE CHECKOUT ARGS\n" + r +
+            "\nWAITING (grant order)\nPOS  TICKET OWNER PRIO WAITED CHECKOUT ARGS\n" + w + "\nFINISHED (most recent 10)\n")
+def hp(name, lpc=0.5, running=0, waiting=0, **kw): return (name, (host(name, load5=16 * lpc, running=None, **kw), q_rw(running, waiting)))
+def pick(hosts, *flags): return run([dict(hosts)], '--pick', *flags)
+def seeds(hosts, n=40): return {pick(hosts, '--seed', str(s))[1] for s in range(n)}
+rc, out, err = pick([hp('a', 1.2, 3, 4), hp('b', 0.1, 0, 0), hp('c', 1.0, 2, 2)], '--seed', '1'); check("PICK: idle host among loaded ones", (rc, out) == (0, 'b') and 'picked b' in err, out + err)
+rc, out, _ = pick([hp('lowload', 0.2, 5, 3), hp('hot', 1.0, 1, 0)]); check("PICK: ratio beats load (3/1 loses to 0)", (rc, out) == (0, 'hot'), out)
+rc, out, _ = pick([hp('sat', 1.6, 0, 0), hp('lost', 0.1, state='DOWN'), hp('lk', 0.1, link='DOWN'), hp('ok', 1.4, 4, 9)]); check("PICK: saturated and lost hosts never picked", (rc, out) == (0, 'ok'), out)
+rc, out, _ = pick([hp('sat', 1.6, 0, 0), hp('lost', 0.1, state='DOWN')]); check("PICK: nothing eligible -> exit 3, empty stdout", (rc, out) == (3, ''), out)
+rc, out, _ = pick([hp('sat', 1.5, 0, 0)]); check("PICK: load/core == sat-load is still eligible", (rc, out) == (0, 'sat'), out)
+D = [hp('a', 0.5), hp('b', 0.6), hp('far', 0.9)]
+got = seeds(D); check("PICK: tie within 0.2 load/core: both picked across seeds, far never", got == {'a', 'b'}, str(got))
+check("PICK: fixed seed is deterministic", len({pick(D, '--seed', '7')[1] for _ in range(5)}) == 1)
+got = seeds([hp('a', 0.5), hp('b', 0.8)]); check("PICK: load gap > 0.2 is not a tie", got == {'a'}, str(got))
+got = seeds([hp('a', 0.5), hp('b', 0.5, 5, 1)], 20); check("PICK: unequal ratio is not a tie (running=5 waiting=1 -> 1/1)", got == {'a'}, str(got))
+rc, out, _ = pick([hp('d1', 0.1), hp('x', 1.0, 5, 6)], '--seed', '1'); check("PICK: explicit-pick host (config not consulted) is eligible", (rc, out) == (0, 'd1'), out)
+rc, out, _ = run([{'a': (host('a', load5=1), None), 'b': hp('b', 1.0, 5, 5)[1]}], '--pick'); check("PICK: unreadable queue is ineligible", (rc, out) == (0, 'b'), out)
+
 print("\n%d checks, %d failed" % (total, fails)); sys.exit(1 if fails else 0)

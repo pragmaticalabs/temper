@@ -9,11 +9,17 @@ Events (per host, from consecutive samples; transition detector: a condition alr
   IDLE <host>        load5/cores < IDLE_LOAD and no WAITING ticket, for IDLE_SUSTAIN
   BIGBOY-FREE        host bigboy: foreignReactors == 0 and memAvailable > FREE_MEM_GIB, for FREE_SUSTAIN
   LINK-LOST <host>   controller state != UP or link != UP (or host unreported) for LOST_SAMPLES consecutive samples
---once: print the current classification of every host, exit 0.  --fixture DIR: canned data + fake clock (see test.sh).
+--once: print the current classification of every host, exit 0.
+--pick: print exactly ONE host name on stdout (exit 0), or nothing and exit 3 if no host is eligible; the reason goes to stderr in
+  one line. Eligible: controller state UP and link UP, load5/core <= --sat-load, queue readable (pick=explicit hosts included: the
+  caller passes BB_HOST=<name>). Rank: waiting / max(cap - running, 1) (running = RUNNING rows of the host's bb-queue), then
+  load5/core, both lower first. Hosts with an equal ratio and load5/core within 0.2 of the best are chosen among uniformly at
+  random (SystemRandom; --seed N makes it deterministic, for tests), so lanes reading at the same moment do not herd.
+--fixture DIR: canned data + fake clock (see test.sh).
 Fixture: DIR/NNN.json = controller reply of sample NNN; DIR/NNN.<host>.queue = bb-queue text (absent = host unreachable);
 clock = sample index * --interval.
 """
-import argparse, concurrent.futures, json, os, re, subprocess, sys, time
+import argparse, concurrent.futures, json, os, random, re, subprocess, sys, time
 
 # ---- thresholds (overridable by flags) ----
 SAT_LOAD = 1.5          # load5 per core
@@ -215,6 +221,26 @@ def fixture_sample(d, i, names):
         if qs[n] is None: warn("host %s unreachable (sample %d)" % (n, i))
     return ctrl, qs
 
+TIE_LOAD = 0.2
+
+def pick_host(names, ctrl, qs, rng):
+    """-> (host|None, one-line reason). See the docstring header for the ruling."""
+    cands = []
+    for n in names:
+        c = (ctrl or {}).get(n); q = qs.get(n); f = facts(c) if c else None
+        if c is None or c.get('state') != 'UP' or c.get('link') != 'UP' or f is None or q is None: continue
+        lpc = f['load5'] / f['cores']
+        if lpc > A.sat_load: continue
+        free = (c.get('cap') or 0) - q['running']
+        cands.append((round(len(q['waiting']) / max(free, 1), 9), lpc, n, len(q['waiting']), free))
+    if not cands: return None, "no eligible host (UP+link UP, not saturated, queue readable) among %s" % ','.join(names)
+    cands.sort(key=lambda r: (r[0], r[1], r[2]))
+    best = cands[0]
+    tied = [r for r in cands if r[0] == best[0] and r[1] <= best[1] + TIE_LOAD]
+    ch = rng.choice(tied)
+    return ch[2], "picked %s ratio=%.2f (waiting=%d free=%d) load5/core=%.2f; tied=%s; eligible=%s" % (
+        ch[2], ch[0], ch[3], ch[4], ch[1], ','.join(r[2] for r in tied), ','.join(r[2] for r in cands))
+
 def evaluate(names, ctrl, qs):
     conds = {}
     for n in names: conds.update(conditions(n, ctrl.get(n) if ctrl else None, qs.get(n)))
@@ -231,6 +257,7 @@ def main():
     ap.add_argument('--free-mem', type=float, default=FREE_MEM_GIB); ap.add_argument('--free-sustain', type=int, default=FREE_SUSTAIN)
     ap.add_argument('--lost-samples', type=int, default=LOST_SAMPLES); ap.add_argument('--stale-sustain', type=int, default=STALE_SUSTAIN)
     ap.add_argument('--report-initial', action='store_true'); ap.add_argument('--once', action='store_true')
+    ap.add_argument('--pick', action='store_true'); ap.add_argument('--seed', type=int, help='--pick tie-break seed (tests only)')
     ap.add_argument('--fixture'); ap.add_argument('--fixture-hosts', help='comma list of host names (fixture mode; default: from --hosts)')
     A = ap.parse_args()
     key, hosts = load_hosts(A.hosts) if not (A.fixture and A.fixture_hosts) else (None, [dict(name=n) for n in A.fixture_hosts.split(',')])
@@ -243,6 +270,13 @@ def main():
             ctrl, qs = s; t = i * A.interval
         else:
             ctrl, qs = live_sample(key, hosts); t = int(time.time() - t0)
+        if A.pick:
+            if ctrl is None: print("controller unreachable", file=sys.stderr); return 1
+            rng = random.Random(A.seed) if A.seed is not None else random.SystemRandom()
+            h, why = pick_host(names, ctrl, qs, rng)
+            print(why, file=sys.stderr)
+            if h is None: return 3
+            print(h); return 0
         if ctrl is None and not A.fixture:
             if A.once: print("controller unreachable", file=sys.stderr); return 1
         else:
