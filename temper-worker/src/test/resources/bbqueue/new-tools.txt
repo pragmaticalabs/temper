@@ -1,0 +1,11 @@
+LOAD GATE (grant only while load5/cores < 1.2; override: the oldest grantable ticket after 1200s while < 2 reactors run): open
+RUNNING (reactors on host: 1; cap 5 unless a ticket overrides; port-group slots: 3; port group held by: 1794422943721029017-1098288[host] )
+TICKET                       OWNER    PRIO AGE           CHECKOUT  ARGS
+1794422943721029017-1098288  rq          0 0h00m         rq-1  -B -Dfake.secs=40 -Dfake.rc=0  [port-group host-exclusive]
+
+WAITING (grant order: priority desc, then FIFO; a [port-group] ticket is skipped while all slots are taken (host-exclusive ones: while any group ticket runs); a ticket its own cap blocks is passed by backfill until blocked 1200s, then the host drains for it)
+POS  TICKET                       OWNER    PRIO WAITED        CHECKOUT  ARGS
+1    1794422949946285851-1100228  rq          0 0h00m         rq-2  -B -Dfake.secs=2 -Dfake.rc=0  [port-group host-exclusive]
+
+FINISHED (most recent 0)
+STATE      RC     TICKET                       OWNER    WALL ENDED         CHECKOUT  ARGS
