@@ -4,9 +4,19 @@
 # module paths listed in <modules-file>, one per line). Derived from the checkout's OWN poms, so it follows the SHA:
 # -pl/--projects (paths, [groupId]:artifactId, !/- exclusions), -am (upstream closure) and -amd (downstream closure).
 # No -pl = the whole reactor = member. -DskipTests / -Dmaven.test.skip(=true) = no tests run = not a member.
+# Tests run only when some arg is a lifecycle phase at or after `test` (test .. deploy) or the goal surefire:test /
+# failsafe:integration-test; a bare plugin goal (jbct:check) or an earlier phase (compile, validate, test-compile) runs
+# none: not a member, whatever the -pl says.
 # Anything it cannot model (-f, unresolvable selector, unparsable pom) answers 1: a wrong 1 costs only waiting,
 # a wrong 0 costs a void red.
 import os, sys, xml.etree.ElementTree as ET
+
+TEST_PHASES = {'test', 'prepare-package', 'package', 'pre-integration-test', 'integration-test', 'post-integration-test',
+               'verify', 'install', 'deploy'}
+
+def runs_tests(arg):
+    # a lifecycle phase from test on, or a plugin goal that itself runs tests (surefire:test, failsafe:integration-test)
+    return arg in TEST_PHASES or (':' in arg and arg.rsplit(':', 1)[1] in ('test', 'integration-test'))
 
 def main(mods_file, co, args):
     try:
@@ -38,6 +48,8 @@ def main(mods_file, co, args):
         elif a in ('-DskipTests', '-DskipTests=true', '-Dmaven.test.skip', '-Dmaven.test.skip=true'):
             return '0 tests skipped (%s)' % a
         i += 1
+    if not any(runs_tests(x) for x in argv if not x.startswith('-')):
+        return '0 no lifecycle phase at or after test'
     sel = [s.strip().lstrip('?') for s in sel if s.strip()]
     inc = [s for s in sel if s[0] not in '!-']
     exc = [s[1:] for s in sel if s[0] in '!-']
