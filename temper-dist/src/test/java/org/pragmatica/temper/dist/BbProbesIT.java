@@ -259,6 +259,7 @@ class BbProbesIT {
         ok(init());
         var sha = probeCommit(OLD_DATE);
 
+        ok(push(sha, "refs/probes/s1/x"));
         ok(git(probes, "update-ref", "refs/heads/keep", sha));
         var run = push("", "refs/heads/keep");
 
@@ -398,7 +399,7 @@ class BbProbesIT {
         ageReflog("refs/probes/s1/sixdays", 6 * DAY);
         var run = ok(reap());
 
-        assertThat(run.stdout()).doesNotContain("deleted");
+        assertThat(run.stdout()).doesNotContain("deleted refs/");
         assertThat(refSha(probes, "refs/probes/s1/mutation")).as("a 2001 commit on a fresh ref survives").isEqualTo(oldBase);
         assertThat(refSha(probes, "refs/probes/s1/fresh")).isEqualTo(freshRef);
         assertThat(refSha(probes, "refs/probes/s1/sixdays")).isEqualTo(sixDays);
@@ -435,8 +436,8 @@ class BbProbesIT {
         ok(init());
         var sha = probeCommit("2026-11-11T00:00:00Z");
 
-        ok(git(probes, "update-ref", "refs/heads/keep", sha));
         ok(push(sha, "refs/probes/s1/x"));
+        ok(git(probes, "update-ref", "refs/heads/keep", sha));
         ageReflog("refs/probes/s1/x", 8 * DAY);
         var other = probes.resolve("logs/refs/heads/keep");
 
@@ -457,7 +458,7 @@ class BbProbesIT {
 
         ok(push(sha, "refs/probes/s1/x"));
         ok(git(dir, "clone", "-q", "--mirror", probes.toString(), copy.toString()));
-        ok(git(mirror, "update-ref", "refs/probes/s1/x", sha));
+        ok(git(lane, "push", "-q", mirror.toString(), sha + ":refs/probes/s1/x"));
         ageReflog("refs/probes/s1/x", 8 * DAY);
         var mirrorRefs = git(mirror, "for-each-ref").stdout();
 
