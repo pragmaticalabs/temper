@@ -1,0 +1,268 @@
+#!/usr/bin/env python3
+"""capwatch -- host-capacity watcher. Polls build-host state every --interval s, prints ONE batch of event lines and EXITS 0
+on the first sample that produces an event (process exit = the notification). Read-only on every host.
+
+Events (per host, from consecutive samples; transition detector: a condition already true at start is silent unless
+--report-initial):
+  JAVA-STALE <host>  a controller/kiln/worker JVM runs on a deleted JDK for STALE_SUSTAIN (in-place upgrade)
+  SATURATED <host>   load5/cores > SAT_LOAD for SAT_SUSTAIN, or any WAITING ticket waited > SAT_WAIT
+  IDLE <host>        load5/cores < IDLE_LOAD and no WAITING ticket, for IDLE_SUSTAIN
+  BIGBOY-FREE        host bigboy: foreignReactors == 0 and memAvailable > FREE_MEM_GIB, for FREE_SUSTAIN
+  LINK-LOST <host>   controller state != UP or link != UP (or host unreported) for LOST_SAMPLES consecutive samples
+--once: print the current classification of every host, exit 0.  --fixture DIR: canned data + fake clock (see test.sh).
+Fixture: DIR/NNN.json = controller reply of sample NNN; DIR/NNN.<host>.queue = bb-queue text (absent = host unreachable);
+clock = sample index * --interval.
+"""
+import argparse, concurrent.futures, json, os, re, subprocess, sys, time
+
+# ---- thresholds (overridable by flags) ----
+SAT_LOAD = 1.5          # load5 per core
+SAT_SUSTAIN = 15 * 60   # s
+SAT_WAIT = 30 * 60      # s; a WAITING ticket waited longer than this
+IDLE_LOAD = 0.6
+IDLE_SUSTAIN = 10 * 60
+STALE_SUSTAIN = 10 * 60  # a long-lived Java service running on a deleted JDK (in-place upgrade; spawns fail)
+FREE_MEM_GIB = 12.0
+FREE_SUSTAIN = 10 * 60
+LOST_SAMPLES = 3
+INTERVAL = 60
+GIB = 1024 ** 3
+
+def warn(m): print("capwatch: warning: " + m, file=sys.stderr, flush=True)
+
+# ---------------- config ----------------
+def load_hosts(path):
+    key, hosts = None, []
+    with open(path) as fh:
+        for n, line in enumerate(fh, 1):
+            f = line.split('#', 1)[0].split()
+            if not f: continue
+            if f[0] == 'key' and len(f) == 2: key = os.path.expanduser(f[1])
+            elif f[0] == 'host' and len(f) == 6:
+                hosts.append(dict(name=f[1], addr=f[2], jump=None if f[3] == '-' else f[3],
+                                  known=None if f[4] == '-' else os.path.expanduser(f[4]), pick=f[5]))
+            else: raise SystemExit("capwatch: %s line %d: malformed" % (path, n))
+    if not key or not hosts: raise SystemExit("capwatch: %s: no key or no hosts" % path)
+    return key, hosts
+
+def ssh_cmd(key, h, remote):
+    o = ['ssh', '-i', key, '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15']
+    if h['jump']:
+        o += ['-o', 'UserKnownHostsFile="%s"' % h['known'], '-o', 'StrictHostKeyChecking=yes',
+              '-o', 'ProxyCommand=ssh -i "%s" -o BatchMode=yes -o ConnectTimeout=15 -W %%h:%%p %s' % (key, h['jump'])]
+    return o + [h['addr'], remote]
+
+def run(cmd, timeout=60):
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+    if r.returncode != 0: raise RuntimeError("rc %d: %s" % (r.returncode, r.stderr.strip()[:200]))
+    return r.stdout
+
+STALE_MARK = '@@JAVA-STALE@@'
+# bb-queue, then the long-lived Java services whose exe is '(deleted)': controller, kiln, worker (2026-11-10 outage)
+QUEUE_CMD = ('~/tools/bb-queue || exit $?; echo "' + STALE_MARK + '"; '
+             'for p in $(pgrep -u "$(id -u)" -f "kiln-service[.]jar|temper-controller[.]jar|/[.]temper/run/worker-"); do '
+             'case "$(readlink /proc/$p/exe)" in *"(deleted)") ps -o args= -p $p | grep -oE "kiln-service|temper-controller|worker-[^ /]*[.]jar" | head -1;; esac; done; '
+             # foreign load (2026-11-11, 48 CPU burners started by bare ssh hid behind "running=None"): every process of any
+             # user at >= FOREIGN_PCPU lifetime %CPU that is not a build -- not java/mvn, not in a docker/containerd cgroup
+             # (test containers belong to builds) -- as "<pcpu> <etimes> <user> <args>"
+             'echo "' + '@@FOREIGN@@' + '"; ps -eo pid=,pcpu=,etimes=,user=,args= | '
+             'while read -r p c e u a; do case "$a" in *java*|*mvn*|*maven*|ps\\ *|*bb-queue*) continue;; esac; '
+             'awk -v c="$c" -v e="$e" "BEGIN{exit !(c>=20 && e>=60)}" || continue; grep -qE "docker|containerd" /proc/$p/cgroup 2>/dev/null && continue; '
+             'echo "$c $e $u $a"; done')
+FOREIGN_MARK = '@@FOREIGN@@'
+
+def parse_host(text):
+    qtext, _, rest = text.partition(STALE_MARK + '\n')
+    rest, _, ftext = rest.partition(FOREIGN_MARK + '\n')
+    q = parse_queue(qtext); q['stale'] = [l.strip() for l in rest.splitlines() if l.strip()]
+    q['foreign'] = parse_foreign(ftext)
+    return q
+
+def parse_foreign(text):
+    """'<pcpu> <etimes> <user> <args>' lines -> [(count, user, args<=60, cpu-sum, oldest-etimes)], biggest cpu first."""
+    g = {}
+    for l in text.splitlines():
+        f = l.split(None, 3)
+        if len(f) < 4: continue
+        try: c, e = float(f[0]), int(f[1])
+        except ValueError: continue
+        k = (f[2], f[3][:60]); n, cs, eo = g.get(k, (0, 0.0, 0)); g[k] = (n + 1, cs + c, max(eo, e))
+    return sorted(((n, u, a, cs, eo) for (u, a), (n, cs, eo) in g.items()), key=lambda r: -r[3])
+
+def foreign_text(q):
+    fl = (q or {}).get('foreign') or []
+    if not fl: return ''
+    return ' | foreign load: ' + '; '.join("%dx %s '%s' %.0f%%cpu for %s" % (n, u, a, cs, fmt_s(eo)) for n, u, a, cs, eo in fl[:3])
+
+CTRL = 'curl -sf -m 5 -H "Authorization: Bearer $(cat ~/.config/temper/read-token)" http://127.0.0.1:7070/api/v1/hosts'
+
+# ---------------- parsing ----------------
+def parse_controller(text):
+    d = json.loads(text)
+    if isinstance(d, dict): d = d.get('hosts')
+    if not isinstance(d, list): raise ValueError("controller reply is not a host list")
+    return {h['name']: h for h in d if isinstance(h, dict) and 'name' in h}
+
+def dur_s(tok):
+    ms = re.findall(r'(\d+)([hms])', tok)
+    if not ms or ''.join(a + b for a, b in ms) != tok: return None
+    return sum(int(a) * {'h': 3600, 'm': 60, 's': 1}[b] for a, b in ms)
+
+def parse_queue(text):
+    """-> dict(waiting=[seconds waited], holder=str|None, running=int)"""
+    holder, waiting, running, sect, widx = None, [], 0, None, None
+    for line in text.splitlines():
+        if line.startswith('RUNNING'):
+            sect = 'R'
+            m = re.search(r'port group held by:\s*([^)]*)\)', line) or re.search(r'group tickets running:\s*([^)]*)\)', line)  # pre/post 2026-11-11 bb-queue
+            holder = (' '.join(m.group(1).split()) or None) if m else None; continue
+        if line.startswith('WAITING'): sect = 'W'; widx = None; continue
+        if line.startswith('FINISHED'): sect = 'F'; continue
+        if not line.strip(): continue
+        f = line.split()
+        if sect == 'W':
+            if f[0] == 'POS': widx = f.index('WAITED') if 'WAITED' in f else None; continue
+            if widx is not None and len(f) > widx:
+                s = dur_s(f[widx])
+                if s is not None: waiting.append(s)
+        elif sect == 'R' and f[0] != 'TICKET' and not line.lstrip().startswith('+'): running += 1
+    return dict(waiting=waiting, holder=holder, running=running, stale=[])
+
+def fmt_s(s): return "%dh%02dm" % (s // 3600, s % 3600 // 60)
+
+# ---------------- evaluation ----------------
+def facts(c):
+    f = c.get('facts') or {}
+    return f if f.get('cores') else None
+
+def conditions(name, c, q):
+    """-> dict event-key -> (holds: bool|None (unknown), detail-str). None = not evaluable this sample."""
+    out = {}
+    if q is not None:
+        out[('JAVA-STALE', name)] = (bool(q.get('stale')), "java on a deleted JDK: %s (restart the unit)" % ','.join(q.get('stale') or []))
+    out[('LINK-LOST', name)] = (c is None or c.get('state') != 'UP' or c.get('link') != 'UP',
+                                "controller says state=%s link=%s" % ((c or {}).get('state', 'unreported'), (c or {}).get('link', 'unreported')))
+    f = facts(c) if c else None
+    if f is None: return out
+    lpc = f['load5'] / f['cores']
+    freeslots = max(0, (c.get('cap') or 0) - (f.get('bbRunning') or 0))
+    if q is not None:
+        w = q['waiting']; oldest = max(w) if w else 0
+        det = "load5/core=%.2f running=%s waiting=%d oldest-wait=%s group-holder=%s" % (
+            lpc, f.get('bbRunning'), len(w), fmt_s(oldest), q['holder'] or '-') + foreign_text(q)
+        out[('SATURATED-LOAD', name)] = (lpc > A.sat_load, det)
+        out[('SATURATED-WAIT', name)] = (oldest > A.sat_wait, det)
+        out[('IDLE', name)] = (lpc < A.idle_load and not w,
+                               "load5/core=%.2f free-slots=%d/%s port-group=%s" % (lpc, freeslots, c.get('cap'), "held by " + q['holder'] if q['holder'] else "free"))
+    else:  # queue unreadable: load alone can still be judged for saturation
+        out[('SATURATED-LOAD', name)] = (lpc > A.sat_load, "load5/core=%.2f (queue unreachable)" % lpc)
+    if name == 'bigboy':
+        mem = f['memAvailableKb'] * 1024 / GIB
+        out[('BIGBOY-FREE', name)] = (f['foreignReactors'] == 0 and mem > A.free_mem, "foreignReactors=%s memAvailable=%.1fGiB" % (f['foreignReactors'], mem))
+    return out
+
+# sustain windows (s) per condition kind; 0 = fires on the first true sample; LINK-LOST counts samples instead
+def window(kind): return {'SATURATED-LOAD': A.sat_sustain, 'SATURATED-WAIT': 0, 'IDLE': A.idle_sustain, 'BIGBOY-FREE': A.free_sustain, 'JAVA-STALE': A.stale_sustain}[kind]
+
+class Tracker:
+    def __init__(self, report_initial): self.since = {}; self.lost = {}; self.fired = set(); self.suppressed = set(); self.first = True; self.ri = report_initial
+    def step(self, t, conds):
+        events = []
+        for key, (holds, det) in conds.items():
+            kind, host = key
+            if kind == 'LINK-LOST':
+                self.lost[key] = self.lost.get(key, 0) + 1 if holds else 0
+                met = self.lost[key] >= A.lost_samples
+                if self.first and holds and self.ri and not met: met = True      # initial report: instantaneous
+            else:
+                if holds: self.since.setdefault(key, t)
+                else: self.since.pop(key, None)
+                met = holds and (t - self.since[key] >= window(kind) or (self.first and self.ri))
+            if not holds: self.fired.discard(key); self.suppressed.discard(key)
+            if self.first and holds and not self.ri: self.suppressed.add(key)   # transition detector: pre-existing => silent
+            if met and key not in self.fired and key not in self.suppressed:
+                self.fired.add(key); events.append((key, det))
+        self.first = False
+        return events
+
+def event_line(key, det, t):
+    kind, host = key
+    name = 'SATURATED' if kind.startswith('SATURATED') else kind
+    why = {'SATURATED-LOAD': 'load', 'SATURATED-WAIT': 'wait'}.get(kind)
+    tag = '' if kind == 'BIGBOY-FREE' else ' ' + host
+    return "%s%s%s: %s [t=+%ds]" % (name, tag, ' (%s)' % why if why else '', det, t)
+
+# ---------------- sources ----------------
+def live_sample(key, hosts):
+    home = next(h for h in hosts if h['pick'] == 'auto')
+    try: ctrl = parse_controller(run(ssh_cmd(key, home, CTRL)))
+    except Exception as e: warn("controller unreachable: %s" % e); ctrl = None
+    def qf(h):
+        try: return h['name'], parse_host(run(ssh_cmd(key, h, QUEUE_CMD)))
+        except Exception as e: warn("host %s unreachable: %s" % (h['name'], e)); return h['name'], None
+    with concurrent.futures.ThreadPoolExecutor(len(hosts)) as ex: qs = dict(ex.map(qf, hosts))
+    return ctrl, qs
+
+def fixture_sample(d, i, names):
+    p = os.path.join(d, "%03d.json" % i)
+    if not os.path.exists(p): return 'END'
+    ctrl = parse_controller(open(p).read()); qs = {}
+    for n in names:
+        qp = os.path.join(d, "%03d.%s.queue" % (i, n))
+        qs[n] = parse_queue(open(qp).read()) if os.path.exists(qp) else None
+        sp = os.path.join(d, "%03d.%s.stale" % (i, n))
+        if qs[n] is not None and os.path.exists(sp): qs[n]['stale'] = [l.strip() for l in open(sp) if l.strip()]
+        if qs[n] is None: warn("host %s unreachable (sample %d)" % (n, i))
+    return ctrl, qs
+
+def evaluate(names, ctrl, qs):
+    conds = {}
+    for n in names: conds.update(conditions(n, ctrl.get(n) if ctrl else None, qs.get(n)))
+    return conds
+
+def main():
+    global A
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('--hosts', default=os.environ.get('BB_TEMPER_HOSTS') or os.path.expanduser('~/.config/bb-temper/hosts'))
+    ap.add_argument('--interval', type=int, default=INTERVAL)
+    ap.add_argument('--sat-load', type=float, default=SAT_LOAD); ap.add_argument('--sat-sustain', type=int, default=SAT_SUSTAIN)
+    ap.add_argument('--sat-wait', type=int, default=SAT_WAIT)
+    ap.add_argument('--idle-load', type=float, default=IDLE_LOAD); ap.add_argument('--idle-sustain', type=int, default=IDLE_SUSTAIN)
+    ap.add_argument('--free-mem', type=float, default=FREE_MEM_GIB); ap.add_argument('--free-sustain', type=int, default=FREE_SUSTAIN)
+    ap.add_argument('--lost-samples', type=int, default=LOST_SAMPLES); ap.add_argument('--stale-sustain', type=int, default=STALE_SUSTAIN)
+    ap.add_argument('--report-initial', action='store_true'); ap.add_argument('--once', action='store_true')
+    ap.add_argument('--fixture'); ap.add_argument('--fixture-hosts', help='comma list of host names (fixture mode; default: from --hosts)')
+    A = ap.parse_args()
+    key, hosts = load_hosts(A.hosts) if not (A.fixture and A.fixture_hosts) else (None, [dict(name=n) for n in A.fixture_hosts.split(',')])
+    names = [h['name'] for h in hosts]
+    tr = Tracker(A.report_initial); i = 0; t0 = time.time()
+    while True:
+        if A.fixture:
+            s = fixture_sample(A.fixture, i, names)
+            if s == 'END': print("FIXTURE-END no event"); return 0
+            ctrl, qs = s; t = i * A.interval
+        else:
+            ctrl, qs = live_sample(key, hosts); t = int(time.time() - t0)
+        if ctrl is None and not A.fixture:
+            if A.once: print("controller unreachable", file=sys.stderr); return 1
+        else:
+            conds = evaluate(names, ctrl, qs)
+            if A.once:
+                for n in names:
+                    c = ctrl.get(n); mine = {k[0]: v for k, v in conds.items() if k[1] == n}
+                    hot = [k + ('' if v[0] else '') for k, v in mine.items() if v[0]]
+                    cls = (','.join(hot) + ' (instant)') if hot else 'OK'
+                    # no load facts (host unknown to the controller): show a HOLDING condition's detail, never a false one's
+                    det = next((v[1] for k, v in mine.items() if k in ('SATURATED-LOAD', 'IDLE')), '') \
+                        or next((v[1] for v in mine.values() if v[0]), '') or next(iter(mine.values()))[1]
+                    print("%-10s %-28s state=%s link=%s | %s" % (n, cls, (c or {}).get('state'), (c or {}).get('link'), det))
+                return 0
+            evs = tr.step(t, conds)
+            if evs:
+                for k, d in evs: print(event_line(k, d, t), flush=True)
+                return 0
+        i += 1
+        if not A.fixture: time.sleep(A.interval)
+
+if __name__ == '__main__':
+    sys.exit(main())
