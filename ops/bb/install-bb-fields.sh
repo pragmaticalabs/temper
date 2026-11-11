@@ -13,7 +13,7 @@
 # Phase 0, local: the eight files of ops/bb (next to this script) named below must be the pinned reviewed files, else exit 65
 #   with no ssh made.
 # Phase 1, read-only, EVERY target first: installed bb-build is one of BB_BUILD_OLD|MID|PREV|NEW, bb-queue-lib.sh one of BB_LIB_OLD|PREV|NEW,
-#   bb-queue one of BB_QUEUE_OLD|PREV|NEW, bb-tickets is absent, BB_TICKETS_OLD or BB_TICKETS_NEW, bb-hold is absent, BB_HOLD_OLD (the 2026-11-09
+#   bb-queue one of BB_QUEUE_OLD|PREV|LIVE|NEW, bb-tickets is absent, BB_TICKETS_OLD or BB_TICKETS_NEW, bb-hold is absent, BB_HOLD_OLD (the 2026-11-09
 #   host snapshot) or BB_HOLD_NEW, bb-wait and bb-netns-run are absent or their NEW, bb-portgroup.py is absent, BB_PORTGROUP_PREV or BB_PORTGROUP_NEW. Any mismatch prints `refused <target> <file> installed=<md5|absent>
 #   expected=<pin>[|<pin>...]` (every accepted pin except `absent`, in the order above) for every mismatch on every target and exits 65 having written nothing anywhere; an unreachable target is 69.
 # Phase 2, per target and per file to change (bb-tickets, bb-hold, bb-wait, bb-netns-run, bb-portgroup.py, bb-queue-lib.sh, bb-queue,
@@ -37,7 +37,8 @@ readonly BB_LIB_PREV=621b2252c3da05e7dd1161d076908864   # the 2026-11-09 orphan-
 readonly BB_LIB_NEW=d890115b62a8af7583a18a7eddd75bab
 readonly BB_QUEUE_OLD=7efbfbecb9739fed35223cdc97eb185d
 readonly BB_QUEUE_PREV=a04b7be02f840d4f1e2bd19c54c52b3f
-readonly BB_QUEUE_NEW=af86457ae18f4ca331e47137cd088bc7
+readonly BB_QUEUE_LIVE=af86457ae18f4ca331e47137cd088bc7   # what the 2026-11-11 hosts run: its header says `group tickets running:`, which the worker cannot parse
+readonly BB_QUEUE_NEW=45514cb5a7e737fc773929812bcdc5f7
 readonly BB_BUILD_MID=a1100c916b866ad3716bc4095ddb1991   # the T3 fields version, before the waiter's first-writer-wins guard
 readonly BB_BUILD_PREV=cae49573d06f632d3081f7d5be1e9b66
 readonly BB_BUILD_NEW=015b2a2261a6789c5af215b3745a2b84
@@ -78,7 +79,7 @@ accepted_of() {  # the md5s a host may hold besides absent, in the order the ref
   case $1 in
     bb-build) echo "$BB_BUILD_OLD $BB_BUILD_MID $BB_BUILD_PREV $BB_BUILD_NEW" ;;
     bb-queue-lib.sh) echo "$BB_LIB_OLD $BB_LIB_PREV $BB_LIB_NEW" ;;
-    bb-queue) echo "$BB_QUEUE_OLD $BB_QUEUE_PREV $BB_QUEUE_NEW" ;;
+    bb-queue) echo "$BB_QUEUE_OLD $BB_QUEUE_PREV $BB_QUEUE_LIVE $BB_QUEUE_NEW" ;;
     bb-hold) echo "$BB_HOLD_OLD $BB_HOLD_NEW" ;;
     bb-tickets) echo "$BB_TICKETS_OLD $BB_TICKETS_NEW" ;;
     bb-portgroup.py) echo "$BB_PORTGROUP_PREV $BB_PORTGROUP_NEW" ;;

@@ -41,6 +41,18 @@ class BbQueueTest {
         assertThat(ok(BbQueue.listedTickets(busy))).isEqualTo(BbQueue.Tickets.tickets(2, 3));
     }
 
+    /// `new-tools.txt` is verbatim stdout of ops/bb/bb-queue (the 2026-11-11 tools: load-gate line, port-group slots) run on
+    /// cloudbb-d1 against a private queue with one running host-exclusive group ticket and one waiting group ticket. The
+    /// worker once saw `None` counts on every host with those tools: the header label had changed and the gate line sat
+    /// between the WAITING header and its column line.
+    @Test
+    void parse_countsRunningAndWaitingTickets_inTheOutputOfTheCurrentTools() throws IOException {
+        var listing = fixture("new-tools.txt");
+
+        assertThat(listing).contains("port-group slots: 3; port group held by: ", "[port-group host-exclusive]", "LOAD GATE");
+        assertThat(ok(BbQueue.listedTickets(listing))).isEqualTo(BbQueue.Tickets.tickets(1, 1));
+    }
+
     @Test
     void parse_countsZero_inRealIdleOutput() throws IOException {
         var idle = fixture("idle.txt");

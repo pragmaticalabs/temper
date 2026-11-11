@@ -119,7 +119,10 @@ fi
 
 N=${1:-10}
 TRACKED=0
-echo "RUNNING (reactors on host: $(reactors); cap 5 unless a ticket overrides; port-group slots: $(pg_slots); group tickets running: $(group_holder))"
+# the gate line comes BEFORE the sections: the worker (BbQueue.java) wants each header directly above its column line
+LH=$(load_held)
+echo "LOAD GATE (grant only while load5/cores < $LOAD_MAX; override: the oldest grantable ticket after ${LOAD_STARVE}s while < $LOAD_STARVE_REACTORS reactors run): ${LH:-open}"
+echo "RUNNING (reactors on host: $(reactors); cap 5 unless a ticket overrides; port-group slots: $(pg_slots); port group held by: $(group_holder))"
 row TICKET OWNER PRIO AGE CHECKOUT ARGS
 for f in "$Q"/running/*; do
   snap "$f" || continue; TRACKED=$((TRACKED + 1))
@@ -130,8 +133,6 @@ done
 U=$(( $(reactors) - TRACKED )); [ "$U" -gt 0 ] && echo "  + $U reactor(s) not started through the queue (direct mvn or BB_QUEUE=0)"
 echo
 echo "WAITING (grant order: priority desc, then FIFO; a [port-group] ticket is skipped while all slots are taken (host-exclusive ones: while any group ticket runs); a ticket its own cap blocks is passed by backfill until blocked ${STARVE}s, then the host drains for it)"
-LH=$(load_held)
-echo "LOAD GATE (grant only while load5/cores < $LOAD_MAX; override: the oldest grantable ticket after ${LOAD_STARVE}s while < $LOAD_STARVE_REACTORS reactors run): ${LH:-open}"
 printf '%-4s ' POS; row TICKET OWNER PRIO WAITED CHECKOUT ARGS
 i=0
 for id in $(order); do

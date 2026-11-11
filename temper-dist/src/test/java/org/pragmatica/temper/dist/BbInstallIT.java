@@ -177,6 +177,7 @@ class BbInstallIT {
         assertThat(pin("BB_BUILD_PREV")).isEqualTo(BbFixtures.md5(prev("bb-build")));
         assertThat(pin("BB_LIB_PREV")).isEqualTo(BbFixtures.md5(prev("bb-queue-lib.sh")));
         assertThat(pin("BB_QUEUE_PREV")).isEqualTo(BbFixtures.md5(prev("bb-queue")));
+        assertThat(pin("BB_QUEUE_LIVE")).isEqualTo(BbFixtures.md5(prev("bb-queue.live")));
         assertThat(pin("BB_PORTGROUP_PREV")).isEqualTo(BbFixtures.md5(prev("bb-portgroup.py")));
         assertThat(pin("BB_HOLD_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-hold")));
         assertThat(pin("BB_WAIT_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-wait")));
@@ -281,6 +282,20 @@ class BbInstallIT {
         assertThat(tools.resolve("bb-build.bak-" + pin("BB_BUILD_PREV"))).hasBinaryContent(prev("bb-build"));
     }
 
+    /// The bb-queue the 2026-11-11 hosts run (BB_QUEUE_LIVE) printed a header the worker could not parse; it is an accepted source and is replaced.
+    @Test
+    void aHostRunningTheLiveBbQueue_isUpdatedToTheCompatibleOne() throws Exception {
+        var tools = host("h1");
+
+        assertThat(install("builder@h1").rc()).isZero();
+        Files.write(tools.resolve("bb-queue"), prev("bb-queue.live"));
+        var run = install("builder@h1");
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        assertThat(run.stdout()).contains("installed builder@h1 bb-queue before=" + pin("BB_QUEUE_LIVE") + " after=" + pin("BB_QUEUE_NEW"));
+        assertThat(tools.resolve("bb-queue")).hasBinaryContent(Files.readAllBytes(OPS_BB.resolve("bb-queue")));
+    }
+
     /// c4/d1 shape: a host already holding the live set is accepted and nothing is written.
     @Test
     void aHostAtTheLiveSet_isAccepted_andNothingIsWritten() throws Exception {
@@ -352,7 +367,7 @@ class BbInstallIT {
                   .contains("bb-queue-lib.sh installed=" + BbFixtures.md5("other lib\n".getBytes()) + " expected=" + BbFixtures.BB_LIB_OLD
                             + "|621b2252c3da05e7dd1161d076908864|" + pin("BB_LIB_NEW"))
                   .contains("bb-queue installed=" + BbFixtures.md5("unrelated tool\n".getBytes()) + " expected=" + BbFixtures.BB_QUEUE_OLD
-                            + "|a04b7be02f840d4f1e2bd19c54c52b3f|" + pin("BB_QUEUE_NEW"));
+                            + "|a04b7be02f840d4f1e2bd19c54c52b3f|" + pin("BB_QUEUE_LIVE") + "|" + pin("BB_QUEUE_NEW"));
     }
 
     @Test
