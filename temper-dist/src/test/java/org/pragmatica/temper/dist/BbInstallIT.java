@@ -177,6 +177,7 @@ class BbInstallIT {
         assertThat(pin("BB_BUILD_PREV")).isEqualTo(BbFixtures.md5(prev("bb-build")));
         assertThat(pin("BB_LIB_PREV")).isEqualTo(BbFixtures.md5(prev("bb-queue-lib.sh")));
         assertThat(pin("BB_QUEUE_PREV")).isEqualTo(BbFixtures.md5(prev("bb-queue")));
+        assertThat(pin("BB_PORTGROUP_PREV")).isEqualTo(BbFixtures.md5(prev("bb-portgroup.py")));
         assertThat(pin("BB_HOLD_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-hold")));
         assertThat(pin("BB_WAIT_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-wait")));
         assertThat(pin("BB_NETNS_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-netns-run")));
@@ -262,6 +263,7 @@ class BbInstallIT {
         Files.write(tools.resolve("bb-queue-lib.sh"), prev("bb-queue-lib.sh"));
         Files.write(tools.resolve("bb-queue"), prev("bb-queue"));
         Files.writeString(tools.resolve("bb-hold"), "the snapshot hold\n");
+        Files.write(tools.resolve("bb-portgroup.py"), prev("bb-portgroup.py"));
         var run = install(INSTALL, Map.of(), "builder@h1");
 
         assertThat(run.rc()).as(run.stdout() + run.stderr()).isEqualTo(65);
@@ -274,6 +276,8 @@ class BbInstallIT {
         assertThat(ok.stdout()).contains("installed builder@h1 bb-build before=" + pin("BB_BUILD_PREV") + " after=" + pin("BB_BUILD_NEW"),
                                          "installed builder@h1 bb-queue-lib.sh before=" + pin("BB_LIB_PREV") + " after=" + pin("BB_LIB_NEW"),
                                          "installed builder@h1 bb-queue before=" + pin("BB_QUEUE_PREV") + " after=" + pin("BB_QUEUE_NEW"));
+        assertThat(ok.stdout()).contains("installed builder@h1 bb-portgroup.py before=" + pin("BB_PORTGROUP_PREV") + " after=" + pin("BB_PORTGROUP_NEW"));
+        assertThat(tools.resolve("bb-portgroup.py.bak-" + pin("BB_PORTGROUP_PREV"))).hasBinaryContent(prev("bb-portgroup.py"));
         assertThat(tools.resolve("bb-build.bak-" + pin("BB_BUILD_PREV"))).hasBinaryContent(prev("bb-build"));
     }
 

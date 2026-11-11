@@ -14,7 +14,7 @@
 #   with no ssh made.
 # Phase 1, read-only, EVERY target first: installed bb-build is one of BB_BUILD_OLD|MID|PREV|NEW, bb-queue-lib.sh one of BB_LIB_OLD|PREV|NEW,
 #   bb-queue one of BB_QUEUE_OLD|PREV|NEW, bb-tickets is absent, BB_TICKETS_OLD or BB_TICKETS_NEW, bb-hold is absent, BB_HOLD_OLD (the 2026-11-09
-#   host snapshot) or BB_HOLD_NEW, bb-wait and bb-netns-run are absent or their NEW, bb-portgroup.py is absent or BB_PORTGROUP_NEW. Any mismatch prints `refused <target> <file> installed=<md5|absent>
+#   host snapshot) or BB_HOLD_NEW, bb-wait and bb-netns-run are absent or their NEW, bb-portgroup.py is absent, BB_PORTGROUP_PREV or BB_PORTGROUP_NEW. Any mismatch prints `refused <target> <file> installed=<md5|absent>
 #   expected=<pin>[|<pin>...]` (every accepted pin except `absent`, in the order above) for every mismatch on every target and exits 65 having written nothing anywhere; an unreachable target is 69.
 # Phase 2, per target and per file to change (bb-tickets, bb-hold, bb-wait, bb-netns-run, bb-portgroup.py, bb-queue-lib.sh, bb-queue,
 #   then bb-build: the helpers and the lib before the tools that call or source them), one remote `bash -s` script: receive the file as
@@ -47,7 +47,8 @@ readonly BB_HOLD_OLD=0bc2401b6e94fd05b66e1df04387e2ac   # the 2026-11-09 host sn
 readonly BB_HOLD_NEW=3561bb8e22fc2f7f3e98dc795f31eecb
 readonly BB_WAIT_NEW=da248f0b4f9248f2bfed64330b3ca66e
 readonly BB_NETNS_NEW=9661165d4ef938ea43eec5b8d2d619d9
-readonly BB_PORTGROUP_NEW=a93ade2ff7dddcc75cee3d4169a08499
+readonly BB_PORTGROUP_PREV=a93ade2ff7dddcc75cee3d4169a08499   # the 2026-11-09 host snapshot, live on c4/d1 since 2026-11-11
+readonly BB_PORTGROUP_NEW=884caf3cf37b12cf5cf1d97e96f76a4c
 readonly TARGET_RE='^[a-z_][a-z0-9_-]{0,31}@[A-Za-z0-9.:-]+$'
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -80,6 +81,7 @@ accepted_of() {  # the md5s a host may hold besides absent, in the order the ref
     bb-queue) echo "$BB_QUEUE_OLD $BB_QUEUE_PREV $BB_QUEUE_NEW" ;;
     bb-hold) echo "$BB_HOLD_OLD $BB_HOLD_NEW" ;;
     bb-tickets) echo "$BB_TICKETS_OLD $BB_TICKETS_NEW" ;;
+    bb-portgroup.py) echo "$BB_PORTGROUP_PREV $BB_PORTGROUP_NEW" ;;
     *) new_of "$1" ;;
   esac
 }
