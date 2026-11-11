@@ -10,6 +10,14 @@
 # after now-86400, newest first, at most 200. A name that is not a ticket id ^[A-Za-z0-9._-]{1,64}$ is skipped.
 # Per ticket every line `^[a-z_]{1,32}=` is a field, the last value of a key wins (as field() in bb-queue-lib.sh does); a
 # value over 4096 bytes or holding a byte outside 0x20-0x7e is dropped and its key listed in "dropped".
+# progressAt (RUNNING tickets only, additive, a string like every field): the newest mtime, epoch s, of any
+# <co>/**/target/surefire-reports/TEST-*.xml or <co>/**/target/failsafe-reports/TEST-*.xml, `co` the ticket's checkout field,
+# never older than the ticket's `started`; absent when the ticket has no usable `co` or no such report exists (the reader
+# then falls back to `started`). One bounded `find` per running ticket (.git, .m2-local, .bb and node_modules pruned, depth
+# 8, 20 s). Build-log size or mtime is NOT progress (a stuck build once wrote a 292 MB log of one repeated WARN line), and
+# maven's log lines carry no timestamp, so a reactor-module or test-class start line cannot be dated without writing a
+# marker, which this script may not do: the log is never read. Consequence: a single test class that runs longer than the
+# stall limit without a report looks stalled until its report is written.
 # waiter: "alive" when a process of this user has the argument text `bb-build __run <id>` (the test of waiter_alive()), else
 # "gone"; null for done tickets. A ticket that vanishes mid-listing is skipped (the next collection sees it).
 #
@@ -58,6 +66,16 @@ function esc(v,   o, i, c, n) {
   for (i = 1; i <= n; i++) { c = substr(v, i, 1); if (c == "\\" || c == "\"") o = o "\\"; o = o c }
   return o
 }
+# the newest report mtime (epoch s) under a checkout, "" when none; the path is single-quoted for sh
+function newest_report(co,   q, cmd, t) {
+  if (co !~ /^\/[^\n]*$/ || co ~ /\.\./) return ""
+  q = co; gsub(/\047/, "\047\\\047\047", q); q = "\047" q "\047"
+  cmd = "timeout 20 find " q " -maxdepth 8 \\( -name .git -o -name .m2-local -o -name .bb -o -name node_modules \\) -prune -o -type f -name \047TEST-*.xml\047 \\( -path \047*/target/surefire-reports/*\047 -o -path \047*/target/failsafe-reports/*\047 \\) -printf \047%T@\\n\047 2>/dev/null | sort -n | tail -n 1"
+  t = ""
+  cmd | getline t
+  close(cmd)
+  return (t ~ /^[0-9]+(\.[0-9]+)?$/) ? int(t) : ""
+}
 function pad(n, w) { return sprintf("%0" w "d", n) }
 BEGIN { FS = "\t"; mode = 0 }
 FNR == 1 { mode++ }
@@ -82,6 +100,13 @@ mode == 2 && NF == 3 && length($2) <= 64 {
   rc = r
   close(path)
   if (rc < 0) next              # vanished (a grant or a reap moved it) or unreadable: skipped
+  if (dir == "running" && ("co" in val) && !("progressAt" in val)) {
+    pa = newest_report(val["co"])
+    if (pa != "") {
+      if (("started" in val) && val["started"] ~ /^[0-9]+$/ && length(val["started"]) <= 12 && val["started"] + 0 > pa) pa = val["started"] + 0
+      val["progressAt"] = pa; order[++nk] = "progressAt"
+    }
+  }
   fj = ""; dj = ""
   for (i = 1; i <= nk; i++) {
     k = order[i]; v = val[k]

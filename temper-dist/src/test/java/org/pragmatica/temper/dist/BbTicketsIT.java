@@ -1,7 +1,5 @@
 package org.pragmatica.temper.dist;
 
-import org.pragmatica.temper.testsupport.HermeticProcess;
-
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -17,6 +15,8 @@ import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
+import org.pragmatica.temper.testsupport.HermeticProcess;
+
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
@@ -25,6 +25,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
+
 
 /// `ops/bb/bb-tickets` on fixture queues, run for real. The clock is `BB_TICKETS_NOW`; a live waiter
 /// is a `sleep` whose argv[0] is `bb-build __run <id>`, the text `waiter_alive` looks for.
@@ -58,27 +59,34 @@ class BbTicketsIT {
     }
 
     private Path ticket(String sub, String id, String content) throws IOException {
-        return Files.writeString(queue.resolve(sub).resolve(id), content);
+        return Files.writeString(queue.resolve(sub).resolve(id),
+                                 content);
     }
 
     private Path ticketBytes(String sub, String id, byte[] content) throws IOException {
-        return Files.write(queue.resolve(sub).resolve(id), content);
+        return Files.write(queue.resolve(sub).resolve(id),
+                           content);
     }
 
     private BbFixtures.Outcome list(String... args) throws Exception {
         var env = new HashMap<String, String>();
+
         env.put("PATH", System.getenv("PATH"));
-        env.put("HOME", dir.resolve("home").toString());
+        env.put("HOME",
+                dir.resolve("home").toString());
         env.put("USER", System.getProperty("user.name"));
         env.put("BB_TEST_QUEUE_ROOT", queue.toString());
         env.put("BB_TICKETS_NOW", Long.toString(NOW));
         var command = new ArrayList<String>(List.of("bash", SCRIPT.toString()));
+
         command.addAll(List.of(args));
+
         return BbFixtures.run(command, env, null, null);
     }
 
     private static List<String> ids(BbFixtures.Outcome outcome) {
-        return outcome.stdout().lines()
+        return outcome.stdout()
+                      .lines()
                       .map(TICKET::matcher)
                       .filter(java.util.regex.Matcher::find)
                       .map(matcher -> matcher.group(1))
@@ -86,15 +94,21 @@ class BbTicketsIT {
     }
 
     private static String line(BbFixtures.Outcome outcome, String id) {
-        return outcome.stdout().lines().filter(l -> l.contains("\"ticket\":\"" + id + "\"")).findFirst().orElseThrow();
+        return outcome.stdout()
+                      .lines()
+                      .filter(l -> l.contains("\"ticket\":\"" + id + "\""))
+                      .findFirst()
+                      .orElseThrow();
     }
 
     private void waiterFor(String id) throws Exception {
         var process = HermeticProcess.builder("bash", "-c", "exec -a \"bb-build __run " + id + "\" sleep 300").start();
+
         standIns.add(process);
         for (var i = 0; i < 100 && BbFixtures.waiters(id).isEmpty(); i++) {
             Thread.sleep(100);
         }
+
         assertThat(BbFixtures.waiters(id)).as("the stand-in waiter for " + id).hasSize(1);
     }
 
@@ -110,19 +124,23 @@ class BbTicketsIT {
         ticket("done", "dA", "id=dA\nended=" + (NOW - 50) + "\nstate=finished\nrc=0\n");
         ticket("done", "dB", "id=dB\nended=" + (NOW - 10) + "\n");
         var noEnded = ticket("done", "dM", "id=dM\nstate=abandoned\n");
+
         Files.setLastModifiedTime(noEnded, FileTime.fromMillis((NOW - 30) * 1000));
         var staleMtime = ticket("done", "dS", "id=dS\n");
-        Files.setLastModifiedTime(staleMtime, FileTime.fromMillis((NOW - 90_000) * 1000));
 
+        Files.setLastModifiedTime(staleMtime, FileTime.fromMillis((NOW - 90_000) * 1000));
         var out = list();
 
         assertThat(out.rc()).as(out.stderr()).isZero();
         assertThat(ids(out)).containsExactly("ra", "rx", "r1", "r2", "w1", "w2", "dB", "dM", "dA");
         var lines = out.stdout().lines().toList();
-        assertThat(lines.getLast()).isEqualTo("{\"v\":1,\"end\":true,\"count\":9,\"queue\":\"present\",\"at\":" + NOW + "}");
+
+        assertThat(lines.getLast()).isEqualTo("{\"v\":1,\"end\":true,\"count\":9,\"queue\":\"present\",\"at\":" + NOW
+                                             + "}");
         assertThat(lines).hasSize(10);
         assertThat(line(out, "dA")).isEqualTo("{\"v\":1,\"ticket\":\"dA\",\"dir\":\"done\",\"waiter\":null,"
-                                              + "\"fields\":{\"id\":\"dA\",\"ended\":\"" + (NOW - 50) + "\",\"state\":\"finished\",\"rc\":\"0\"},\"dropped\":[]}");
+                                             + "\"fields\":{\"id\":\"dA\",\"ended\":\"" + (NOW - 50)
+                                             + "\",\"state\":\"finished\",\"rc\":\"0\"},\"dropped\":[]}");
     }
 
     @Test
@@ -132,7 +150,6 @@ class BbTicketsIT {
         ticket("waiting", "dead-1", "id=dead-1\ncreated=3\n");
         ticket("done", "fin-1", "id=fin-1\nended=" + (NOW - 5) + "\n");
         waiterFor("live-1");
-
         var out = list();
 
         assertThat(line(out, "live-1")).contains("\"waiter\":\"alive\"");
@@ -143,37 +160,49 @@ class BbTicketsIT {
 
     @Test
     void legacyTicket_hasItsFieldsListed_andNothingElse() throws Exception {
-        ticket("waiting", "1793825000000000000-1234", String.join("\n", "id=1793825000000000000-1234", "owner=t2int2", "co=/home/builder/work/co/t2int2-full",
-                                                                    "sha=8c8a4e6e22abd026b1b34c42e607165cb756b209", "key=191150ebff0b6487", "cap=5", "limit=0",
-                                                                    "created=1793825000000000000", "group=1", "group_reason=forced by BB_PORT_GROUP=1",
-                                                                    "args=-B clean install ", ""));
-
+        ticket("waiting",
+               "1793825000000000000-1234",
+               String.join("\n",
+                           "id=1793825000000000000-1234",
+                           "owner=t2int2",
+                           "co=/home/builder/work/co/t2int2-full",
+                           "sha=8c8a4e6e22abd026b1b34c42e607165cb756b209",
+                           "key=191150ebff0b6487",
+                           "cap=5",
+                           "limit=0",
+                           "created=1793825000000000000",
+                           "group=1",
+                           "group_reason=forced by BB_PORT_GROUP=1",
+                           "args=-B clean install ",
+                           ""));
         var out = list();
 
         assertThat(line(out, "1793825000000000000-1234")).isEqualTo("{\"v\":1,\"ticket\":\"1793825000000000000-1234\",\"dir\":\"waiting\",\"waiter\":\"gone\","
-                                                                     + "\"fields\":{\"id\":\"1793825000000000000-1234\",\"owner\":\"t2int2\",\"co\":\"/home/builder/work/co/t2int2-full\","
-                                                                     + "\"sha\":\"8c8a4e6e22abd026b1b34c42e607165cb756b209\",\"key\":\"191150ebff0b6487\",\"cap\":\"5\",\"limit\":\"0\","
-                                                                     + "\"created\":\"1793825000000000000\",\"group\":\"1\",\"group_reason\":\"forced by BB_PORT_GROUP=1\","
-                                                                     + "\"args\":\"-B clean install \"},\"dropped\":[]}");
+                                                                   + "\"fields\":{\"id\":\"1793825000000000000-1234\",\"owner\":\"t2int2\",\"co\":\"/home/builder/work/co/t2int2-full\","
+                                                                   + "\"sha\":\"8c8a4e6e22abd026b1b34c42e607165cb756b209\",\"key\":\"191150ebff0b6487\",\"cap\":\"5\",\"limit\":\"0\","
+                                                                   + "\"created\":\"1793825000000000000\",\"group\":\"1\",\"group_reason\":\"forced by BB_PORT_GROUP=1\","
+                                                                   + "\"args\":\"-B clean install \"},\"dropped\":[]}");
     }
 
     @Test
     void values_withControlBytes_orOver4096Bytes_orNonAscii_areDropped_andNamed() throws Exception {
         var content = new ByteArrayOutputStream();
+
         content.writeBytes("id=bad\nok=1\nok=2\ntabbed=a\tb\ncr=x\r\nhigh=caf".getBytes(StandardCharsets.UTF_8));
-        content.writeBytes(new byte[] {(byte) 0xc3, (byte) 0xa9, '\n'});
+        content.writeBytes(new byte[]{(byte) 0xc3, (byte) 0xa9, '\n'});
         content.writeBytes(("long=" + "a".repeat(4097) + "\nedge=" + "b".repeat(4096) + "\nquote=say \"hi\" \\ done\n").getBytes(StandardCharsets.UTF_8));
         content.writeBytes("del=a\u007fb\nlatin=\u0001x\nnot a key=1\nUPPER=1\nlast=first\nlast=\u0002\n".getBytes(StandardCharsets.UTF_8));
         ticketBytes("running", "bad", content.toByteArray());
-
         var out = list();
-
         var json = line(out, "bad");
+
         assertThat(json).contains("\"ok\":\"2\"").doesNotContain("\"ok\":\"1\"");
-        assertThat(json).contains("\"edge\":\"" + "b".repeat(4096) + "\"").contains("\"quote\":\"say \\\"hi\\\" \\\\ done\"");
+        assertThat(json).contains("\"edge\":\"" + "b".repeat(4096) + "\"")
+                  .contains("\"quote\":\"say \\\"hi\\\" \\\\ done\"");
         assertThat(json).contains("\"dropped\":[\"tabbed\",\"cr\",\"high\",\"long\",\"del\",\"latin\",\"last\"]");
         assertThat(json).doesNotContain("not a key").doesNotContain("UPPER").doesNotContain("\"last\":");
-        assertThat(out.stdout().chars().allMatch(c -> c == '\n' || (c >= 0x20 && c < 0x7f))).as("pure printable ASCII on the wire").isTrue();
+        assertThat(out.stdout().chars().allMatch(c -> c == '\n' || (c >= 0x20 && c < 0x7f))).as("pure printable ASCII on the wire")
+                  .isTrue();
     }
 
     @Test
@@ -184,9 +213,9 @@ class BbTicketsIT {
         ticket("running", "x".repeat(65), "id=c\n");
         ticket("running", "multi\nline", "id=d\n");
         ticket("running", "done\tx", "id=e\n");
-        Files.createSymbolicLink(queue.resolve("running").resolve("link"), queue.resolve("running").resolve("ok.id_1-x"));
+        Files.createSymbolicLink(queue.resolve("running").resolve("link"),
+                                 queue.resolve("running").resolve("ok.id_1-x"));
         Files.createDirectories(queue.resolve("running").resolve("subdir"));
-
         var out = list();
 
         assertThat(ids(out)).containsExactly("ok.id_1-x");
@@ -199,13 +228,14 @@ class BbTicketsIT {
             ticket("running", "r%04d".formatted(i), "id=r\ncreated=%d\n".formatted(1000 + i));
             ticket("waiting", "w%04d".formatted(i), "id=w\ncreated=%d\n".formatted(1000 + i));
         }
+
         for (var i = 0; i < 203; i++) {
             ticket("done", "d%04d".formatted(i), "id=d\nended=%d\n".formatted(NOW - 1000 + i));
         }
 
         var out = list();
-
         var ids = ids(out);
+
         assertThat(ids).hasSize(1200);
         assertThat(ids.stream().filter(id -> id.startsWith("r"))).hasSize(500).first().isEqualTo("r0000");
         assertThat(ids.stream().filter(id -> id.startsWith("w"))).hasSize(500);
@@ -216,18 +246,17 @@ class BbTicketsIT {
     @Test
     void absentQueue_isATrailerOnly_exit0_andNothingIsCreated() throws Exception {
         queue = dir.resolve("nowhere");
-
         var out = list();
 
         assertThat(out.rc()).isZero();
-        assertThat(out.stdout()).isEqualTo("{\"v\":1,\"end\":true,\"count\":0,\"queue\":\"absent\",\"at\":" + NOW + "}\n");
+        assertThat(out.stdout()).isEqualTo("{\"v\":1,\"end\":true,\"count\":0,\"queue\":\"absent\",\"at\":" + NOW
+                                          + "}\n");
         assertThat(queue).doesNotExist();
     }
 
     @Test
     void anyArgument_isExit64_withNothingOnStdout() throws Exception {
         ticket("running", "r1", "id=r1\n");
-
         var out = list("--all");
 
         assertThat(out.rc()).isEqualTo(64);
@@ -236,10 +265,12 @@ class BbTicketsIT {
 
     @Test
     void unreadableDirectory_isExit74_withNothingOnStdout() throws Exception {
-        Assumptions.assumeFalse("root".equals(System.getProperty("user.name")), "root reads everything");
+        Assumptions.assumeFalse("root".equals(System.getProperty("user.name")),
+                                "root reads everything");
         ticket("running", "r1", "id=r1\n");
         ticket("done", "d1", "id=d1\nended=" + (NOW - 1) + "\n");
         var done = queue.resolve("done").toFile();
+
         assertThat(done.setReadable(false) && done.setExecutable(false)).isTrue();
         try {
             var out = list();
@@ -256,7 +287,6 @@ class BbTicketsIT {
     void reading_changesNothing_noLock_noDirectory_noMtime() throws Exception {
         Files.delete(queue.resolve("done"));
         ticket("running", "r1", "id=r1\ncreated=1\n");
-
         var before = snapshot();
         var out = list();
 
@@ -270,12 +300,16 @@ class BbTicketsIT {
         try (Stream<Path> walk = Files.walk(queue)) {
             return walk.sorted()
                        .map(path -> {
-                           try {
-                               return path + " " + Files.getLastModifiedTime(path) + " " + (Files.isRegularFile(path) ? Files.size(path) : -1);
-                           } catch (IOException e) {
-                               throw new IllegalStateException(e);
-                           }
-                       })
+                                try {
+                                return path
+                                     + " " + Files.getLastModifiedTime(path)
+                                     + " " + (Files.isRegularFile(path)
+                                              ? Files.size(path)
+                                              : -1);
+                            } catch (IOException e) {
+                                throw new IllegalStateException(e);
+                            }
+                            })
                        .collect(Collectors.toList());
         }
     }
@@ -289,9 +323,88 @@ class BbTicketsIT {
                 throw new IllegalStateException(e);
             }
         });
-
         var out = list();
 
         assertThat(ids(out)).containsExactly("z4", "z3", "z2", "z1", "z0");
+    }
+
+    // ---- progressAt (issue #10) -----------------------------------------------------------------------------------
+    private Path report(Path checkout, String module, String kind, String name, long mtime) throws IOException {
+        var file = checkout.resolve(module).resolve("target").resolve(kind).resolve(name);
+
+        Files.createDirectories(file.getParent());
+        Files.writeString(file, "<testsuite/>");
+        Files.setLastModifiedTime(file, FileTime.fromMillis(mtime * 1000));
+
+        return file;
+    }
+
+    private static String progressAt(BbFixtures.Outcome outcome, String id) {
+        var matcher = Pattern.compile("\"progressAt\":\"([0-9]+)\"").matcher(line(outcome, id));
+
+        return matcher.find()
+               ? matcher.group(1)
+               : null;
+    }
+
+    /// Probes: count the build log or a non-report file as progress -> red; stop pruning .m2-local -> red.
+    @Test
+    void progressAt_isTheNewestSurefireOrFailsafeReportMtime_neverTheLogOrOtherFiles() throws Exception {
+        var co = Files.createDirectories(dir.resolve("co"));
+
+        report(co, "m1", "surefire-reports", "TEST-a.xml", NOW - 1000);
+        report(co, "m2", "failsafe-reports", "TEST-b.xml", NOW - 300);
+        report(co, "m3", "surefire-reports", "a.txt", NOW - 10);
+        report(co, "m4", "classes", "TEST-c.xml", NOW - 10);
+        report(co, ".m2-local/x", "surefire-reports", "TEST-z.xml", NOW - 5);
+        var log = Files.writeString(Files.createDirectories(co.resolve(".bb")).resolve("build.log"),
+                                    "[WARNING] same line\n".repeat(1000));
+
+        Files.setLastModifiedTime(log, FileTime.fromMillis((NOW - 1) * 1000));
+        ticket("running", "r1", "id=r1\nco=" + co + "\nstarted=" + (NOW - 5000) + "\ngroup=1\n");
+        var out = list();
+
+        assertThat(out.rc()).as(out.stderr()).isZero();
+        assertThat(progressAt(out, "r1")).isEqualTo(Long.toString(NOW - 300));
+    }
+
+    @Test
+    void progressAt_isNeverOlderThanStarted_andAbsentWithoutReports_orForNonRunningTickets() throws Exception {
+        var stale = Files.createDirectories(dir.resolve("stale"));
+
+        report(stale, "m1", "surefire-reports", "TEST-a.xml", NOW - 9000);
+        var empty = Files.createDirectories(dir.resolve("empty"));
+
+        ticket("running", "r-stale", "id=r-stale\nco=" + stale + "\nstarted=" + (NOW - 5000) + "\n");
+        ticket("running", "r-empty", "id=r-empty\nco=" + empty + "\nstarted=" + (NOW - 5000) + "\n");
+        ticket("running", "r-noco", "id=r-noco\nstarted=" + (NOW - 5000) + "\n");
+        ticket("running", "r-rel", "id=r-rel\nco=relative/dir\n");
+        ticket("waiting", "w1", "id=w1\nco=" + stale + "\n");
+        ticket("done", "d1", "id=d1\nco=" + stale + "\nended=" + (NOW - 5) + "\n");
+        var out = list();
+
+        assertThat(out.rc()).as(out.stderr()).isZero();
+        assertThat(progressAt(out, "r-stale")).isEqualTo(Long.toString(NOW - 5000));
+        assertThat(line(out, "r-empty")).doesNotContain("progressAt");
+        assertThat(line(out, "r-noco")).doesNotContain("progressAt");
+        assertThat(line(out, "r-rel")).doesNotContain("progressAt");
+        assertThat(line(out, "w1")).doesNotContain("progressAt");
+        assertThat(line(out, "d1")).doesNotContain("progressAt");
+    }
+
+    @Test
+    void progressAt_quotesTheCheckoutPath_soAHostileOneRunsNothing() throws Exception {
+        var pwned = dir.resolve("pwned");
+        var odd = Files.createDirectories(dir.resolve("it's a dir"));
+
+        report(odd, "m1", "surefire-reports", "TEST-a.xml", NOW - 700);
+        ticket("running", "r-odd", "id=r-odd\nco=" + odd + "\nstarted=" + (NOW - 5000) + "\n");
+        ticket("running", "r-evil", "id=r-evil\nco=" + dir + "/x'; touch " + pwned + "; echo '\nstarted=1\n");
+        var out = list();
+
+        assertThat(out.rc()).as(out.stderr()).isZero();
+        assertThat(progressAt(out, "r-odd")).isEqualTo(Long.toString(NOW - 700));
+        assertThat(line(out, "r-evil")).doesNotContain("progressAt");
+        assertThat(pwned).doesNotExist();
     }
 }

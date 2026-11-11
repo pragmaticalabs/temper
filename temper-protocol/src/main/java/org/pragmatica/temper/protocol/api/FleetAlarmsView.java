@@ -46,8 +46,9 @@ public record FleetAlarmsView(int v, Instant asOf, List<HostAlarms> hosts) {
     }
 
     /// One current alarm. `ticket`, `ageMin` and `limitMin` belong to the per-ticket kinds (`queue-wait`,
-    /// `portgroup-held`; `waiter-gone` has a ticket only), `days` to `host-retiring`, `skewS` to `clock-skew`.
-    /// `ageMin` is as of the host's `hostAt`; `firedAt` is on the controller clock.
+    /// `portgroup-held`, `portgroup-long`; `waiter-gone` has a ticket only), `days` to `host-retiring`, `skewS` to `clock-skew`.
+    /// `ageMin` is as of the host's `hostAt`: the ticket's wait or run time, but for `portgroup-held` its stall (time since
+    /// its last progress); `firedAt` is on the controller clock.
     public record Alarm(String kind,
                         Option<String> ticket,
                         Option<Integer> ageMin,

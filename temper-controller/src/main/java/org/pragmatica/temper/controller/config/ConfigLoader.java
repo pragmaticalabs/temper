@@ -89,6 +89,10 @@ public sealed interface ConfigLoader {
                                    "retireAt",
                                    "memFloorGiB");
 
+    /// The age limit `portgroup-held` had before it became a no-progress alarm (issue #10). A controller.toml that still
+    /// sets it keeps loading: the value is not read, and the start logs a warning naming its successors.
+    String DEPRECATED_PORTGROUP_HELD_ALARM_MIN = "portGroupHeldAlarmMin";
+
     /// Every key the `[fleet]` section is read for; any other is warned about at start and ignored (a misspelt `bbHosts`
     /// would otherwise be an empty set of bb hosts without a word).
     Set<String> FLEET_KEYS = Set.of("kilnUrl",
@@ -97,7 +101,9 @@ public sealed interface ConfigLoader {
                                     "bbScanKey",
                                     "bbKnownHosts",
                                     "queueWaitAlarmMin",
-                                    "portGroupHeldAlarmMin");
+                                    "portGroupStallAlarmMin",
+                                    "portGroupHeldAgeAlarmMin",
+                                    DEPRECATED_PORTGROUP_HELD_ALARM_MIN);
 
     /// Reads the build's version ([ControllerVersion#bundled]), then parses the file.
     static Result<ControllerConfig> load(Path file, Path home) {
@@ -339,12 +345,15 @@ public sealed interface ConfigLoader {
                                                                   "queueWaitAlarmMin",
                                                                   Fleet.DEFAULT_QUEUE_WAIT_ALARM_MIN),
                                                      alarmMinutes(doc,
-                                                                  "portGroupHeldAlarmMin",
-                                                                  Fleet.DEFAULT_PORTGROUP_HELD_ALARM_MIN))
+                                                                  "portGroupStallAlarmMin",
+                                                                  Fleet.DEFAULT_PORTGROUP_STALL_ALARM_MIN),
+                                                     alarmMinutes(doc,
+                                                                  "portGroupHeldAgeAlarmMin",
+                                                                  Fleet.DEFAULT_PORTGROUP_HELD_AGE_ALARM_MIN))
                                                 .map(Fleet::fleet));
     }
 
-    /// `[fleet] queueWaitAlarmMin`, `portGroupHeldAlarmMin`: a whole number from 1 to
+    /// `[fleet] queueWaitAlarmMin`, `portGroupStallAlarmMin`, `portGroupHeldAgeAlarmMin`: a whole number from 1 to
     /// [Fleet#MAX_ALARM_MIN]; anything else refuses the start. There is no off switch.
     private static Result<Integer> alarmMinutes(TomlDocument doc, String key, int fallback) {
         return TomlValues.optionalWholeBetween(option(doc.sections().get("fleet")).or(Map.of()),
@@ -356,7 +365,14 @@ public sealed interface ConfigLoader {
     }
 
     private static Unit warnedFleetKeys(TomlDocument doc) {
-        option(doc.sections().get("fleet")).onPresent(table -> TomlValues.warnedUnknownKeys(table, "fleet", FLEET_KEYS));
+        option(doc.sections().get("fleet")).onPresent(table -> {
+            TomlValues.warnedUnknownKeys(table, "fleet", FLEET_KEYS);
+            if (table.containsKey(DEPRECATED_PORTGROUP_HELD_ALARM_MIN)) {
+                TomlValues.LOG.warn("[fleet] {} is deprecated and ignored: portgroup-held now fires on no progress "
+                                   + "(portGroupStallAlarmMin), with an age backstop portgroup-long (portGroupHeldAgeAlarmMin)",
+                                    DEPRECATED_PORTGROUP_HELD_ALARM_MIN);
+            }
+        });
 
         return Unit.unit();
     }

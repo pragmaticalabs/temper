@@ -333,17 +333,21 @@ public record ControllerConfig(String version,
     /// `stateDir`, where the epoch's high-water file `fleet-hwm` lives (default: `temper-state` beside the evidence
     /// root, outside anything retention deletes), and `bbHosts` with the scan key and known_hosts that read the `=`
     /// entries: the bb hosts the controller expects besides its `[[hosts]]`. `queueWaitAlarmMin` and
-    /// `portGroupHeldAlarmMin` (defaults 60 and 120, each 1..10080) are the first limits of
-    /// the `queue-wait` and `portgroup-held` alarms of the bb hosts collected.
+    /// `portGroupStallAlarmMin` and `portGroupHeldAgeAlarmMin` (defaults 60, 30 and 360, each 1..10080) are the
+    /// limits of the `queue-wait`, `portgroup-held` (no progress of a running group=1 ticket) and `portgroup-long`
+    /// (its age, whatever the progress) alarms of the bb hosts collected. The former `portGroupHeldAlarmMin` is still
+    /// accepted in the file, warned about and ignored.
     public record Fleet(Option<URI> kilnUrl,
                         Path stateDir,
                         List<BbHost> bbHosts,
                         Option<Path> bbScanKey,
                         Option<Path> bbKnownHosts,
                         int queueWaitAlarmMin,
-                        int portGroupHeldAlarmMin) {
+                        int portGroupStallAlarmMin,
+                        int portGroupHeldAgeAlarmMin) {
         public static final int DEFAULT_QUEUE_WAIT_ALARM_MIN = 60;
-        public static final int DEFAULT_PORTGROUP_HELD_ALARM_MIN = 120;
+        public static final int DEFAULT_PORTGROUP_STALL_ALARM_MIN = 30;
+        public static final int DEFAULT_PORTGROUP_HELD_AGE_ALARM_MIN = 360;
         public static final int MAX_ALARM_MIN = 10080;
 
         public Fleet {
@@ -366,7 +370,8 @@ public record ControllerConfig(String version,
                          bbScanKey,
                          bbKnownHosts,
                          DEFAULT_QUEUE_WAIT_ALARM_MIN,
-                         DEFAULT_PORTGROUP_HELD_ALARM_MIN);
+                         DEFAULT_PORTGROUP_STALL_ALARM_MIN,
+                         DEFAULT_PORTGROUP_HELD_AGE_ALARM_MIN);
         }
 
         public static Fleet fleet(Option<URI> kilnUrl,
@@ -375,14 +380,16 @@ public record ControllerConfig(String version,
                                   Option<Path> bbScanKey,
                                   Option<Path> bbKnownHosts,
                                   int queueWaitAlarmMin,
-                                  int portGroupHeldAlarmMin) {
+                                  int portGroupStallAlarmMin,
+                                  int portGroupHeldAgeAlarmMin) {
             return new Fleet(kilnUrl,
                              stateDir,
                              bbHosts,
                              bbScanKey,
                              bbKnownHosts,
                              queueWaitAlarmMin,
-                             portGroupHeldAlarmMin);
+                             portGroupStallAlarmMin,
+                             portGroupHeldAgeAlarmMin);
         }
 
         /// No kiln pull and no bb hosts; the state directory beside the evidence root.

@@ -506,6 +506,20 @@ class BbStoreIT {
                   .isTrue();
     }
 
+    /// V19: the `portgroup-long` kind (issue #10) is a known alarm kind; a made-up one is still refused. Mutation: drop V19
+    /// -> the write fails, red.
+    @Test
+    void v19_portgroupLong_isAKnownMarkKind() {
+        assertThat(bb.retiring(T0,
+                               _ -> BbStore.RoundWrite.roundWrite(List.of(),
+                                                                  List.of(mark("h1", BbAlarm.PORTGROUP_LONG, "r1", "360")),
+                                                                  List.of()))
+                     .await(PgFixture.WAIT)
+                     .isSuccess()).isTrue();
+        assertThat(bb.alarms().await(PgFixture.WAIT).unwrap()).extracting(BbAlarm::kind)
+                  .containsExactly("portgroup-long");
+    }
+
     /// The pre-S1 call shape: the diff only, the trailer `at` equal to `now`, no skew, no alarm marks.
     private static Promise<Option<FleetSeqs>> collected(BbStore bb,
                                                         String host,

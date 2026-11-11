@@ -12,7 +12,7 @@
 # Phase 0, local: ops/bb/bb-build, bb-tickets, bb-queue-lib.sh and bb-queue (next to this script) must be the pinned reviewed
 #   files, else exit 65 with no ssh made.
 # Phase 1, read-only, EVERY target first: installed bb-build is BB_BUILD_OLD, BB_BUILD_MID or BB_BUILD_NEW, bb-queue-lib.sh is BB_LIB_OLD or
-#   BB_LIB_NEW, bb-queue is BB_QUEUE_OLD or BB_QUEUE_NEW, bb-tickets is absent or BB_TICKETS_NEW. Any mismatch prints `refused <target> <file> installed=<md5|absent>
+#   BB_LIB_NEW, bb-queue is BB_QUEUE_OLD or BB_QUEUE_NEW, bb-tickets is absent, BB_TICKETS_OLD or BB_TICKETS_NEW. Any mismatch prints `refused <target> <file> installed=<md5|absent>
 #   expected=<pin>[|<pin>...]` (every accepted pin, OLD|MID|NEW where there is a MID) for every mismatch on every target and exits 65 having written nothing anywhere; an unreachable target is 69.
 # Phase 2, per target and per file to change (bb-tickets, bb-queue-lib.sh, bb-queue, then bb-build: the lib before the tools that
 #   source it), one remote `bash -s` script: receive the file as
@@ -35,7 +35,8 @@ readonly BB_QUEUE_OLD=7efbfbecb9739fed35223cdc97eb185d
 readonly BB_QUEUE_NEW=a04b7be02f840d4f1e2bd19c54c52b3f
 readonly BB_BUILD_MID=a1100c916b866ad3716bc4095ddb1991   # the T3 fields version, before the waiter's first-writer-wins guard
 readonly BB_BUILD_NEW=cae49573d06f632d3081f7d5be1e9b66
-readonly BB_TICKETS_NEW=472cd816644fe0ee0902b8da3d33de8e
+readonly BB_TICKETS_OLD=472cd816644fe0ee0902b8da3d33de8e   # before the per-ticket progressAt (issue #10)
+readonly BB_TICKETS_NEW=e1aeba98541ba781295001f956b08c8d
 readonly TARGET_RE='^[a-z_][a-z0-9_-]{0,31}@[A-Za-z0-9.:-]+$'
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -91,8 +92,8 @@ for t in "${targets[@]}"; do
     echo "refused $t bb-build installed=$b expected=$BB_BUILD_OLD|$BB_BUILD_MID|$BB_BUILD_NEW"; refused=1; fi
   if [ "$l" != "$BB_LIB_OLD" ] && [ "$l" != "$BB_LIB_NEW" ]; then echo "refused $t bb-queue-lib.sh installed=$l expected=$BB_LIB_OLD|$BB_LIB_NEW"; refused=1; fi
   if [ "$q" != "$BB_QUEUE_OLD" ] && [ "$q" != "$BB_QUEUE_NEW" ]; then echo "refused $t bb-queue installed=$q expected=$BB_QUEUE_OLD|$BB_QUEUE_NEW"; refused=1; fi
-  if [ "$k" != absent ] && [ "$k" != "$BB_TICKETS_NEW" ]; then
-    echo "refused $t bb-tickets installed=$k expected=$BB_TICKETS_NEW"; refused=1; fi
+  if [ "$k" != absent ] && [ "$k" != "$BB_TICKETS_OLD" ] && [ "$k" != "$BB_TICKETS_NEW" ]; then
+    echo "refused $t bb-tickets installed=$k expected=$BB_TICKETS_OLD|$BB_TICKETS_NEW"; refused=1; fi
 done
 [ "$refused" = 0 ] || { echo "install-bb-fields: refused; nothing written on any target" >&2; exit 65; }
 

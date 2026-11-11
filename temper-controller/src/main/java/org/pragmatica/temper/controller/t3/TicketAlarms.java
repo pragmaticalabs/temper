@@ -24,18 +24,22 @@ import static org.pragmatica.lang.Option.option;
 
 
 /// The alarms one successful collection makes: `clock-skew`,
-/// `queue-wait`, `portgroup-held` and `waiter-gone`, from the new listing, the baseline and the host's `bb_alarm` rows.
+/// `queue-wait`, `portgroup-held`, `portgroup-long` and `waiter-gone`, from the new listing, the baseline and the host's `bb_alarm` rows.
 /// Pure: it runs inside the collection's transaction on the rows that transaction read, so an event is made only for a
 /// key that is absent, and its mark is written with it.
 ///
 /// Ages are on the host's clock, from one listing (`age = at − t_ticket`, a negative age counts as 0), so the skew
 /// between host and controller never enters an age. Each ticket fires once per threshold; a ticket first seen above
 /// several due thresholds fires the highest of them only, and a mark is written for each.
+///
+/// `portgroup-held` is a stall alarm, not an age: it fires once per stall, when a running `group=1` ticket's progress
+/// time (the host listing's `progressAt`, else `started`: an old host script reports no progress, so its ticket is
+/// judged by the stall clock from its start) is at least the stall limit behind the listing's `at`; its mark is
+/// cleared as soon as the ticket progresses, so the next stall fires again. `portgroup-long` is the age backstop
+/// (`at − started` at the age limit, once), whatever the progress.
 public final class TicketAlarms {
     /// `queue-wait` fires again here, when above the configured limit.
     static final int QUEUE_WAIT_SECOND_MIN = 180;
-    /// `portgroup-held` fires again here, when above the configured limit.
-    static final int PORTGROUP_HELD_SECOND_MIN = 240;
     /// `clock-skew` fires above this many seconds...
     static final int SKEW_BOUND_S = 30;
     /// ...and re-arms at or below this many (G-S1-4).
@@ -44,6 +48,8 @@ public final class TicketAlarms {
     static final long GRACE_S = 30;
     private static final String SOURCE = "controller";
     private static final String GONE = "gone";
+    /// The host listing's per-ticket progress time (epoch seconds), added to running tickets by `bb-tickets`.
+    private static final String PROGRESS_AT = "progressAt";
     private static final String RUNNING = "running";
     private static final String WAITING = "waiting";
     private static final long NANOS = 1_000_000_000L;
@@ -54,21 +60,18 @@ public final class TicketAlarms {
 
     private TicketAlarms() {}
 
-    /// The two configured first limits, in minutes (`[fleet] queueWaitAlarmMin`, `portGroupHeldAlarmMin`).
-    public record Limits(int queueWaitMin, int portGroupHeldMin) {
-        public static final Limits DEFAULT = new Limits(60, 120);
+    /// The configured limits, in minutes (`[fleet] queueWaitAlarmMin`, `portGroupStallAlarmMin`,
+    /// `portGroupHeldAgeAlarmMin`).
+    public record Limits(int queueWaitMin, int portGroupStallMin, int portGroupAgeMin) {
+        public static final Limits DEFAULT = new Limits(60, 30, 360);
 
-        public static Limits limits(int queueWaitMin, int portGroupHeldMin) {
-            return new Limits(queueWaitMin, portGroupHeldMin);
+        public static Limits limits(int queueWaitMin, int portGroupStallMin, int portGroupAgeMin) {
+            return new Limits(queueWaitMin, portGroupStallMin, portGroupAgeMin);
         }
 
         /// The first limit, then the fixed second one when it is above the first.
         List<Integer> queueWait() {
             return thresholds(queueWaitMin, QUEUE_WAIT_SECOND_MIN);
-        }
-
-        List<Integer> portGroupHeld() {
-            return thresholds(portGroupHeldMin, PORTGROUP_HELD_SECOND_MIN);
         }
 
         private static List<Integer> thresholds(int first, int second) {
@@ -126,8 +129,8 @@ public final class TicketAlarms {
         return (int) Math.max(Integer.MIN_VALUE, Math.min(Integer.MAX_VALUE, skew));
     }
 
-    /// One round's alarms, in the contract's order: `clock-skew`, then `queue-wait`, `portgroup-held`, `waiter-gone`,
-    /// each by ticket id.
+    /// One round's alarms, in the contract's order: `clock-skew`, then `queue-wait`, `portgroup-held`,
+    /// `portgroup-long`, `waiter-gone`, each by ticket id.
     public static RoundWrite alarms(String host,
                                     Instant now,
                                     Listing listing,
@@ -155,10 +158,16 @@ public final class TicketAlarms {
           .values()
           .stream()
           .filter(TicketAlarms::groupHolder)
-          .forEach(ticket -> portGroupHeld(in,
-                                           ticket,
-                                           limits.portGroupHeld(),
-                                           out));
+          .forEach(ticket -> {
+                       portGroupHeld(in,
+                                     ticket,
+                                     limits.portGroupStallMin(),
+                                     out);
+                       portGroupLong(in,
+                                     ticket,
+                                     limits.portGroupAgeMin(),
+                                     out);
+                   });
         baseline.onPresent(snapshot -> in.tickets()
                                          .values()
                                          .forEach(ticket -> waiterGone(in, snapshot, ticket, out)));
@@ -212,7 +221,7 @@ public final class TicketAlarms {
     }
 
     private static boolean perTicket(String kind) {
-        return kind.equals(BbAlarm.QUEUE_WAIT) || kind.equals(BbAlarm.PORTGROUP_HELD) || kind.equals(BbAlarm.WAITER_GONE);
+        return kind.equals(BbAlarm.QUEUE_WAIT) || kind.equals(BbAlarm.PORTGROUP_HELD) || kind.equals(BbAlarm.PORTGROUP_LONG) || kind.equals(BbAlarm.WAITER_GONE);
     }
 
     private static boolean groupHolder(BbTicket ticket) {
@@ -256,17 +265,64 @@ public final class TicketAlarms {
                                      out));
     }
 
-    private static void portGroupHeld(In in, BbTicket ticket, List<Integer> thresholds, Out out) {
+    /// Fires once when the stall (`at − progress`) reaches the limit; `progress` is the listing's `progressAt`, else
+    /// `started`. While the ticket progresses, and for any mark of another limit (an old controller's age marks), the
+    /// ticket's marks are cleared, so the next stall fires again.
+    private static void portGroupHeld(In in, BbTicket ticket, int limitMin, Out out) {
+        var progress = progress(ticket);
+        var stall = progress.map(at -> Math.max(0, in.at() - at));
+        var stalled = stall.filter(seconds -> seconds >= limitMin * 60L).isPresent();
+        var threshold = Integer.toString(limitMin);
+
+        in.rows()
+          .stream()
+          .filter(row -> row.kind()
+                            .equals(BbAlarm.PORTGROUP_HELD) && row.subject()
+                                                                  .equals(ticket.ticket()))
+          .filter(row -> !stalled || !row.threshold()
+                                         .equals(threshold))
+          .forEach(out.clear::add);
+        if (stalled && !in.marked(BbAlarm.PORTGROUP_HELD, ticket.ticket(), threshold)) {
+            var payload = ticketKeys(in.host(), ticket);
+
+            payload.put("stallMin", stall.unwrap() / 60);
+            payload.put("limitMin", limitMin);
+            progress.filter(_ -> ticket.field(PROGRESS_AT)
+                                       .isPresent()).onPresent(at -> payload.put("progressAt", at));
+            number(ticket, "started").onPresent(started -> payload.put("ageMin",
+                                                                       Math.max(0, in.at() - started) / 60));
+            payload.put("groupWaiting", groupWaiting(in));
+            out.events.add(in.event(BbAlarm.PORTGROUP_HELD,
+                                    in.host() + "/" + ticket.ticket(),
+                                    payload));
+            out.fire.add(in.mark(BbAlarm.PORTGROUP_HELD, ticket.ticket(), threshold));
+        }
+    }
+
+    /// The age backstop: `at − started` at the limit fires `portgroup-long` once, whatever the progress.
+    private static void portGroupLong(In in, BbTicket ticket, int limitMin, Out out) {
         number(ticket, "started").map(started -> Math.max(0,
                                                           in.at() - started))
               .onPresent(age -> aged(in,
                                      ticket,
-                                     BbAlarm.PORTGROUP_HELD,
+                                     BbAlarm.PORTGROUP_LONG,
                                      age,
-                                     thresholds,
-                                     payload -> payload.put("groupWaiting",
-                                                            groupWaiting(in)),
+                                     List.of(limitMin),
+                                     payload -> {
+                                         payload.put("groupWaiting",
+                                                     groupWaiting(in));
+                                         number(ticket, PROGRESS_AT).onPresent(at -> payload.put("progressAt", at));
+                                     },
                                      out));
+    }
+
+    /// The ticket's last progress, epoch seconds on the host clock: `progressAt` when the listing has it, else `started`.
+    static Option<Long> progress(BbTicket ticket) {
+        var reported = number(ticket, PROGRESS_AT);
+
+        return reported.isPresent()
+               ? reported
+               : number(ticket, "started");
     }
 
     /// The due thresholds (`age ≥ limit × 60`, at exactly the limit it fires) without a mark: one event at the highest
