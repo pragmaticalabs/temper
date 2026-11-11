@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# bb-netns-run <ticket-id> <checkout> <mvn> [mvn args...]  (2026-11-11, port-group isolation)
+# Runs maven for ONE port-group ticket in its own docker network namespace: own loopback (so the tests' fixed ports cannot
+# collide with another ticket's) plus NAT egress on the default bridge. The container is a thin shell over the host:
+#   image bb-hostfs:2 = empty skeleton (usr-merge symlinks, empty /sbin); host /usr and the JDK/Debian config dirs are mounted read-only,
+#   $HOME (maven, checkouts, .m2-local) rw; /tmp is the container own (gone with it); the checkout is the cwd at the SAME path, so
+#   /proc/<pid>/cwd, pgrep and the queue's kill set see containerized processes exactly like host ones (same uid, same paths).
+# BB_NETNS_NETWORK overrides the docker network (default bridge); it exists only for the negative control (container:<name> shares another run namespace).
+# Name bb-<ticket-id>: `bb-queue cancel --running` docker-kills it. No HCLOUD_TOKEN and no other host env enters the container.
+# stdout/stderr are maven's (the waiter redirects them to .bb/build.log); the exit code is maven's (125-127 = docker itself failed).
+set -u
+[ $# -ge 3 ] || { echo "usage: bb-netns-run <ticket-id> <checkout> <mvn> [args...]" >&2; exit 2; }
+ID=$1; CO=$2; MVN=$3; shift 3
+IMG=bb-hostfs:2
+if ! docker image inspect "$IMG" > /dev/null 2>&1; then
+  T=$(mktemp -d); mkdir -p "$T"/{usr,etc,proc,sys,dev,tmp,home,var,run,opt,mnt,srv}; chmod 1777 "$T/tmp"
+  ln -s usr/bin "$T/bin"; ln -s usr/lib "$T/lib"; ln -s usr/lib64 "$T/lib64"; mkdir "$T/sbin"   # real dir: docker injects /sbin/docker-init there
+  tar -C "$T" -cf "$T.tar" . && docker import "$T.tar" "$IMG" > /dev/null; rm -rf "$T" "$T.tar"
+fi
+ARGS=(--rm --init --name "bb-$ID" --label "bb.ticket=$ID" --user "$(id -u):$(id -g)" --network "${BB_NETNS_NETWORK:-bridge}"
+      -v /usr:/usr:ro -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro -v "$HOME:$HOME" -w "$CO"
+      -e "HOME=$HOME" -e "USER=$(id -un)" -e JAVA_HOME=/usr/lib/jvm/java-25-openjdk-amd64 -e PATH=/usr/local/bin:/usr/bin:/bin)
+for d in alternatives java-25-openjdk java-openjdk ssl ca-certificates; do [ -e "/etc/$d" ] && ARGS+=(-v "/etc/$d:/etc/$d:ro"); done
+for v in LANG LC_ALL TZ MAVEN_OPTS; do [ -n "${!v:-}" ] && ARGS+=(-e "$v=${!v}"); done
+exec docker run "${ARGS[@]}" "$IMG" "$MVN" "$@"
