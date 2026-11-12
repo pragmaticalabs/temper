@@ -367,7 +367,7 @@ class BbInstallIT {
 
         assertThat(run.rc()).as(run.stdout() + run.stderr()).isEqualTo(65);
         assertThat(run.stdout().lines().toList()).containsExactly(
-            "refused builder@h2 bb-build installed=" + BbFixtures.md5("a diverged copy\n".getBytes()) + " expected=" + BbFixtures.BB_BUILD_OLD + "|a1100c916b866ad3716bc4095ddb1991|cae49573d06f632d3081f7d5be1e9b66|" + pin("BB_BUILD_NEW"));
+            "refused builder@h2 bb-build installed=" + BbFixtures.md5("a diverged copy\n".getBytes()) + " expected=" + BbFixtures.BB_BUILD_OLD + "|a1100c916b866ad3716bc4095ddb1991|cae49573d06f632d3081f7d5be1e9b66|" + pin("BB_BUILD_LIVE") + "|" + pin("BB_BUILD_NEW"));
         assertThat(listing(good)).isEqualTo(goodBefore);
         assertThat(listing(diverged)).isEqualTo(divergedBefore);
         assertThat(sshCalls()).as("phase 1 only: one probe per target").hasSize(2);
