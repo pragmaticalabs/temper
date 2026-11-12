@@ -31,6 +31,10 @@
 #                                       Optional BB_AGENT=<word>, BB_LANE=<word>, BB_PR=<number> go
 #                                       into the ticket too (a malformed one is refused, exit 2). Without bb-submit installed
 #                                       the old line runs, after a warning, and the ticket has no session fields.
+#                                       BB_DEDUP, BB_QUEUE and BB_PG_ISOLATE (0 or 1; else exit 2) reach bb-build on both paths.
+#                                       Any other BB_* in the environment that this tool does not read or forward (read:
+#                                       BB_OWNER BB_HOST BB_HOSTS_CMD BB_TEMPER_HOSTS BB_SUBMIT BB_SSH_*; BB_KNOWN_HOSTS) gets
+#                                       one stderr line naming it; never a refusal.
 #   bb-temper wait <name>               block until .bb/rc exists, then print rc and the BUILD/Tests summary lines
 #   bb-temper report <name>             rc, wall time and per-module testcase/failure/skip counts from the XML reports
 #   bb-temper fetch <name> <local-dir>  copy build.log and all surefire/failsafe XML reports to <local-dir>
@@ -246,13 +250,25 @@ case $cmd in
     printf '%s\n' "$hostkey" > "$BIND.tmp.$$"; mv "$BIND.tmp.$$" "$BIND" ;;
   build)
     [ $# -gt 0 ] || set -- -B clean install
-    # BB_DEDUP / BB_QUEUE reach bb-build (before 2026-11-06 only BB_OWNER did, so BB_DEDUP=0 was silently dropped).
+    # BB_DEDUP / BB_QUEUE / BB_PG_ISOLATE reach bb-build (before 2026-11-06 only BB_OWNER did, so BB_DEDUP=0 was silently
+    # dropped; BB_PG_ISOLATE=0 was dropped until #27).
     fwd=
-    for v in BB_DEDUP BB_QUEUE; do
+    for v in BB_DEDUP BB_QUEUE BB_PG_ISOLATE; do
       val=${!v:-}; [ -z "$val" ] && continue
       [[ $val =~ ^[01]$ ]] || die 2 "$v must be 0 or 1"
       fwd="$fwd $v=$val"
     done
+    # Any other BB_* in the caller's environment that this tool neither forwards nor reads is dropped: say so, once per variable.
+    # BB_UNFORWARDED_WARNED tells bb-submit (which has a wider known set) that this check has run. Never a refusal.
+    while IFS= read -r v; do
+      case $v in
+        BB_OWNER|BB_HOST|BB_HOSTS_CMD|BB_TEMPER_HOSTS|BB_SUBMIT|BB_AGENT|BB_LANE|BB_PR|BB_DEDUP|BB_QUEUE|BB_PG_ISOLATE) ;;
+        BB_SSH_KEY|BB_SSH_PROXY|BB_KNOWN_HOSTS|BB_UNFORWARDED_WARNED) ;;
+        BB_SESSION|BB_SESSION_*) ;;
+        BB_*) echo "bb-temper: warning: $v is set but is not forwarded to bb-build (dropped)" >&2 ;;
+      esac
+    done < <(compgen -e)
+    export BB_UNFORWARDED_WARNED=1
     SUBMIT=${BB_SUBMIT:-$HOME/.local/bin/bb-submit}
     err=$(mktemp); trap 'rm -f "$err"' EXIT; rc=0
     if [ -x "$SUBMIT" ]; then "$SUBMIT" "$HOST" "~/$CO" "$@" 2> "$err" || rc=$?  # bb-submit adds the caller's session to the ticket

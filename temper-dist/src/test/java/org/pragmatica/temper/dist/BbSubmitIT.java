@@ -398,6 +398,119 @@ class BbSubmitIT {
         assertThat(sshCalls()).isEmpty();
     }
 
+    /// BB_PG_ISOLATE=0 reaches bb-build on every path (#27: both tools dropped it, so a group ticket kept iso=1 and nothing said so).
+    /// Mutation: drop the forward in bb-submit, or in either bb-temper path, and the matching row goes red.
+    @Test
+    void submit_forwardsBbPgIsolate() throws Exception {
+        var run = submit(noAncestor("BB_PG_ISOLATE", "0"), TARGET, "~/work/co/x", "-B");
+
+        assertThat(run.rc()).as(run.err()).isZero();
+        assertThat(remoteCommand()).isEqualTo("BB_OWNER=t3 BB_PG_ISOLATE=0 ~/tools/bb-build ~/work/co/x -B");
+    }
+
+    @Test
+    void bbTemper_withoutBbSubmit_forwardsBbPgIsolate() throws Exception {
+        var run = bbTemper(env("BB_SUBMIT",
+                               dir.resolve("absent").toString(),
+                               "BB_PG_ISOLATE",
+                               "0"),
+                           "build",
+                           "t3-x",
+                           "-B");
+
+        assertThat(run.rc()).as(run.err()).isZero();
+        assertThat(sshCalls()).singleElement()
+                  .satisfies(call -> assertThat(call.get(7)).isEqualTo("BB_OWNER=t3 BB_PG_ISOLATE=0 ~/tools/bb-build ~/work/co/t3-x -B "));
+    }
+
+    @Test
+    void bbTemper_throughBbSubmit_forwardsBbPgIsolate() throws Exception {
+        var run = bbTemper(noAncestor("BB_SUBMIT", MacScripts.SUBMIT.toString(), "BB_PG_ISOLATE", "0"),
+                           "build",
+                           "t3-x",
+                           "-B");
+
+        assertThat(run.rc()).as(run.err()).isZero();
+        assertThat(sshCalls()).singleElement()
+                  .satisfies(call -> assertThat(call.getLast()).isEqualTo("BB_OWNER=t3 BB_PG_ISOLATE=0 ~/tools/bb-build ~/work/co/t3-x -B"));
+    }
+
+    @Test
+    void aMalformedBbPgIsolate_isRefused_beforeAnyConnection() throws Exception {
+        for (var value : List.of("no", "2", "00", "0;id")) {
+            var viaTemper = bbTemper(env("BB_PG_ISOLATE",
+                                         value,
+                                         "BB_SUBMIT",
+                                         dir.resolve("absent").toString()),
+                                     "build",
+                                     "t3-x");
+            var viaSubmit = submit(noAncestor("BB_PG_ISOLATE", value), TARGET, "work/co/x");
+
+            assertThat(viaTemper.rc()).as(value).isEqualTo(2);
+            assertThat(viaSubmit.rc()).as(value).isEqualTo(2);
+        }
+
+        assertThat(sshCalls()).isEmpty();
+    }
+
+    /// A BB_* variable that neither tool forwards or reads is named on stderr (one line each) and the build is queued all the
+    /// same; through bb-temper and bb-submit together it is named once. Mutation: drop the warning in either tool.
+    @Test
+    void anUnforwardedBbVariable_isNamed_andNeverBlocksTheBuild() throws Exception {
+        var viaSubmit = submit(noAncestor("BB_FOO", "1"), TARGET, "~/work/co/x");
+        var fallback = bbTemper(env("BB_SUBMIT",
+                                    dir.resolve("absent").toString(),
+                                    "BB_FOO",
+                                    "1"),
+                                "build",
+                                "t3-x");
+        var together = bbTemper(noAncestor("BB_SUBMIT", MacScripts.SUBMIT.toString(), "BB_FOO", "1"), "build", "t3-x");
+
+        assertThat(viaSubmit.rc()).as(viaSubmit.err()).isZero();
+        assertThat(viaSubmit.err()).contains("bb-submit: warning: BB_FOO is set but is not forwarded");
+        assertThat(fallback.rc()).as(fallback.err()).isZero();
+        assertThat(fallback.err()).contains("bb-temper: warning: BB_FOO is set but is not forwarded");
+        assertThat(together.rc()).as(together.err()).isZero();
+        assertThat(together.err()).containsOnlyOnce("BB_FOO is set but is not forwarded");
+        assertThat(sshCalls()).hasSize(3);
+    }
+
+    /// Everything either tool forwards or reads is quiet: no false positive in normal use.
+    @Test
+    void theVariablesTheToolsKnow_areNeverWarnedAbout() throws Exception {
+        var known = new LinkedHashMap<String, String>();
+        known.put("BB_AGENT", "a");
+        known.put("BB_LANE", "l");
+        known.put("BB_PR", "7");
+        known.put("BB_DEDUP", "0");
+        known.put("BB_QUEUE", "1");
+        known.put("BB_PG_ISOLATE", "0");
+        known.put("BB_SESSION", "lead1");
+        known.put("BB_SESSION_PID", "5");
+        known.put("BB_TEMPER_HOSTS", home.resolve(".config/bb-temper/hosts").toString());
+        known.put("BB_SSH_KEY", home + "/" + TestHosts.KEY);
+
+        var viaSubmit = submit(withAll(noAncestor(), known), TARGET, "~/work/co/x");
+        var viaTemper = bbTemper(withAll(noAncestor(), known, Map.of("BB_SUBMIT", MacScripts.SUBMIT.toString())), "build", "t3-x");
+        var fallback = bbTemper(withAll(env(), known, Map.of("BB_SUBMIT", dir.resolve("absent").toString(), "BB_HOSTS_CMD", "exit 1")), "build", "t3-x");
+
+        assertThat(viaSubmit.rc()).as(viaSubmit.err()).isZero();
+        assertThat(viaTemper.rc()).as(viaTemper.err()).isZero();
+        assertThat(fallback.rc()).as(fallback.err()).isZero();
+        assertThat(viaSubmit.err()).doesNotContain("warning");
+        assertThat(viaTemper.err()).doesNotContain("warning");
+        assertThat(fallback.err()).doesNotContain("warning");
+    }
+
+    @SafeVarargs
+    private static Map<String, String> withAll(Map<String, String> base, Map<String, String>... more) {
+        var all = new LinkedHashMap<>(base);
+        for (var m : more) {
+            all.putAll(m);
+        }
+        return all;
+    }
+
     /// bb-build exit 7: an identical build is running elsewhere and nothing was queued here. The caller is told on
     /// stdout which ticket it was deduped onto, the exit code stays 7, and the checkout is marked. The remote side runs
     /// for real (ssh.exec) against a stand-in `~/tools/bb-build`, so the mark is written and read back.
