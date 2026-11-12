@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+# bb-tickets -- the one reader of bb queue tickets (T3 contract C3). READ-ONLY: no lock, no mkdir, no write.
+# Installed as ~/tools/bb-tickets by ops/bb/install-bb-fields.sh; reached by the worker-launch and kiln-scan `tickets` verbs.
+#
+# Usage: bb-tickets          (no arguments; any argument is exit 64 and nothing on stdout)
+# Queue root: ${BB_TEST_QUEUE_ROOT:-$HOME/work/queue}, the lib's own variable. Clock: ${BB_TICKETS_NOW:-now} (tests only).
+#
+# Lists, in this order: every regular file of running/, then of waiting/, each by `created` (numeric; a missing or
+# non-numeric one first, then by id), at most 500 each; then done/ files whose `ended` (else the file's mtime) is at or
+# after now-86400, newest first, at most 200. A name that is not a ticket id ^[A-Za-z0-9._-]{1,64}$ is skipped.
+# Per ticket every line `^[a-z_]{1,32}=` is a field, the last value of a key wins (as field() in bb-queue-lib.sh does); a
+# value over 4096 bytes or holding a byte outside 0x20-0x7e is dropped and its key listed in "dropped".
+# progressAt (RUNNING tickets only, additive, a string like every field): the newest mtime, epoch s, of any
+# <co>/**/target/surefire-reports/TEST-*.xml or <co>/**/target/failsafe-reports/TEST-*.xml, `co` the ticket's checkout field,
+# never older than the ticket's `started`; absent when the ticket has no usable `co` or no such report exists (the reader
+# then falls back to `started`). One bounded `find` per running ticket (.git, .m2-local, .bb and node_modules pruned, depth
+# 8, 20 s). Build-log size or mtime is NOT progress (a stuck build once wrote a 292 MB log of one repeated WARN line), and
+# maven's log lines carry no timestamp, so a reactor-module or test-class start line cannot be dated without writing a
+# marker, which this script may not do: the log is never read. Consequence: a single test class that runs longer than the
+# stall limit without a report looks stalled until its report is written.
+# waiter: "alive" when a process of this user has the argument text `bb-build __run <id>` (the test of waiter_alive()), else
+# "gone"; null for done tickets. A ticket that vanishes mid-listing is skipped (the next collection sees it).
+#
+# Output, JSON lines on stdout:
+#   {"v":1,"ticket":"<id>","dir":"running|waiting|done","waiter":"alive|gone"|null,"fields":{...},"dropped":[...]}
+#   {"v":1,"end":true,"count":<ticket lines>,"queue":"present|absent","at":<epoch s>}
+# The trailer is the proof of completeness. The output is assembled before the first byte is written, so a failure prints
+# nothing. Exit 0; 64 usage; 69 no pgrep; 74 a directory that exists but cannot be read, or the process table cannot be read.
+# bash and GNU tools (find -printf, pgrep -a, sort, awk).
+set -euo pipefail
+export LC_ALL=C
+[ "$#" -eq 0 ] || { echo "usage: bb-tickets (no arguments)" >&2; exit 64; }
+
+Q=${BB_TEST_QUEUE_ROOT:-$HOME/work/queue}
+NOW=${BB_TICKETS_NOW:-$(date +%s)}
+CUTOFF=$((NOW - 86400))
+
+if [ ! -e "$Q" ]; then
+  printf '{"v":1,"end":true,"count":0,"queue":"absent","at":%s}\n' "$NOW"
+  exit 0
+fi
+[ -d "$Q" ] || { echo "bb-tickets: $Q is not a directory" >&2; exit 74; }
+
+LIST=""
+for sub in running waiting done; do
+  [ -e "$Q/$sub" ] || continue
+  [ -d "$Q/$sub" ] && [ -r "$Q/$sub" ] && [ -x "$Q/$sub" ] || { echo "bb-tickets: cannot read $Q/$sub" >&2; exit 74; }
+  # one line per regular file: <dir> TAB <name> TAB <mtime>; -name drops every name with a byte outside the id alphabet
+  # (a newline included), awk drops the over-long ones
+  RAW=$(find "$Q/$sub" -maxdepth 1 -type f ! -name '*[!A-Za-z0-9._-]*' -printf "$sub\\t%f\\t%T@\\n") \
+    || { echo "bb-tickets: cannot list $Q/$sub" >&2; exit 74; }
+  [ -z "$RAW" ] || LIST+=$RAW$'\n'
+done
+
+command -v pgrep > /dev/null 2>&1 || { echo "bb-tickets: pgrep not found" >&2; exit 69; }
+set +e
+PG=$(pgrep -u "${USER:-$(id -un)}" -fa -- 'bb-build __run ')
+PGRC=$?
+set -e
+[ "$PGRC" -le 1 ] || { echo "bb-tickets: cannot read the process table (pgrep rc $PGRC)" >&2; exit 74; }
+
+BODY=$(awk -v Q="$Q" -v CUTOFF="$CUTOFF" '
+function esc(v,   o, i, c, n) {
+  if (v !~ /[\\"]/) return v
+  o = ""; n = length(v)
+  for (i = 1; i <= n; i++) { c = substr(v, i, 1); if (c == "\\" || c == "\"") o = o "\\"; o = o c }
+  return o
+}
+# the newest report mtime (epoch s) under a checkout, "" when none; the path is single-quoted for sh
+function newest_report(co,   q, cmd, t) {
+  if (co !~ /^\/[^\n]*$/ || co ~ /\.\./) return ""
+  q = co; gsub(/\047/, "\047\\\047\047", q); q = "\047" q "\047"
+  cmd = "timeout 20 find " q " -maxdepth 8 \\( -name .git -o -name .m2-local -o -name .bb -o -name node_modules \\) -prune -o -type f -name \047TEST-*.xml\047 \\( -path \047*/target/surefire-reports/*\047 -o -path \047*/target/failsafe-reports/*\047 \\) -printf \047%T@\\n\047 2>/dev/null | sort -n | tail -n 1"
+  t = ""
+  cmd | getline t
+  close(cmd)
+  return (t ~ /^[0-9]+(\.[0-9]+)?$/) ? int(t) : ""
+}
+function pad(n, w) { return sprintf("%0" w "d", n) }
+BEGIN { FS = "\t"; mode = 0 }
+FNR == 1 { mode++ }
+mode == 1 {                      # the process table: `<pid> <cmdline>`; remember the id after `bb-build __run `
+  p = index($0, "bb-build __run ")
+  if (p > 0) { rest = substr($0, p + 15); sub(/ .*/, "", rest); alive[rest] = 1 }
+  next
+}
+mode == 2 && NF == 3 && length($2) <= 64 {
+  dir = $1; id = $2; mt = int($3)
+  path = Q "/" dir "/" id
+  delete val; delete drop; nk = 0; nd = 0; ok = 1; first = 1
+  delete order
+  while ((r = (getline line < path)) > 0) {
+    e = index(line, "=")
+    if (e < 2) continue
+    k = substr(line, 1, e - 1)
+    if (k !~ /^[a-z_]+$/ || length(k) > 32) continue
+    if (!(k in val)) order[++nk] = k
+    val[k] = substr(line, e + 1)
+  }
+  rc = r
+  close(path)
+  if (rc < 0) next              # vanished (a grant or a reap moved it) or unreadable: skipped
+  if (dir == "running" && ("co" in val) && !("progressAt" in val)) {
+    pa = newest_report(val["co"])
+    if (pa != "") {
+      if (("started" in val) && val["started"] ~ /^[0-9]+$/ && length(val["started"]) <= 12 && val["started"] + 0 > pa) pa = val["started"] + 0
+      val["progressAt"] = pa; order[++nk] = "progressAt"
+    }
+  }
+  fj = ""; dj = ""
+  for (i = 1; i <= nk; i++) {
+    k = order[i]; v = val[k]
+    if (length(v) > 4096 || v ~ /[^ -~]/) { dj = dj (dj == "" ? "" : ",") "\"" k "\""; continue }
+    fj = fj (fj == "" ? "" : ",") "\"" k "\":\"" esc(v) "\""
+  }
+  if (dir == "done") {
+    w = "null"
+    en = ("ended" in val && val["ended"] ~ /^[0-9]+$/ && length(val["ended"]) <= 12) ? val["ended"] + 0 : mt
+    if (en < CUTOFF) next
+    sk = pad(999999999999 - en, 12) "\t" id
+    cls = 2
+  } else {
+    w = (id in alive) ? "\"alive\"" : "\"gone\""
+    cr = ("created" in val && val["created"] ~ /^[0-9]+$/ && length(val["created"]) <= 24) ? val["created"] : ""
+    sk = (cr == "" ? "0" : "1" sprintf("%24s", cr)) "\t" id
+    gsub(/ /, "0", sk)
+    cls = (dir == "running") ? 0 : 1
+  }
+  printf "%d\t%s\t{\"v\":1,\"ticket\":\"%s\",\"dir\":\"%s\",\"waiter\":%s,\"fields\":{%s},\"dropped\":[%s]}\n", cls, sk, id, dir, w, fj, dj
+}' <(printf '%s\n' "$PG") <(printf '%s\n' "$LIST") \
+  | sort -t "$(printf '\t')" -k1,1n -k2,2 -k3,3 \
+  | awk -F '\t' '{ c[$1]++; if (($1 < 2 && c[$1] <= 500) || ($1 == 2 && c[$1] <= 200)) { sub(/^[^\t]*\t[^\t]*\t[^\t]*\t/, ""); print } }')
+
+COUNT=0
+if [ -n "$BODY" ]; then
+  COUNT=$(printf '%s\n' "$BODY" | wc -l)
+  printf '%s\n' "$BODY"
+fi
+printf '{"v":1,"end":true,"count":%s,"queue":"present","at":%s}\n' "$COUNT" "$NOW"

@@ -191,16 +191,16 @@ class BbTicketsIT {
         content.writeBytes("id=bad\nok=1\nok=2\ntabbed=a\tb\ncr=x\r\nhigh=caf".getBytes(StandardCharsets.UTF_8));
         content.writeBytes(new byte[]{(byte) 0xc3, (byte) 0xa9, '\n'});
         content.writeBytes(("long=" + "a".repeat(4097) + "\nedge=" + "b".repeat(4096) + "\nquote=say \"hi\" \\ done\n").getBytes(StandardCharsets.UTF_8));
-        content.writeBytes("del=a\u007fb\nlatin=\u0001x\nnot a key=1\nUPPER=1\nlast=first\nlast=\u0002\n".getBytes(StandardCharsets.UTF_8));
+        content.writeBytes("del=a\u007fb\nlatin=\u0001x\nnot a key=1\n9digit=1\nrequireDocker=0\nlast=first\nlast=\u0002\n".getBytes(StandardCharsets.UTF_8));
         ticketBytes("running", "bad", content.toByteArray());
         var out = list();
         var json = line(out, "bad");
 
-        assertThat(json).contains("\"ok\":\"2\"").doesNotContain("\"ok\":\"1\"");
+        assertThat(json).contains("\"requireDocker\":\"0\"").contains("\"ok\":\"2\"").doesNotContain("\"ok\":\"1\"");
         assertThat(json).contains("\"edge\":\"" + "b".repeat(4096) + "\"")
                   .contains("\"quote\":\"say \\\"hi\\\" \\\\ done\"");
         assertThat(json).contains("\"dropped\":[\"tabbed\",\"cr\",\"high\",\"long\",\"del\",\"latin\",\"last\"]");
-        assertThat(json).doesNotContain("not a key").doesNotContain("UPPER").doesNotContain("\"last\":");
+        assertThat(json).doesNotContain("not a key").doesNotContain("9digit").doesNotContain("\"last\":");
         assertThat(out.stdout().chars().allMatch(c -> c == '\n' || (c >= 0x20 && c < 0x7f))).as("pure printable ASCII on the wire")
                   .isTrue();
     }

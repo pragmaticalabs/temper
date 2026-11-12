@@ -37,9 +37,20 @@ jobs:
           key: m2-${{ runner.os }}-${{ hashFiles('**/pom.xml') }}
           restore-keys: m2-${{ runner.os }}-
 
-      # Tests use Testcontainers (PostgreSQL, the runner image); the hosted runner provides Docker.
+      # Tests use Testcontainers (PostgreSQL, the runner image); the hosted runner provides Docker. The fixtures SKIP
+      # their tests when Docker is absent, so absence must fail the job here, never pass it by silence (#23).
+      - name: Docker is reachable
+        run: docker info --format '{{.ServerVersion}}'
+
       - name: Build and test
         run: mvn -B -ntp install
+
+      # The canary reads the reports the build just wrote: no report without a testcase, no skip for want of Docker.
+      # Its self-test pins that it goes red on each of those.
+      - name: Docker canary (no silent zero, no docker skip)
+        run: |
+          ops/ci/test-docker-canary.sh
+          ops/ci/docker-canary.sh .
 
       # temper-acceptance is built only with -Pacceptance (root pom), which every deploy build uses (the deploy runbook, step 1)
       # but the step above does not: compile its main and test sources against the modules just installed, so an API
