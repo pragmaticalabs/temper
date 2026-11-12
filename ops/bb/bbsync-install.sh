@@ -11,7 +11,9 @@ R=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)
 cd "$R" && git fetch -q origin
 git merge-base --is-ancestor 482193892029f5be9315280e4e51eb30c18c68a2 origin/main || { echo "REFUSED: #17 merge 48219389 not in origin/main" >&2; exit 1; }
 git diff --quiet 48219389 origin/main -- ops/bb/install-bb-fields.sh || echo "NOTE: install-bb-fields.sh changed on main since #17; installing main's pinned set" >&2
-W=~/temper-wt/bbsync-deploy; [ -e "$W" ] && git worktree remove --force "$W"
+W=~/temper-wt/bbsync-deploy; [ "$R" -ef "$W" ] && { echo "REFUSED: run from a tree other than $W (it is replaced)" >&2; exit 2; }
+[ -e "$W" ] && git worktree remove --force "$W"
+git worktree prune
 git worktree add -q --detach "$W" origin/main
 echo "main=$(git -C "$W" rev-parse --short HEAD)"
 rc=0; bash "$W/ops/bb/install-bb-fields.sh" "$@" || rc=$?
