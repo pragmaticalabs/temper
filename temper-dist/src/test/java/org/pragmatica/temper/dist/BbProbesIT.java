@@ -28,7 +28,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 /// Probes (each: break it, the named test goes red, revert): loosen the hook regex ->
 /// [#theHook_rejectsEveryRefOutsideProbesOwnerName]; age by commit date instead of reflog creation ->
 /// [#theReaper_agesByReflogCreation_notByCommitDate]; age by the first reflog entry -> [#theReaper_ageIsTheLastUpdate_aRePushRenewsIt]; prune=now ->
-/// [#theReaper_deletesARefWhoseReflogIsOlderThan7Days_andItsObjects]; resolve probes/ refs mirror-first -> [#aProbesRef_isNotShadowedByAMirrorBranchOfTheSameName]; let the reaper walk every ref instead of refs/probes ->
+/// [#theReaper_keepsTheFreshObjectsOfADeletedRef_forTheGcMargin]; resolve probes/ refs mirror-first -> [#aProbesRef_isNotShadowedByAMirrorBranchOfTheSameName]; let the reaper walk every ref instead of refs/probes ->
 /// [#theReaper_touchesOnlyRefsProbes]; drop the reaper's path guard -> [#theReaper_refusesAnyPathButProbesGit]; make the checkout
 /// resolve only in the mirror -> [#aShaOnlyInProbes_isCheckedOut_bySha_andByRefName]; fetch probes into refs/heads instead of
 /// refs/remotes -> [#bbMutatePreflight_holds_forAProbesCommit]; keep a half-made dir -> [#anUnknownRef_fails_andLeavesNoCheckoutDir];
@@ -399,14 +399,25 @@ class BbProbesIT {
         var sha = pushNew("refs/probes/s1/old", "2026-11-11T00:00:00Z");
 
         ageReflog("refs/probes/s1/old", 8 * DAY);
+        ageObjects(2 * 3600L);
         var run = ok(reap());
 
         assertThat(run.stdout()).contains("deleted refs/probes/s1/old " + sha);
         assertThat(refSha(probes, "refs/probes/s1/old")).isNull();
-        assertThat(git(probes, "cat-file", "-e", sha + "^{commit}").rc()).as("gc --prune=1.hour.ago keeps a fresh object").isZero();
-        ageObjects(2 * 3600L);
+        assertThat(git(probes, "cat-file", "-e", sha + "^{commit}").rc()).as("an object older than the prune margin is gone").isNotZero();
+        ok(git(probes, "fsck", "--no-dangling"));
+    }
+
+    @Test
+    void theReaper_keepsTheFreshObjectsOfADeletedRef_forTheGcMargin() throws Exception {
+        ok(init());
+        var sha = pushNew("refs/probes/s1/old", "2026-11-11T00:00:00Z");
+
+        ageReflog("refs/probes/s1/old", 8 * DAY);
         ok(reap());
-        assertThat(git(probes, "cat-file", "-e", sha + "^{commit}").rc()).as("an object older than the margin is pruned").isNotZero();
+
+        assertThat(refSha(probes, "refs/probes/s1/old")).isNull();
+        assertThat(git(probes, "cat-file", "-e", sha + "^{commit}").rc()).as("gc --prune=1.hour.ago keeps an object younger than 1 h").isZero();
         ok(git(probes, "fsck", "--no-dangling"));
     }
 
