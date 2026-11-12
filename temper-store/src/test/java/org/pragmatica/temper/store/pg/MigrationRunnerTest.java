@@ -126,6 +126,60 @@ class MigrationRunnerTest {
         assertRefused(MigrationRunner.pending(migrations(1, 2, 3), applied(1, 2, 3, 5, 17)), StoreError.MigrationNotInBuild.FACTORY.apply(5));
     }
 
+    /// The public-history squash d3140d89 edited comments of shipped V5; a database that applied the old bytes
+    /// carries the legacy sha, which is accepted (and not queued for re-apply), the current sha is accepted, any other is tampering.
+    @Test
+    void pending_acceptsTheLegacyShaOfAShippedMigration() {
+        var current = loadedShipped(5);
+        var applied = Map.of(5, "50ff0f603a1f592438d87a16b436d792f3daf45300be6236cca08415303cd7a9");
+
+        assertThat(MigrationRunner.pending(List.of(current), applied).unwrap()).isEmpty();
+    }
+
+    /// The live pre-squash shas, written out independently of MigrationRunner.LEGACY_SHA256, so dropping or editing any
+    /// version's entry there turns this red (deriving the expectation from the list itself would prove nothing).
+    private static final Map<Integer, String> PRE_SQUASH_SHA256 = Map.of(
+        5, "50ff0f603a1f592438d87a16b436d792f3daf45300be6236cca08415303cd7a9",
+        13, "271efc1b59ac70f2eeaca8096c12b26b8b2923235cd16cfdd60e355d29d710e3",
+        14, "f26bf63051ef394059305168de23a55bcb36bfb5b16aaf869db60fd370ea7c58",
+        15, "8c2f1beb00dd0d7b8f6273b79fa0a03e05fef422b290e0ef718ea8eb1534c3fd",
+        16, "e6e38a255b4d4b3285816c6e1e6281d36c47796485eee2671a425e1a7df0f1bd",
+        17, "4d78ed8372083e3ada3a5b7ecd59951b60bfcb58559df81dccfe773aae1b1358");
+
+    @Test
+    void pending_acceptsThePreSquashShaOfEveryEditedMigration() {
+        PRE_SQUASH_SHA256.forEach((version, sha) -> assertThat(MigrationRunner.pending(List.of(loadedShipped(version)), Map.of(version, sha)).unwrap())
+                                                         .as("V%d pre-squash sha", version)
+                                                         .isEmpty());
+        assertThat(MigrationRunner.LEGACY_SHA256).isEqualTo(PRE_SQUASH_SHA256);
+    }
+
+    @Test
+    void pending_acceptsTheCurrentShaOfAShippedMigration() {
+        var current = loadedShipped(5);
+
+        assertThat(MigrationRunner.pending(List.of(current), Map.of(5, current.sha256())).unwrap()).isEmpty();
+    }
+
+    @Test
+    void pending_isMigrationTampered_whenTheShaIsNeitherCurrentNorLegacy() {
+        var current = loadedShipped(5);
+
+        assertRefused(MigrationRunner.pending(List.of(current), Map.of(5, "0".repeat(64))), StoreError.MigrationTampered.FACTORY.apply(5));
+    }
+
+    /// A legacy sha of one version is no excuse for another version.
+    @Test
+    void pending_isMigrationTampered_whenALegacyShaIsAppliedToAnotherVersion() {
+        var other = loadedShipped(1);
+
+        assertRefused(MigrationRunner.pending(List.of(other), Map.of(1, "50ff0f603a1f592438d87a16b436d792f3daf45300be6236cca08415303cd7a9")), StoreError.MigrationTampered.FACTORY.apply(1));
+    }
+
+    private static MigrationRunner.Loaded loadedShipped(int version) {
+        return MigrationRunner.load(MigrationRunner.MIGRATIONS.get(version - 1)).unwrap();
+    }
+
     /// Synthetic migrations whose sha256 is `sha<version>`, matching [#applied].
     private static List<MigrationRunner.Loaded> migrations(int... versions) {
         return IntStream.of(versions)

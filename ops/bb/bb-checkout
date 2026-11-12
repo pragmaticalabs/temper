@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# bb-checkout <name> <sha-or-ref> -- isolated pragmatica checkout at ~/work/co/<name>, own .m2-local.
+# Fetches the mirror from GitHub first, so any pushed SHA resolves. Refuses to reuse an existing dir.
+# Probe commits (probes-init.sh): if ~/work/probes.git exists its refs/probes/* are fetched into the checkout as
+# refs/remotes/probes/*, so <ref> may also be a SHA that exists only there or probes/<owner>/<name>. A <ref> of the form
+# probes/<owner>/<name> resolves ONLY as refs/remotes/probes/<owner>/<name> in the clone (a public branch or tag of that name in
+# the mirror never shadows it); any other <ref> is tried in the mirror first; a ref that resolves in neither makes the run fail and leaves no checkout dir. At most once per 24 h a best-effort
+# bb-probe-reap runs afterwards; its failure never fails the checkout.
+set -euo pipefail
+[ $# -eq 2 ] || { echo "usage: bb-checkout <name> <sha-or-ref>" >&2; exit 2; }
+NAME=$1; REF=$2
+# Ownership guard (2026-09-27, after a cross-agent build into another agent's checkout):
+# every caller declares BB_OWNER (its agent prefix, e.g. s5, v1552); a checkout belongs to the
+# owner whose "<owner>-" prefix its directory name carries. No match -> refuse, before any write.
+: "${BB_OWNER:?refusing: set BB_OWNER=<your agent prefix>; checkout names must start with <prefix>-}"
+case "$BB_OWNER" in *[!A-Za-z0-9_]*|"") echo "refusing: BB_OWNER must be [A-Za-z0-9_]+" >&2; exit 4;; esac
+case "$NAME" in "$BB_OWNER"-*) ;; *) echo "refusing: checkout name must start with $BB_OWNER-" >&2; exit 4;; esac
+MIRROR=$HOME/work/pragmatica.git
+CO=$HOME/work/co/$NAME
+[ -e "$CO" ] && { echo "refusing: $CO exists (one dir per agent/SHA; remove it yourself if it is yours)" >&2; exit 3; }
+git -C "$MIRROR" fetch -q --prune origin
+PROBES=$HOME/work/probes.git
+MADE=
+# a failed run removes only the dir this run created
+trap 'rc=$?; [ "$rc" = 0 ] || [ -z "$MADE" ] || rm -rf "$CO"' EXIT
+PROBE_REF=
+case $REF in probes/*/*) PROBE_REF=$REF ;; esac
+SHA=
+[ -n "$PROBE_REF" ] || SHA=$(git -C "$MIRROR" rev-parse --verify "$REF^{commit}" 2> /dev/null) || SHA=
+[ -n "$SHA" ] || [ -d "$PROBES" ] || { echo "refusing: $REF is not in the mirror (and there is no $PROBES)" >&2; exit 5; }
+mkdir -p "$HOME/work/co"
+git clone -q --no-checkout "$MIRROR" "$CO"
+MADE=1
+if [ -d "$PROBES" ]; then
+  git -C "$CO" remote add probes "$PROBES"
+  if ! git -C "$CO" fetch -q probes '+refs/probes/*:refs/remotes/probes/*'; then
+    [ -n "$SHA" ] || { echo "refusing: $REF is not in the mirror and fetching $PROBES failed" >&2; exit 5; }
+    echo "warning: fetching $PROBES failed; continuing with the mirror's $REF" >&2
+  fi
+fi
+if [ -z "$SHA" ]; then
+  FULL=$REF; [ -z "$PROBE_REF" ] || FULL=refs/remotes/$PROBE_REF
+  SHA=$(git -C "$CO" rev-parse --verify "$FULL^{commit}" 2> /dev/null) \
+    || { echo "refusing: $REF resolves neither in the mirror nor in $PROBES (nothing created)" >&2; exit 5; }
+fi
+git -C "$CO" checkout -q --detach "$SHA"
+printf '%s\n' '-T 1C' '--no-transfer-progress' "-Dmaven.repo.local=$CO/.m2-local" > "$CO/.mvn/maven.config"
+git -C "$CO" update-index --skip-worktree .mvn/maven.config
+printf '%s\n' /.bb/ /.m2-local/ >> "$CO/.git/info/exclude"
+# Seed third-party deps by COPY (not hardlink: install would write through a link into the seed).
+if [ -d "$HOME/work/m2-seed" ]; then cp -a "$HOME/work/m2-seed" "$CO/.m2-local"; fi
+echo "checkout=$CO sha=$SHA"
+cat "$CO/.mvn/maven.config"
+# Best-effort probes reaper, at most once per 24 h per host (stamp is touched first: a failing reaper is not retried per checkout).
+REAP=$(dirname "$0")/bb-probe-reap
+STAMP=$HOME/work/.probes-reap.stamp
+if [ -d "$PROBES" ] && [ -x "$REAP" ] && { [ ! -e "$STAMP" ] || [ -n "$(find "$STAMP" -mmin +1440 2> /dev/null)" ]; }; then
+  touch "$STAMP" 2> /dev/null || true
+  "$REAP" >&2 || echo "warning: bb-probe-reap failed (ignored)" >&2
+fi
