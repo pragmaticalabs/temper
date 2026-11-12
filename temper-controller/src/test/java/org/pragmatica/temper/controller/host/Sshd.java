@@ -30,7 +30,7 @@ import org.testcontainers.images.builder.ImageFromDockerfile;
 
 /// A real `sshd` in a container (alpine + openssh-server, host keys generated at start) and a [ProcessRunner] that
 /// runs the real `ssh` client against it: the link's argv is kept whole, only pointed at the container (`-p <port>`)
-/// and at this test's `known_hosts` and key. Every spawn is timed ([#spawned]). Needs docker and an `ssh` client;
+/// (`container.getHost()`, the gateway inside a bb netns, not `localhost`) and at this test's `known_hosts` and key. Every spawn is timed ([#spawned]). Needs docker and an `ssh` client;
 /// without docker the test is skipped (reported as skipped, never as passed).
 final class Sshd implements AutoCloseable {
     /// [LinkHarness]'s host as configured; [#pointed] redirects its argv to the container.
@@ -102,7 +102,7 @@ final class Sshd implements AutoCloseable {
     /// `known_hosts` pinning `publicKey` (K1) for the container's address; the container answers with its own key (K2).
     void pin(Path publicKey) throws IOException {
         var parts = Files.readString(publicKey).trim().split(" ");
-        Files.writeString(knownHosts, "[localhost]:" + port() + " " + parts[0] + " " + parts[1] + "\n");
+        Files.writeString(knownHosts, "[" + container.getHost() + "]:" + port() + " " + parts[0] + " " + parts[1] + "\n");
     }
 
     /// The link's argv, pointed at the container.
@@ -119,7 +119,7 @@ final class Sshd implements AutoCloseable {
             } else if (arg.contains("@")) {
                 out.add("-p");
                 out.add(String.valueOf(port()));
-                out.add(arg);
+                out.add(arg.substring(0, arg.indexOf('@') + 1) + container.getHost());
             } else {
                 out.add(arg);
             }
