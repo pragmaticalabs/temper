@@ -33,4 +33,5 @@ GW=$(docker network inspect -f '{{(index .IPAM.Config 0).Gateway}}' "$NET" 2> /d
 [ -n "$GW" ] || { echo "bb-netns-run: docker socket present but no gateway of network '$NET' (docker network inspect failed): refusing to run without docker" >&2; exit 3; }
 SG=$(stat -c %g "$SOCK") || { echo "bb-netns-run: cannot stat $SOCK" >&2; exit 3; }
 ARGS+=(-v "$SOCK:/var/run/docker.sock" --group-add "$SG" -e "TESTCONTAINERS_HOST_OVERRIDE=$GW")
-CANARY='docker version --format {{.Server.Version}} > /dev/null 2>&1 || { echo "bb-netns-run: docker unreachable inside netns" >&2; exit 97; }; exec "$@"'exec docker run "${ARGS[@]}" "$IMG" /usr/bin/bash -c "$CANARY" bb-netns "$MVN" "$@"
+CANARY='docker version --format {{.Server.Version}} > /dev/null 2>&1 || { echo "bb-netns-run: docker unreachable inside netns" >&2; exit 97; }; exec "$@"'
+exec docker run "${ARGS[@]}" "$IMG" /usr/bin/bash -c "$CANARY" bb-netns "$MVN" "$@"
