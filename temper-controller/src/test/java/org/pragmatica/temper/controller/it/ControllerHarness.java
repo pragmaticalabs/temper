@@ -34,6 +34,7 @@ import org.pragmatica.temper.controller.fake.FakeWorker;
 import org.pragmatica.temper.controller.host.LinkTiming;
 import org.pragmatica.temper.controller.http.BearerToken;
 import org.pragmatica.temper.controller.http.Credentials;
+import org.pragmatica.temper.controller.submit.GitError;
 import org.pragmatica.temper.controller.submit.GitRemote;
 import org.pragmatica.temper.controller.submit.Mirror;
 import org.pragmatica.temper.controller.submit.PullNumber;
@@ -93,6 +94,8 @@ final class ControllerHarness implements AutoCloseable {
     final Map<String, String> refs = new ConcurrentHashMap<>(Map.of("main", SHA_A));
     /// Shas the fake mirror treats as ancestors of a branch's tip (a lane checkpoint's `pushedSha`), by branch.
     final Map<String, Set<String>> onBranch = new ConcurrentHashMap<>();
+    /// While set, the fake mirror's `branchContains` fails as a broken mirror or unreachable origin does (a [GitError]).
+    volatile boolean mirrorDown;
     final Store store;
     final FakeSsh ssh;
     final Controller.Running running;
@@ -151,6 +154,24 @@ final class ControllerHarness implements AutoCloseable {
              List.of(),
              Duration.ofSeconds(600),
              TIMING);
+    }
+
+    /// With a host, reading time from `clock`, and `[fleet] laneStaleMin` as `laneStaleMin` (lane registry `stale`).
+    ControllerHarness(TimeSpan pollWait, Supplier<Instant> clock, int laneStaleMin) throws Exception {
+        this(Pg.freshStore(),
+             true,
+             true,
+             pollWait,
+             UnaryOperator.identity(),
+             clock,
+             none(),
+             VERSION,
+             UnaryOperator.identity(),
+             List.of(),
+             Duration.ofSeconds(600),
+             TIMING,
+             _ -> none(),
+             laneStaleMin);
     }
 
     /// With a host; the controller works on `seen` of the fresh store ([#store] stays the store itself) and reads its
@@ -284,6 +305,36 @@ final class ControllerHarness implements AutoCloseable {
                               Duration hostLost,
                               LinkTiming timing,
                               Fn1<Option<TicketTransport>, String> transports) throws Exception {
+        this(store,
+             ownsStore,
+             withHost,
+             pollWait,
+             seen,
+             clock,
+             git,
+             version,
+             host,
+             more,
+             hostLost,
+             timing,
+             transports,
+             ControllerConfig.Fleet.DEFAULT_LANE_STALE_MIN);
+    }
+
+    private ControllerHarness(Store store,
+                              boolean ownsStore,
+                              boolean withHost,
+                              TimeSpan pollWait,
+                              UnaryOperator<Store> seen,
+                              Supplier<Instant> clock,
+                              Option<Controller.Git> git,
+                              String version,
+                              UnaryOperator<ControllerConfig.Host> host,
+                              List<ControllerConfig.Host> more,
+                              Duration hostLost,
+                              LinkTiming timing,
+                              Fn1<Option<TicketTransport>, String> transports,
+                              int laneStaleMin) throws Exception {
         this.store = store;
         this.ownsStore = ownsStore;
         this.pollWait = pollWait;
@@ -337,7 +388,16 @@ final class ControllerHarness implements AutoCloseable {
                                                                                           1L << 20,
                                                                                           0),
                                                        ControllerConfig.Retention.retention(Duration.ofHours(1)),
-                                                       ControllerConfig.PgDump.pgDump(LocalTime.of(3, 30), "temper-pg"));
+                                                       ControllerConfig.PgDump.pgDump(LocalTime.of(3, 30), "temper-pg"),
+                                                       ControllerConfig.Fleet.fleet(none(),
+                                                                                    evidenceRoot.resolveSibling("temper-state"),
+                                                                                    List.of(),
+                                                                                    none(),
+                                                                                    none(),
+                                                                                    ControllerConfig.Fleet.DEFAULT_QUEUE_WAIT_ALARM_MIN,
+                                                                                    ControllerConfig.Fleet.DEFAULT_PORTGROUP_STALL_ALARM_MIN,
+                                                                                    ControllerConfig.Fleet.DEFAULT_PORTGROUP_HELD_AGE_ALARM_MIN,
+                                                                                    laneStaleMin));
         GitRemote remote = ref -> refs.containsKey(ref.value())
                                   ? Sha.sha(refs.get(ref.value())).async()
                                   : Refusal.refusal(RefusalCode.SOURCE, "no such ref").promise();
@@ -364,10 +424,14 @@ final class ControllerHarness implements AutoCloseable {
 
             @Override
             public Promise<Boolean> branchContains(Ref branch, Sha sha) {
-                return Promise.success(sha.value()
-                                          .equals(refs.get(branch.value())) || onBranch.getOrDefault(branch.value(),
-                                                                                                     Set.of())
-                                                                                       .contains(sha.value()));
+                return mirrorDown
+                       ? GitError.Failed.FACTORY.apply("fetch",
+                                                       Causes.cause("origin unreachable"))
+                                                .promise()
+                       : Promise.success(sha.value()
+                                            .equals(refs.get(branch.value())) || onBranch.getOrDefault(branch.value(),
+                                                                                                       Set.of())
+                                                                                         .contains(sha.value()));
             }
         };
         var tree = new TreeReader() {

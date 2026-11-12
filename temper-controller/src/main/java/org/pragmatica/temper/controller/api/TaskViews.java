@@ -8,6 +8,7 @@ import org.pragmatica.lang.Option;
 import org.pragmatica.temper.controller.task.ClaimTask;
 import org.pragmatica.temper.domain.model.JobId;
 import org.pragmatica.temper.domain.model.Sha;
+import org.pragmatica.temper.domain.task.LeaseTerms;
 import org.pragmatica.temper.domain.task.Stage;
 import org.pragmatica.temper.domain.task.Status;
 import org.pragmatica.temper.domain.task.TaskId;

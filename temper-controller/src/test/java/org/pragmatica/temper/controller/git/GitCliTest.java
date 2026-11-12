@@ -137,6 +137,59 @@ class GitCliTest {
                       .isFalse();
         }
 
+        private String commitOnLane(String content) throws Exception {
+            Files.writeString(origin.resolve("lane.txt"), content);
+            run(origin, "git", "add", ".");
+            run(origin, "git", "commit", "-q", "-m", content.trim());
+
+            return run(origin, "git", "rev-parse", "HEAD");
+        }
+
+        /// Fail closed: with the mirror in place and origin unreachable, the fetch `branchTip` makes fails, and that is a
+        /// [GitError], never true and never false (a pushedSha that could not be checked is not accepted, nor refused as
+        /// "not on the branch"). Mutation: `.recover(_ -> true)` or `.recover(_ -> false)` on `branchContains` → red.
+        @Test
+        void branchContains_originUnreachable_failsGitError() throws Exception {
+            run(origin, "git", "checkout", "-q", "-b", "lane");
+            var laneTip = commitOnLane("lane one\n");
+            var lane = Ref.ref("lane").unwrap();
+
+            assertThat(git.branchContains(lane,
+                                          Sha.sha(laneTip).unwrap()).await().unwrap()).as("mirror built").isTrue();
+            Files.move(origin, dir.resolve("origin-gone"));
+            var result = git.branchContains(lane,
+                                            Sha.sha(laneTip).unwrap()).await();
+
+            assertThat(result.isFailure()).as("an unreachable origin is neither yes nor no").isTrue();
+            result.onFailure(cause -> assertThat(cause).isInstanceOf(GitError.class));
+        }
+
+        /// A force-push that drops the old tip: the object stays in the mirror, but it is no longer on the branch, so
+        /// the answer is false. Mutation: answer from object presence (`containedInBranch`-style cat-file only) → red.
+        @Test
+        void branchContains_forcePushedAwayTip_isFalseThoughTheObjectIsInTheMirror() throws Exception {
+            run(origin, "git", "checkout", "-q", "-b", "lane");
+            var keep = commitOnLane("lane one\n");
+            var dropped = commitOnLane("lane two\n");
+            var lane = Ref.ref("lane").unwrap();
+
+            assertThat(git.branchContains(lane,
+                                          Sha.sha(dropped).unwrap()).await().unwrap()).as("before").isTrue();
+            run(origin, "git", "checkout", "-q", "main");
+            run(origin, "git", "branch", "-f", "lane", keep);
+            assertThat(git.branchContains(lane,
+                                          Sha.sha(dropped).unwrap()).await().unwrap()).as("dropped tip").isFalse();
+            assertThat(git.branchContains(lane,
+                                          Sha.sha(keep).unwrap()).await().unwrap()).as("kept tip").isTrue();
+            run(dir,
+                "git",
+                "--git-dir",
+                dir.resolve("mirror.git").toString(),
+                "cat-file",
+                "-e",
+                dropped + "^{commit}");
+        }
+
         @Test
         void containedInBranch_afterFetch_trueForHeadFalseForUnknown() {
             git.fetch().await().unwrap();
@@ -666,6 +719,41 @@ class GitCliTest {
                                .await();
 
             assertThat(result.isFailure()).as("a broken mirror is a 503, not a source refusal").isTrue();
+            result.onFailure(cause -> assertThat(cause).isInstanceOf(GitError.class));
+        }
+
+        /// `merge-base --is-ancestor` exits 0/1 for yes/no; any other code (here 128) is a failed git call, never "no"
+        /// and never "yes". Mutation: `ancestry` answers `success(true)` or `success(false)` for the third branch → red.
+        @Test
+        void branchContains_failsGitError_mergeBaseOtherThanZeroOrOne() {
+            var tip = "b".repeat(40);
+            ProcessRunner runner = new ProcessRunner() {
+                @Override
+                public Promise<Completed> run(Command command) {
+                    var argv = command.argv();
+                    var rc = argv.contains("merge-base")
+                             ? 128
+                             : 0;
+                    var out = argv.contains("rev-parse")
+                              ? tip + "\n"
+                              : "";
+
+                    return Promise.success(Completed.completed("git", rc, out.getBytes(), "fatal".getBytes(), false));
+                }
+
+                @Override
+                public Result<Spawned> spawn(Command command) {
+                    return Causes.cause("unused").result();
+                }
+            };
+            var result = GitCli.gitCli(runner,
+                                       "origin",
+                                       Path.of("/m"))
+                               .branchContains(Ref.ref("lane").unwrap(),
+                                               Sha.sha("a".repeat(40)).unwrap())
+                               .await();
+
+            assertThat(result.isFailure()).isTrue();
             result.onFailure(cause -> assertThat(cause).isInstanceOf(GitError.class));
         }
 

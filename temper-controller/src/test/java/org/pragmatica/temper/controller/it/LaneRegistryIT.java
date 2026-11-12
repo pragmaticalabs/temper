@@ -150,6 +150,30 @@ class LaneRegistryIT {
         assertThat(fits.body()).contains("\"seq\":1");
     }
 
+    /// Fail closed (ruling d): a mirror that cannot answer (origin unreachable, broken mirror) is a 503 and stores
+    /// nothing; the same body is accepted as version 1 once the mirror answers. Mutation: `.recover(_ -> true)` on
+    /// `branchContains` or in the route, or treat the failure as "not on branch" (422) → the 503 assertion is red.
+    @Test
+    void checkpoint_mirrorCannotAnswer_is503_andNothingIsStored() throws Exception {
+        var task = inCode("lr-mirror-down");
+        var claim = claimed(task.id());
+
+        pushed(task, PUSHED);
+        harness.mirrorDown = true;
+        try {
+            var down = checkpoint(task.id(), lease(claim), checkpointBody(1, PUSHED, "while down"));
+
+            assertThat(down.status()).as(down.body()).isEqualTo(503);
+        } finally {
+            harness.mirrorDown = false;
+        }
+
+        var up = checkpoint(task.id(), lease(claim), checkpointBody(1, PUSHED, "after"));
+
+        assertThat(up.status()).as(up.body()).isEqualTo(201);
+        assertThat(up.body()).as("the failed call burned no version").contains("\"seq\":1");
+    }
+
     /// Mutation: have `checkpointed` skip `mirror.branchContains` → the off-branch case answers 201.
     @Test
     void checkpoint_shaNotOnTheTaskBranch_is422_aShaOnIt_isStoredAsTheNextVersion() throws Exception {
