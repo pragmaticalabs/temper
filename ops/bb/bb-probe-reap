@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# bb-probe-reap -- deletes the old refs of the per-host probes repo ~/work/probes.git (see probes-init.sh), then
+# `git gc --prune=1.hour.ago` so their objects go too.
+#
+# A refs/probes/* ref is deleted when its LAST UPDATE time (the newest reflog entry: the time of the last push) is older than
+# TTL_DAYS, so re-pushing an existing name renews it. Never the commit date: a mutation of an old base commit is a brand-new
+# ref and must survive. A ref without a reflog is kept, with a
+# warning (its age is unknown). Output: `deleted <ref> <sha> created=<unix>` per deletion, `kept ...` warnings on stderr.
+#
+# Scope: ~/work/probes.git ONLY. The argument (default that path) must be that very directory (not a symlink), a bare repository
+# with no remote; anything else, the mirror ~/work/pragmatica.git above all, is refused (exit 4) before any write.
+# Called by bb-checkout at most once per 24 h per host; failure there never fails a checkout.
+set -euo pipefail
+readonly TTL_DAYS=7
+
+PROBES=$HOME/work/probes.git
+REPO=${1:-$PROBES}
+[ $# -le 1 ] || { echo "usage: bb-probe-reap [$PROBES]" >&2; exit 2; }
+[ -d "$REPO" ] && [ ! -L "$REPO" ] && [ "$(cd "$REPO" && pwd -P)" = "$(cd "$(dirname "$PROBES")" 2> /dev/null && pwd -P)/probes.git" ] \
+  || { echo "bb-probe-reap: refusing: $REPO is not $PROBES" >&2; exit 4; }
+[ "$(git -C "$REPO" rev-parse --is-bare-repository 2> /dev/null)" = true ] \
+  || { echo "bb-probe-reap: refusing: $REPO is not a bare repository" >&2; exit 4; }
+[ -z "$(git -C "$REPO" config --get-regexp '^remote\.' 2> /dev/null || true)" ] \
+  || { echo "bb-probe-reap: refusing: $REPO has a remote (a mirror is never reaped)" >&2; exit 4; }
+
+now=$(date +%s)
+cutoff=$((now - TTL_DAYS * 86400))
+deleted=0
+while read -r ref sha; do
+  case $ref in refs/probes/*) ;; *) continue ;; esac
+  log=$REPO/logs/$ref
+  if [ ! -s "$log" ]; then echo "bb-probe-reap: kept $ref: no reflog, age unknown" >&2; continue; fi
+  created=$(tail -n 1 "$log" | sed -nE 's/^[^>]*> ([0-9]+) [-+][0-9]{4}.*$/\1/p')
+  if [ -z "$created" ]; then echo "bb-probe-reap: kept $ref: unreadable reflog, age unknown" >&2; continue; fi
+  if [ "$created" -lt "$cutoff" ]; then
+    git -C "$REPO" update-ref -d "$ref" "$sha"
+    echo "deleted $ref $sha created=$created"
+    deleted=$((deleted + 1))
+  fi
+done < <(git -C "$REPO" for-each-ref --format='%(refname) %(objectname)' refs/probes/)
+# 1.hour.ago, not now: a margin for the loose objects of a push in flight. Receive-pack's quarantine already keeps an
+# incoming push's objects out of the repo until its refs are updated, so this is belt and braces.
+git -C "$REPO" gc --prune=1.hour.ago -q
+echo "bb-probe-reap: $deleted deleted"

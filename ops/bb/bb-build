@@ -12,6 +12,13 @@
 # PORT GROUP (2026-09-29): a run that will execute tests of a fixed-port module (~/work/port-group-modules; decided by
 # bb-portgroup.py from the checkout's own poms and the args) is granted only while no other port-group run is running.
 # BB_PORT_GROUP=1 forces membership, BB_PORT_GROUP=0 forces exclusion.
+# ISOLATED SLOTS (2026-11-11): a group ticket's maven runs inside its own docker network namespace (bb-netns-run: host userland
+# mounted read-only, checkout and $HOME at the same paths, own loopback), so identical fixed ports cannot collide and up to N
+# (~/work/port-group-slots, default 3) group tickets run at once per host, each holding a slot (bb-queue shows it). No change to the
+# tests. BB_PG_ISOLATE=0 at enqueue = the old host-exclusive behaviour for that ticket (ticket has no iso=1).
+# LOAD GATE (2026-11-11): a ticket is also granted only while load5/cores < 1.2 (BB_LOAD_MAX); the oldest grantable ticket goes
+# regardless once it waited > 1200 s (BB_LOAD_STARVE_SECS) while < 2 reactors run (BB_LOAD_STARVE_REACTORS). See pick() in the lib.
+# Every ticket reaching done/ appends one line to ~/work/bb-ticket-log.tsv. `bb-wait <ticket>` blocks until it finishes (exit = rc).
 # TICKET OWNER FIELDS (T3, 2026-11): the ticket gains optional key=value lines after group_reason= and before args= (readers
 # take the LAST line of a key, so every existing reader ignores them): session_pid, session_start (epoch s) and session_label
 # from BB_SESSION_PID / BB_SESSION_START / BB_SESSION_LABEL (all three or none), agent, lane, pr from BB_AGENT, BB_LANE, BB_PR,
@@ -46,17 +53,22 @@ if [ "${1:-}" = __run ]; then
     if [ "$(pick)" = "$ID" ]; then break; fi   # backfill + starvation bound, see pick() in bb-queue-lib.sh
     if [ "$LIMIT" -gt 0 ] && [ "$WAITED" -ge "$LIMIT" ]; then
       never_started "$CO" 5 "queue wait expired after ${WAITED}s (BB_CAP_WAIT_SECS=$LIMIT)"
-      printf 'state=expired\nended=%s\n' "$(date +%s)" >> "$T"; mv "$T" "$Q/done/$ID"; exit 0
+      printf 'state=expired\nended=%s\n' "$(date +%s)" >> "$T"; to_done "$T"; exit 0
     fi
     flock -u 8; sleep 5; WAITED=$((WAITED + 5))
   done
   # granted (lock held): launch, and keep the lock until the reactor is visible so the next grant counts it
   NOW=$(date +%s)
   rm -f "$B/queued" "$B/rc" "$B/end"; touch "$B/run.marker"; echo "$NOW" > "$B/start"; printf '%q ' "$@" > "$B/args"   # for bb-report's EMPTY RUN check
-  printf 'started=%s\nwaited=%s\n' "$NOW" "$WAITED" >> "$T"; mv "$T" "$Q/running/$ID"; T=$Q/running/$ID
+  SLOT=""; [ "$(field "$T" iso)" = 1 ] && SLOT=$(pg_free_slot)
+  printf 'started=%s\nwaited=%s\n' "$NOW" "$WAITED" >> "$T"; [ -z "$SLOT" ] || printf 'group_slot=%s\n' "$SLOT" >> "$T"; mv "$T" "$Q/running/$ID"; T=$Q/running/$ID
   (
     cd "$CO"
-    env -u HCLOUD_TOKEN JAVA_HOME=/usr/lib/jvm/java-25-openjdk-amd64 "$MVN" "$@" > "$B/build.log" 2>&1
+    if [ "$(field "$T" iso)" = 1 ]; then
+      "$(dirname "$SELF")/bb-netns-run" "$ID" "$CO" "$MVN" "$@" > "$B/build.log" 2>&1
+    else
+      env -u HCLOUD_TOKEN JAVA_HOME=/usr/lib/jvm/java-25-openjdk-amd64 "$MVN" "$@" > "$B/build.log" 2>&1
+    fi
     rc=$?; date +%s > "$B/end"; echo $rc > "$B/rc"
   ) 8>&- &
   C=$!
@@ -70,7 +82,7 @@ if [ "${1:-}" = __run ]; then
   flock 8
   [ -f "$T" ] || exit 0   # cancel or reap already finalized this ticket (first writer wins): do not recreate running/<id> or overwrite done/<id>
   printf 'state=finished\nrc=%s\nended=%s\n' "$(cat "$B/rc" 2>/dev/null || echo unknown)" "$(cat "$B/end" 2>/dev/null)" >> "$T"
-  mv "$T" "$Q/done/$ID"
+  to_done "$T"
   exit 0
 fi
 
@@ -186,10 +198,11 @@ echo "$ID" > "$B/queued"
 { printf 'id=%s\nowner=%s\nco=%s\nsha=%s\nkey=%s\ncap=%s\nlimit=%s\ncreated=%s\n' \
     "$ID" "$BB_OWNER" "$CO" "$SHA" "$KEY" "$CAP" "$LIMIT" "$(date +%s%N)"
   printf 'group=%s\ngroup_reason=%s\n' "${GROUP%% *}" "${GROUP#* }"
+  [ "${GROUP%% *}" = 1 ] && [ "${BB_PG_ISOLATE:-1}" != 0 ] && command -v docker > /dev/null && printf 'iso=1\n'
   printf '%s' "$OWNER_FIELDS"
   printf 'args='; printf '%q ' "$@"; printf '\n'; } > "$T"
 setsid nohup bash "$SELF" __run "$ID" "$@" < /dev/null > /dev/null 2>&1 8>&- &
 for _ in $(seq 50); do waiter_alive "$ID" && break; sleep 0.1; done
 waiter_alive "$ID" || { rm -f "$T" "$B/queued"; echo "error: waiter for $ID did not start" >&2; exit 1; }
 POS=$(order | grep -nx -- "$ID" | cut -d: -f1 || true)
-echo "queued ticket=$ID position=$POS priority=$(prio "$BB_OWNER" "$SHA") reactors=$(reactors) cap=$CAP port-group=${GROUP%% *} (${GROUP#* }) held-by=$(group_holder) log=$B/build.log args: $*"
+echo "queued ticket=$ID position=$POS priority=$(prio "$BB_OWNER" "$SHA") reactors=$(reactors) cap=$CAP port-group=${GROUP%% *} (${GROUP#* }) port-group-holders=[$(group_holder)] slots=$(pg_slots) log=$B/build.log args: $*"

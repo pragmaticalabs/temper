@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+# bb-queue [N]                    -- running, waiting (grant order), and the N (default 10) most recently finished builds.
+# BB_OWNER=<o> bb-queue cancel <id> -- withdraw your own WAITING ticket (its .bb/rc becomes 9). Running builds are not
+#                                    touched by this command.
+# BB_OWNER=<o> bb-queue cancel --running <id>
+#                                  -- (2026-11-09) stop a RUNNING build. The owner match is an INTENT check, not security: it
+#                                    stops you cancelling someone else's build by accident. The SUPPORTED way for a parent to
+#                                    cancel a stopped agent's build is to run this with BB_OWNER=<that agent's owner label>.
+#                                    Kill set = the ticket's waiter PIDs and all their descendants, plus every process whose cwd
+#                                    is the checkout or below it (surefire/failsafe forks run in submodule directories) and
+#                                    their descendants; exact PIDs read from /proc and ps, never a pattern. TERM, a grace of
+#                                    5 s, then KILL, repeated while new children appear. Only when nothing of the set is left
+#                                    does it write .bb/rc 9 and move the ticket to done (state=cancelled, killed=<pids>, ended=),
+#                                    so the port group is free at once. Refused (exit 3) for an unknown or non-running id, exit 4
+#                                    naming the owner for another owner's ticket, exit 5 (nothing written, ticket stays running)
+#                                    if a process survives. A dead session never triggers this by itself.
+# BB_OWNER=<o> bb-queue release <checkout> [--kill]
+#                                  -- (2026-11-09, used by `bb-temper rm`) under the queue lock: cancel every WAITING ticket whose
+#                                    co is <checkout> (as `cancel`), and refuse (exit 3, naming the ticket and `rm --kill`) while
+#                                    a RUNNING one exists; with --kill that one is cancelled as `cancel --running`. Exit 0 = the
+#                                    queue holds nothing for <checkout>, so the caller may delete it. Another owner's ticket: 4.
+# bb-queue reap                   -- (2026-10-14) run reap() under the queue lock now and print what it moved: a ticket whose
+#                                    waiter is gone (and, if running, whose maven is gone) leaves waiting/running. Same rule
+#                                    every queue client already applies before a grant; this just makes it on demand.
+set -uo pipefail
+SELF=$(readlink -f "$0")
+. "$(dirname "$SELF")/bb-queue-lib.sh"
+# The listing runs WITHOUT the queue lock (2026-09-29): a ticket can move between directories, or be half-written, while
+# we read it. Every numeric field is therefore checked before arithmetic, and a vanished ticket is skipped.
+num() { case "$1" in ''|*[!0-9]*) return 1;; esac; }
+# snap <file>: read a ticket ONCE (it may be moved away mid-row); fv <key> then reads from that snapshot, never the path
+snap() { T_SNAP=$(cat "$1" 2>/dev/null) && [ -n "$T_SNAP" ]; }
+fv() { printf '%s\n' "$T_SNAP" | sed -n "s/^$1=//p" | tail -1; }
+age() { num "$1" || { printf '?'; return; }; local s=$(( $(date +%s) - $1 )); printf '%dh%02dm' $((s / 3600)) $((s % 3600 / 60)); }
+row() { printf '%-28s %-8s %4s %-13s %s  %s\n' "$@"; }
+
+# cancel_waiting <ticket file>: caller holds the lock and has checked the owner.
+cancel_waiting() {
+  local T=$1 ID=${1##*/}
+  pkill -u "$USER" -f -- "bb-build __run $ID( |\$)"
+  never_started "$(field "$T" co)" 9 "ticket $ID cancelled by $BB_OWNER"
+  printf 'state=cancelled\nended=%s\n' "$(date +%s)" >> "$T"; mv "$T" "$Q/done/$ID"
+}
+# too_late <ticket file> <killed> [notours]: the build already wrote ITS OWN rc for this run (.bb/start equals the ticket's started): that result is
+# kept (no 9, no .bb/end), the ticket records it and moves to done. Returns 1 when there is no such rc.
+too_late() {
+  local T=$1 ID=${1##*/} B rc; B=$(field "$1" co)/.bb
+  [ -f "$B/rc" ] && [ "$(cat "$B/start" 2>/dev/null)" = "$(field "$T" started)" ] || return 1
+  rc=$(cat "$B/rc")
+  printf 'rc=%s\nstate=finished\ncancel=too-late killed=%s notours=%s\nended=%s\n' "$rc" "$2" "${3:-}" "$(date +%s)" >> "$T"; mv "$T" "$Q/done/$ID"
+  echo "cancel of $ID was too late: the build had already finished with rc=$rc (killed: ${2:-nothing}); its result is kept"
+}
+# cancel_running <ticket file>: caller holds the lock and has checked the owner. Exit 5 leaves the ticket running.
+cancel_running() {
+  local T=$1 ID=${1##*/} co killed notours out B now
+  co=$(field "$T" co); B=$co/.bb
+  too_late "$T" "" && return 0
+  out=$(stop_ticket_processes "$ID" "$co") || { killed=${out%%$'\n'*}; echo "refusing: processes of $ID survived the kill (${killed:-none signalled}); ticket left running" >&2; return 5; }
+  killed=${out%%$'\n'*}; notours=${out##*notours=}
+  too_late "$T" "$killed" "$notours" && return 0   # the build finished inside the kill window and wrote its real rc
+  now=$(date +%s)
+  mkdir -p "$B"; echo "bb-build: ticket $ID cancelled while running by $BB_OWNER (killed: ${killed:-nothing}; notours=${notours:-none}, not ours, not signalled)" >> "$B/build.log"
+  echo "$now" > "$B/end"; echo 9 > "$B/rc"
+  printf 'killed=%s\nnotours=%s\nstate=cancelled\nended=%s\n' "$killed" "$notours" "$now" >> "$T"; mv "$T" "$Q/done/$ID"
+  echo "cancelled running $ID (killed: ${killed:-nothing})"
+}
+
+if [ "${1:-}" = cancel ] && [ "${2:-}" = --running ]; then
+  ID=${3:?usage: bb-queue cancel --running <ticket-id>}
+  : "${BB_OWNER:?refusing: set BB_OWNER=<the owner label of the ticket>}"
+  exec 8> "$Q/.lock"; flock 8
+  T=$Q/running/$ID
+  [ -f "$T" ] || { echo "refusing: $ID is not running (see bb-queue)" >&2; exit 3; }
+  [ "$(field "$T" owner)" = "$BB_OWNER" ] || { echo "refusing: $ID belongs to $(field "$T" owner), not $BB_OWNER" >&2; exit 4; }
+  cancel_running "$T"; exit $?
+fi
+
+if [ "${1:-}" = cancel ]; then
+  ID=${2:?usage: bb-queue cancel <ticket-id>}
+  : "${BB_OWNER:?refusing: set BB_OWNER=<your agent prefix>}"
+  exec 8> "$Q/.lock"; flock 8
+  T=$Q/waiting/$ID
+  [ -f "$T" ] || { echo "refusing: $ID is not waiting (see bb-queue; a running build needs cancel --running)" >&2; exit 3; }
+  [ "$(field "$T" owner)" = "$BB_OWNER" ] || { echo "refusing: $ID belongs to $(field "$T" owner), not $BB_OWNER" >&2; exit 4; }
+  cancel_waiting "$T"
+  echo "cancelled $ID"; exit 0
+fi
+
+if [ "${1:-}" = release ]; then
+  CO=${2:?usage: bb-queue release <checkout> [--kill]}; CO=${CO%/}
+  KILL=0; [ "${3:-}" = --kill ] && KILL=1
+  : "${BB_OWNER:?refusing: set BB_OWNER=<your agent prefix>}"
+  exec 8> "$Q/.lock"; flock 8
+  mine=""; run=""
+  for f in "$Q"/waiting/* "$Q"/running/*; do
+    [ -f "$f" ] && [ "$(field "$f" co)" = "$CO" ] || continue
+    [ "$(field "$f" owner)" = "$BB_OWNER" ] || { echo "refusing: ticket ${f##*/} on $CO belongs to $(field "$f" owner), not $BB_OWNER" >&2; exit 4; }
+    case "$f" in "$Q"/running/*) run="$run $f";; *) mine="$mine $f";; esac
+  done
+  if [ -n "$run" ] && [ "$KILL" = 0 ]; then
+    id=${run# }; id=${id##*/}
+    echo "refusing: ticket $id is RUNNING in $CO; rm would delete the tree under a live build (bb-temper rm --kill <name> cancels it first)" >&2; exit 3
+  fi
+  for f in $mine; do cancel_waiting "$f"; echo "cancelled waiting ${f##*/}"; done
+  for f in $run; do cancel_running "$f" || exit $?; done
+  exit 0
+fi
+
+if [ "${1:-}" = reap ]; then
+  exec 8> "$Q/.lock"; flock 8
+  before=$(ls "$Q/waiting" "$Q/running" 2>/dev/null | grep -v ':$' | grep . | sort)
+  reap
+  after=$(ls "$Q/waiting" "$Q/running" 2>/dev/null | grep -v ':$' | grep . | sort)
+  moved=$(comm -23 <(printf '%s\n' "$before") <(printf '%s\n' "$after") | grep .)
+  if [ -n "$moved" ]; then for id in $moved; do echo "reaped $id: $(sed -n 's/^state=//p' "$Q/done/$id" | tail -1)"; done
+  else echo "reap: nothing to move"; fi
+  exit 0
+fi
+
+N=${1:-10}
+TRACKED=0
+echo "RUNNING (reactors on host: $(reactors); cap 3 unless a ticket overrides; port group held by: $(group_holder))"
+row TICKET OWNER PRIO AGE CHECKOUT ARGS
+for f in "$Q"/running/*; do
+  snap "$f" || continue; TRACKED=$((TRACKED + 1))
+  s=""; waiter_alive "${f##*/}" || s=" [waiter gone]"; [ "$(fv group)" = 1 ] && s="$s [port-group]"
+  row "${f##*/}" "$(fv owner)" "$(prio "$(fv owner)" "$(fv sha)")" "$(age "$(fv started)")" "$(basename "$(fv co)")" "$(fv args)$s"
+done
+U=$(( $(reactors) - TRACKED )); [ "$U" -gt 0 ] && echo "  + $U reactor(s) not started through the queue (direct mvn or BB_QUEUE=0)"
+echo
+echo "WAITING (grant order: priority desc, then FIFO; a [port-group] ticket is skipped while the group is held; a ticket its own cap blocks is passed by backfill until blocked ${STARVE}s, then the host drains for it)"
+printf '%-4s ' POS; row TICKET OWNER PRIO WAITED CHECKOUT ARGS
+i=0
+for id in $(order); do
+  snap "$Q/waiting/$id" || continue; i=$((i + 1))
+  c=$(fv created); num "$c" && c=$((c / 1000000000))
+  s=""; waiter_alive "$id" || s=" [waiter gone]"; [ "$(fv group)" = 1 ] && s="$s [port-group]"
+  b=$(fv blocked_since); if num "$b"; then
+    if [ $(( $(date +%s) - b )) -ge "$STARVE" ]; then s="$s [cap-blocked $(age "$b"): DRAINING the host for it]"; else s="$s [cap-blocked $(age "$b"); others backfill]"; fi
+  fi
+  printf '%-4s ' "$i"
+  row "$id" "$(fv owner)" "$(prio "$(fv owner)" "$(fv sha)")" "$(age "$c")" "$(basename "$(fv co)")" "$(fv args)$s"
+done
+echo
+echo "FINISHED (most recent $N)"
+printf '%-10s %-6s ' STATE RC; row TICKET OWNER WALL ENDED CHECKOUT ARGS
+for id in $(ls -t "$Q"/done/ 2>/dev/null | head -n "$N"); do
+  f=$Q/done/$id; st=$(field "$f" started); en=$(field "$f" ended)
+  w=-; num "$st" && num "$en" && w=$(( (en - st) / 60 ))m
+  printf '%-10s %-6s ' "$(field "$f" state)" "$(field "$f" rc)"
+  row "$id" "$(field "$f" owner)" "$w" "$(age "$en") ago" "$(basename "$(field "$f" co)")" "$(field "$f" args)"
+done
