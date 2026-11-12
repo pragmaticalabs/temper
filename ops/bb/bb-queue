@@ -60,7 +60,7 @@ cancel_running() {
   too_late "$T" "$killed" "$notours" && return 0   # the build finished inside the kill window and wrote its real rc
   now=$(date +%s)
   mkdir -p "$B"; echo "bb-build: ticket $ID cancelled while running by $BB_OWNER (killed: ${killed:-nothing}; notours=${notours:-none}, not ours, not signalled)" >> "$B/build.log"
-  echo "$now" > "$B/end"; echo 9 > "$B/rc"
+  echo "$now" > "$B/end"; write_rc "$B" 9
   printf 'killed=%s\nnotours=%s\nstate=cancelled\nended=%s\n' "$killed" "$notours" "$now" >> "$T"; to_done "$T"
   echo "cancelled running $ID (killed: ${killed:-nothing})"
 }

@@ -120,6 +120,27 @@ die() { echo "bb-temper: $2" >&2; exit "$1"; }
 # Remote snippet: prints "deduped onto ..." when the checkout's last build call was deduped and nothing was queued since
 # (bb-build rewrites .bb/build.log at every enqueue, so a later enqueue makes the mark older than the log).
 DEDUPED_NOTE='if [ -f .bb/deduped ] && { [ ! -f .bb/build.log ] || [ .bb/deduped -nt .bb/build.log ]; }; then cat .bb/deduped; fi'
+# VERDICT SOURCE (2026-11-12, bbrc1). wait and report take the rc from the checkout's NEWEST queue ticket (highest id among
+# waiting/running/done whose co= is this checkout), not from .bb/rc: the ticket's rc= is the exit status bb-build's waiter got from
+# the build process. A newest ticket still waiting/running reports rc=running. No ticket for the checkout (built before the queue
+# kept one): .bb/rc is read and the output says `source=file`. When a finished ticket and the checkout's .bb/rc disagree, or the
+# file is gone, `RC-MISMATCH ticket=<rc> file=<rc|absent>` goes to stderr and the exit is 71 (wait and report). Guarantee: the
+# disagreement is detected and reported, not prevented; lanes run as the same uid, so deliberate edits to queue/done remain possible.
+# Remote snippet (run in the checkout): TICKET_PROBE sets, TICKET_PRINT prints tk_id= tk_dir= tk_state= tk_rc= (empty until the ticket is done; cancelled/abandoned
+# 9 and expired 5, as bb-build writes to .bb/rc) fin=0|1 file_rc=<rc|absent>.
+read -r -d '' TICKET_PROBE <<'EOF_PROBE' || true
+Q=${BB_TEST_QUEUE_ROOT:-$HOME/work/queue}; here=$(pwd); tk_id=; tk_dir=; tk_state=; tk_rc=; fin=0
+best=$(for d in done running waiting; do for f in "$Q/$d"/*; do [ -f "$f" ] || continue
+  [ "$(sed -n 's/^co=//p' "$f" | tail -1)" = "$here" ] && echo "${f##*/} $d"; done; done | sort -n | tail -1)
+if [ -n "$best" ]; then tk_id=${best% *}; tk_dir=${best#* }; f=$Q/$tk_dir/$tk_id
+  if [ "$tk_dir" = done ]; then fin=1; tk_state=$(sed -n 's/^state=//p' "$f" | tail -1)
+    case $tk_state in finished) tk_rc=$(sed -n 's/^rc=//p' "$f" | tail -1);; cancelled|abandoned) tk_rc=9;; expired) tk_rc=5;; esac
+  fi
+fi
+file_rc=$(cat .bb/rc 2>/dev/null || echo absent)
+EOF_PROBE
+TICKET_PRINT='printf "tk_id=%s\ntk_dir=%s\ntk_state=%s\ntk_rc=%s\nfin=%s\nfile_rc=%s\n" "$tk_id" "$tk_dir" "$tk_state" "$tk_rc" "$fin" "$file_rc"'
+pv() { printf '%s\n' "$P" | sed -n "s/^$1=//p" | head -1; }   # one key of the probe output $P
 [ $# -ge 2 ] || die 2 "usage: bb-temper checkout|build|wait|report|fetch|rm <name> ..."
 cmd=$1; shift; KILL_RUNNING=
 if [ "$cmd" = rm ] && [ "$1" = --kill ]; then KILL_RUNNING=--kill; shift; fi
@@ -294,16 +315,37 @@ case $cmd in
   wait)
     d=$(rsh_ro "cd ~/$CO && $DEDUPED_NOTE") || die 1 "cannot read the dedup mark of $name; not waiting on an unknown state"
     [ -z "$d" ] || { echo "rc=$d"; echo "bb-temper: no run of $name to wait for (BB_DEDUP=0 for a fresh run)" >&2; exit 7; }
-    until rsh_ro "test -f ~/$CO/.bb/rc"; do sleep 30; done
-    rc=$(rsh_ro "cat ~/$CO/.bb/rc")
+    while :; do
+      P=$(rsh_ro "cd ~/$CO && { $TICKET_PROBE; $TICKET_PRINT; }") || die 1 "cannot read the ticket state of $name; not waiting on an unknown state"
+      if [ -n "$(pv tk_id)" ]; then [ "$(pv fin)" = 1 ] && break
+      elif [ "$(pv file_rc)" != absent ]; then break; fi   # no ticket for this checkout: the file, as before
+      sleep 30
+    done
     rsh_ro "grep -E 'BUILD (SUCCESS|FAILURE)|Tests run:.*Fail|ERROR\\]' ~/$CO/.bb/build.log | tail -15"
-    echo "rc=$rc"; exit "$rc" ;;
+    if [ -n "$(pv tk_id)" ]; then
+      echo "source=ticket ticket=$(pv tk_id)"; rc=$(pv tk_rc)
+      case $rc in ''|*[!0-9]*) echo "rc=unknown"; echo "bb-temper: ticket $(pv tk_id) is $(pv tk_state) with no numeric rc" >&2; exit 70;; esac
+      echo "rc=$rc"
+      [ "$(pv file_rc)" = "$rc" ] || { echo "RC-MISMATCH ticket=$rc file=$(pv file_rc)" >&2; exit 71; }
+    else
+      echo "source=file"; rc=$(pv file_rc); echo "rc=$rc"
+    fi
+    exit "$rc" ;;
   report)
+    read -r -d '' REPORT_BODY <<'EOF_REPORT' || true
+if [ -n "$tk_id" ] && [ "$fin" = 0 ]; then rcv=running; src="source=ticket ticket=$tk_id"
+elif [ -n "$tk_id" ]; then rcv=${tk_rc:-unknown}; src="source=ticket ticket=$tk_id"
+else rcv=$file_rc; [ "$rcv" != absent ] || rcv=running; src="source=file"; fi
+echo rc=$rcv wall=$(( $(cat .bb/end 2>/dev/null || date +%s) - $(cat .bb/start 2>/dev/null || date +%s) ))s
+echo "$src"
+for m in */; do for d in surefire failsafe; do f=$(find ${m}target/$d-reports -maxdepth 1 -name 'TEST-*.xml' -newer .bb/run.marker 2>/dev/null); [ -n "$f" ] || continue
+  echo "${m%/} $d $(cat $f | grep -o '<testcase ' | wc -l) testcases, failures $(cat $f | grep -c '<failure') errors $(cat $f | grep -c '<error') skipped $(cat $f | grep -c '<skipped')"; done; done
+echo 'known on Linux: temper-worker 1 skip = JobGcTest#aDeleteFailingMidway (macOS uchg; ops/dev/known-skips)'
+if [ -n "$tk_id" ] && [ "$fin" = 1 ] && [ -n "$tk_rc" ] && [ "$file_rc" != "$tk_rc" ]; then echo "RC-MISMATCH ticket=$tk_rc file=$file_rc" >&2; exit 71; fi
+EOF_REPORT
     rsh_ro "cd ~/$CO || exit 1; d=\$($DEDUPED_NOTE); if [ -n \"\$d\" ]; then echo \"rc=\$d\"; echo 'bb-temper: NOT a run of this checkout (BB_DEDUP=0 for a fresh run)'; exit 7; fi
-         echo rc=\$(cat .bb/rc 2>/dev/null || echo running) wall=\$(( \$(cat .bb/end 2>/dev/null || date +%s) - \$(cat .bb/start 2>/dev/null || date +%s) ))s
-         for m in */; do for d in surefire failsafe; do f=\$(find \${m}target/\$d-reports -maxdepth 1 -name 'TEST-*.xml' -newer .bb/run.marker 2>/dev/null); [ -n \"\$f\" ] || continue
-           echo \"\${m%/} \$d \$(cat \$f | grep -o '<testcase ' | wc -l) testcases, failures \$(cat \$f | grep -c '<failure') errors \$(cat \$f | grep -c '<error') skipped \$(cat \$f | grep -c '<skipped')\"; done; done
-         echo 'known on Linux: temper-worker 1 skip = JobGcTest#aDeleteFailingMidway (macOS uchg; ops/dev/known-skips)'" ;;
+         $TICKET_PROBE
+         $REPORT_BODY" ;;
   fetch)
     [ $# -eq 1 ] || die 2 "fetch <name> <local-dir>"
     mkdir -p "$1"

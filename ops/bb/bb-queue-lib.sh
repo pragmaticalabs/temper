@@ -173,12 +173,21 @@ grantable() {
   done
 }
 
+# write_rc <bb dir> <rc>: the checkout's CONVENIENCE copy of a run's exit code (2026-11-12, bbrc1). Written whole under a temp name,
+# made read-only (444) and renamed into place, so a poller never sees a half-written or writable file. An existing 444 file is
+# replaced by rename/rm (directory permission), never by a `>` redirection, which a 444 file refuses. The VERDICT is the ticket's
+# rc= line (the build process's exit status), not this file; see bb-wait and bb-temper wait/report.
+write_rc() {
+  local f=$1/rc t=$1/rc.new.$$
+  printf '%s\n' "$2" > "$t" && chmod 444 "$t" && mv -f "$t" "$f"
+}
+
 # never_started <co> <rc> <reason>: make .bb describe a run that never reached maven, so pollers of .bb/rc wake
 # and bb-report counts nothing (run.marker is touched, so no older XML is "newer than marker").
 never_started() {
   local B=$1/.bb now; now=$(date +%s)
   mkdir -p "$B"; touch "$B/run.marker"; echo "$now" > "$B/start"; echo "$now" > "$B/end"
-  echo "bb-build: maven never started: $3" > "$B/build.log"; rm -f "$B/queued"; echo "$2" > "$B/rc"
+  echo "bb-build: maven never started: $3" > "$B/build.log"; rm -f "$B/queued"; write_rc "$B" "$2"
 }
 
 # reap (under lock): tickets whose waiter is gone, or (waiting) whose checkout directory is gone. Waiting -> abandoned (rc 9 written for the poller).
