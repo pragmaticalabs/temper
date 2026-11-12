@@ -190,6 +190,7 @@ class BbInstallIT {
         assertThat(pin("BB_WAIT_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-wait")));
         assertThat(pin("BB_NETNS_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-netns-run")));
         assertThat(pin("BB_PORTGROUP_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-portgroup.py")));
+        assertThat(pin("BB_MUTATE_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-mutate")));
     }
 
     /// The 2026-11-09 repo version of bb-build, bb-queue-lib.sh or bb-queue (what cloudbb-3 holds), vendored verbatim as `bb/<name>.prev`.
@@ -201,7 +202,7 @@ class BbInstallIT {
         }
     }
 
-    private static final List<String> NEW_FILES = List.of("bb-hold", "bb-wait", "bb-netns-run", "bb-portgroup.py");
+    private static final List<String> NEW_FILES = List.of("bb-mutate", "bb-hold", "bb-wait", "bb-netns-run", "bb-portgroup.py");
 
     @Test
     void success_installsAllFourFiles_keepsBackups_andASecondRunChangesNothing() throws Exception {
@@ -212,7 +213,8 @@ class BbInstallIT {
         var first = install("builder@h1");
 
         assertThat(first.rc()).as(first.stdout() + first.stderr()).isZero();
-        assertThat(first.stdout().lines().toList()).containsExactly("installed builder@h1 bb-tickets before=absent after=" + pin("BB_TICKETS_NEW"),
+        assertThat(first.stdout().lines().toList()).containsExactly("installed builder@h1 bb-mutate before=absent after=" + pin("BB_MUTATE_NEW"),
+                                                                    "installed builder@h1 bb-tickets before=absent after=" + pin("BB_TICKETS_NEW"),
                                                                     "installed builder@h1 bb-hold before=absent after=" + pin("BB_HOLD_NEW"),
                                                                     "installed builder@h1 bb-wait before=absent after=" + pin("BB_WAIT_NEW"),
                                                                     "installed builder@h1 bb-netns-run before=absent after=" + pin("BB_NETNS_NEW"),
@@ -253,7 +255,8 @@ class BbInstallIT {
         var second = install("builder@h1");
 
         assertThat(second.rc()).as(second.stdout() + second.stderr()).isZero();
-        assertThat(second.stdout().lines().toList()).containsExactly("unchanged builder@h1 bb-tickets " + pin("BB_TICKETS_NEW"),
+        assertThat(second.stdout().lines().toList()).containsExactly("unchanged builder@h1 bb-mutate " + pin("BB_MUTATE_NEW"),
+                                                                     "unchanged builder@h1 bb-tickets " + pin("BB_TICKETS_NEW"),
                                                                      "unchanged builder@h1 bb-hold " + pin("BB_HOLD_NEW"),
                                                                      "unchanged builder@h1 bb-wait " + pin("BB_WAIT_NEW"),
                                                                      "unchanged builder@h1 bb-netns-run " + pin("BB_NETNS_NEW"),
@@ -380,7 +383,8 @@ class BbInstallIT {
                              "bb-hold",
                              "bb-wait",
                              "bb-netns-run",
-                             "bb-portgroup.py")) {
+                             "bb-portgroup.py",
+                             "bb-mutate")) {
             Files.copy(OPS_BB.resolve(f), tools.resolve(f), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
         }
 
@@ -507,6 +511,7 @@ class BbInstallIT {
                                 "bb-wait",
                                 "bb-netns-run",
                                 "bb-portgroup.py",
+                                "bb-mutate",
                                 "install-bb-fields.sh")) {
             Files.copy(OPS_BB.resolve(name), copy.resolve(name));
         }
