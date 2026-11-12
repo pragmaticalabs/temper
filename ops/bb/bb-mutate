@@ -14,8 +14,8 @@ reports held the expected test class), a surefire/failsafe XML newer than the bu
 has testcases > 0. A red module fails the reactor, so modules downstream of it never run and leave stale or no XML:
 their mutants are NOT-RUN, never SURVIVED. A NOT-RUN batch-mate is re-run singly (like an ambiguous batch); if it is NOT-RUN
 even singly it stays NOT-RUN. Batch builds of 2+ mutants add -fae, so modules not downstream of a red one still run.
-Never deletes .bb/rc, never writes ~/.m2, stdin unused. Exit: 0 ok (NOT-RUN mutants do not change it; the tally
-line names them) | 2 control failed / usage / refused | 3 tree not restored | 4 queue-wait timeout (--timeout) or run abort.
+Never deletes .bb/rc, never writes ~/.m2, stdin unused. Exit: 0 ok | 2 control failed / usage / refused | 3 tree not restored | 4 queue-wait timeout (--timeout) or run abort
+| 5 complete, but some mutant is still NOT-RUN after the singles pass (neither detected nor survived: the tally line names them).
 
 PER-MUTANT BOUND (T17): every mutant build gets a wall-clock bound measured from ITS OWN Maven start (.bb/start
 newer than the mutant marker), so queue wait is excluded. Default: 3x the control's Maven wall time (control
@@ -550,7 +550,7 @@ def main():
     print(f"bb-mutate: sha={sha[:9]} control OK ({ctl_n} testcases); " +
           " ".join(f"{k}={v}" for k, v in sorted(counts.items())) +
           ("; TIMEOUT counted as detected" if counts.get("TIMEOUT") else "") + f"; tree clean; results={out}/results.md")
-    sys.exit(0)
+    sys.exit(5 if counts.get("NOT-RUN") else 0)
 
 
 def finish(m, res, own, rec):

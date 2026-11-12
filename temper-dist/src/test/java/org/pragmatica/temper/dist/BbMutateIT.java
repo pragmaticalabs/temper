@@ -24,6 +24,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 /// Probes (each mutation of ops/bb/bb-mutate turns the named test red):
 ///  - drop the freshness filter (`st_mtime_ns > marker_ns` accepts any XML) -> [#aStaleReport_isNotRun_neverSurvived]
 ///  - drop `testcases > 0` in `ran` -> [#anEmptyReport_isNotRun_neverSurvived]
+///  - exit 0 although a mutant is NOT-RUN -> [#everyMutantNotRun_exitsFive], [#anEmptyReport_isNotRun_neverSurvived]
 ///  - drop the single re-run of a NOT-RUN batch-mate -> [#aDownstreamMutant_isNotRunInTheBatch_thenCreditedSingly]
 ///  - drop the expected-class test in `ran` -> [#aReportOfAnotherClass_isNotRun_neverSurvived]
 class BbMutateIT {
@@ -64,6 +65,7 @@ class BbMutateIT {
         var out = batch(modules(null), mutation("mA", "A", "ATest", "MUT"), mutation("mB", "B", "BTest", "MUT"));
 
         assertThat(out.outcomes()).containsEntry("mA", "RED").containsEntry("mB", "RED");
+        assertThat(out.rc()).isZero();
         assertThat(builds()).containsExactly("[] false",
 
         // control
@@ -90,6 +92,7 @@ class BbMutateIT {
         var out = batch(modules("zero"), mutation("mA", "A", "ATest", "MUT"), mutation("mC", "C", "CTest", "MUT"));
 
         assertThat(out.outcomes()).containsEntry("mA", "NOT-RUN").containsEntry("mC", "RED");
+        assertThat(out.rc()).as("mixed: one mutant still NOT-RUN").isEqualTo(5);
         assertThat(builds()).hasSize(3);
         assertThat(out.stdout()).contains("NOT-RUN=1").contains("RED=1").doesNotContain("SURVIVED");
         assertThat(out.md()).contains("neither detected nor survived");
@@ -100,6 +103,17 @@ class BbMutateIT {
         var out = batch(modules("otherclass"), mutation("mA", "A", "ATest", "MUT"), mutation("mC", "C", "CTest", "MUT"));
 
         assertThat(out.outcomes()).containsEntry("mA", "NOT-RUN").containsEntry("mC", "RED");
+        assertThat(out.rc()).isEqualTo(5);
+    }
+
+    /// Every mutant NOT-RUN (nothing detected, nothing survived): a caller that checks only rc must not read it as a pass.
+    @Test
+    void everyMutantNotRun_exitsFive() throws Exception {
+        var out = batch(modules("zero"), mutation("mA", "A", "ATest", "MUT"));
+
+        assertThat(out.outcomes()).containsOnlyKeys("mA").containsEntry("mA", "NOT-RUN");
+        assertThat(out.rc()).isEqualTo(5);
+        assertThat(out.stdout()).contains("NOT-RUN=1");
     }
 
     /// A module whose report was written before the build (the control's) is stale: not evidence for the mutant's build.
@@ -108,6 +122,7 @@ class BbMutateIT {
         var out = batch(modules("stale"), mutation("mA", "A", "ATest", "MUT"), mutation("mC", "C", "CTest", "MUT"));
 
         assertThat(out.outcomes()).containsEntry("mA", "NOT-RUN").containsEntry("mC", "RED");
+        assertThat(out.rc()).isEqualTo(5);
     }
 
     /// Independent modules that all run: one batch, credited as before (RED and SURVIVED), no re-run.
@@ -116,6 +131,7 @@ class BbMutateIT {
         var out = batch(modules(null), mutation("mA", "A", "ATest", "MUT"), mutation("mC", "C", "CTest", "fine"));
 
         assertThat(out.outcomes()).containsEntry("mA", "RED").containsEntry("mC", "SURVIVED");
+        assertThat(out.rc()).isZero();
         assertThat(builds()).containsExactly("[] false", "[A] true");
     }
 
@@ -125,11 +141,12 @@ class BbMutateIT {
         var out = batch(modules(null), mutation("mA", "A", "ATest", "MUT"));
 
         assertThat(out.outcomes()).containsEntry("mA", "RED");
+        assertThat(out.rc()).isZero();
         assertThat(builds()).containsExactly("[] false", "[A] false");
     }
 
     // ---- harness
-    private record Result(Map<String, String> outcomes, String stdout, String log, String md) {}
+    private record Result(int rc, Map<String, String> outcomes, String stdout, String log, String md) {}
 
     private static String mutation(String id, String module, String test, String to) {
         return """
@@ -178,7 +195,7 @@ class BbMutateIT {
                                  null,
                                  null);
 
-        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isIn(0, 5);
         var outcomes = new HashMap<String, String>();
 
         Files.readAllLines(out.resolve("results.tsv"))
@@ -187,7 +204,8 @@ class BbMutateIT {
              .map(l -> l.split("\t"))
              .forEach(c -> outcomes.put(c[0], c[1]));
 
-        return new Result(outcomes,
+        return new Result(run.rc(),
+                          outcomes,
                           run.stdout(),
                           Files.readString(out.resolve("bb-mutate.log")),
                           Files.readString(out.resolve("results.md")));
