@@ -162,6 +162,20 @@ class MigrationRunnerTest {
         assertThat(MigrationRunner.pending(List.of(current), applied).unwrap()).isEmpty();
     }
 
+    /// The live pre-squash shas, written out independently of MigrationRunner.LEGACY_SHA256, so dropping or editing any
+    /// version's entry there turns this red (deriving the expectation from the list itself would prove nothing).
+    private static final Map<Integer, String> PRE_SQUASH_SHA256 = Map.of(
+        3, "46cf1140530e0296849643d3526a8b8d0c42aa855ee7b12263a2658f417d7236",
+        6, "19a13d493bbdb11e5dc13e5db5e35def959ec254cc0dd183d27cc63242026745");
+
+    @Test
+    void pending_acceptsThePreSquashShaOfEveryEditedMigration() {
+        PRE_SQUASH_SHA256.forEach((version, sha) -> assertThat(MigrationRunner.pending(List.of(loadedShipped(version)), Map.of(version, sha)).unwrap())
+                                                         .as("V%d pre-squash sha", version)
+                                                         .isEmpty());
+        assertThat(MigrationRunner.LEGACY_SHA256).isEqualTo(PRE_SQUASH_SHA256);
+    }
+
     @Test
     void pending_acceptsTheCurrentShaOfAShippedMigration() {
         var current = loadedShipped(3);
