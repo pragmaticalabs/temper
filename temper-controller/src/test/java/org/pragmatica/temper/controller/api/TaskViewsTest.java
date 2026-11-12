@@ -29,7 +29,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /// `hbAge` and `stale` (lane registry): stale is STRICTLY more than the limit since the last heartbeat or claim of a
 /// LEASED task. Mutation: change `age > staleAfter` to `>=` → the exactly-at-the-limit case is red; drop the LEASED
-/// condition in `hbAge` → the READY case shows an age; drop the `.or(() -> leaseClock(row))` fallback → the pre-V20 case is red.
+/// condition in `hbAge` → the READY case shows an age; drop the `.orElse(() -> leaseClock(row))` fallback → the pre-V20 case is red.
 class TaskViewsTest {
     private static final Instant T0 = Instant.parse("2026-11-12T10:00:00Z");
     private static final Duration LIMIT = Duration.ofMinutes(20);

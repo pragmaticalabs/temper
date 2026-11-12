@@ -94,7 +94,7 @@ sealed interface TaskViews {
         return row.state()
                   .status() == Status.LEASED
                ? report.lastHbAt()
-                       .or(() -> leaseClock(row))
+                       .orElse(() -> leaseClock(row))
                        .map(at -> Math.max(0,
                                            Duration.between(at, now).toSeconds()))
                : none();
