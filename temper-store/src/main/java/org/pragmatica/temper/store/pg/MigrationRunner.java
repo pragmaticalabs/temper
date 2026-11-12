@@ -19,6 +19,9 @@ import org.pragmatica.postgres.net.Transaction;
 import org.pragmatica.temper.protocol.digest.Digests;
 import org.pragmatica.temper.store.api.StoreError;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 
 /// Applies `db/migration/V<n>__<name>.sql` at controller start (m0-design §5.1). Everything runs in ONE
 /// transaction under `pg_advisory_xact_lock(7070)`, so two starting controllers never apply a file twice, and a
@@ -28,6 +31,7 @@ import org.pragmatica.temper.store.api.StoreError;
 /// (`MigrationNotInBuild`), and a pending version below the highest applied one (`MigrationOutOfOrder`) all abort
 /// startup, so a deploy between two branch merges never applies V12 before V11.
 sealed interface MigrationRunner {
+    Logger LOG = LoggerFactory.getLogger(MigrationRunner.class);
     long LOCK = 7070L;
 
     /// Every migration, in order. A new file is added here; `MigrationRunnerTest` fails when a file under
@@ -51,6 +55,23 @@ sealed interface MigrationRunner {
                                          new Migration(17, "s1_alarms"),
                                          new Migration(18, "i111_grant_fence"),
                                          new Migration(19, "portgroup_long"));
+
+    /// sha256 of the PRE-squash bytes of shipped migrations whose comments the public-history squash d3140d89 edited
+    /// (the bytes at commit 4edb67d2). A database that applied those bytes carries these shas; an applied row equal to
+    /// the legacy sha of its version is accepted, never rewritten. Any other mismatch is still tampering. Shipped files
+    /// are immutable (`ShippedMigrationsPinTest`), so this list never grows.
+    Map<Integer, String> LEGACY_SHA256 = Map.of(5,
+                                                "50ff0f603a1f592438d87a16b436d792f3daf45300be6236cca08415303cd7a9",
+                                                13,
+                                                "271efc1b59ac70f2eeaca8096c12b26b8b2923235cd16cfdd60e355d29d710e3",
+                                                14,
+                                                "f26bf63051ef394059305168de23a55bcb36bfb5b16aaf869db60fd370ea7c58",
+                                                15,
+                                                "8c2f1beb00dd0d7b8f6273b79fa0a03e05fef422b290e0ef718ea8eb1534c3fd",
+                                                16,
+                                                "e6e38a255b4d4b3285816c6e1e6281d36c47796485eee2671a425e1a7df0f1bd",
+                                                17,
+                                                "4d78ed8372083e3ada3a5b7ecd59951b60bfcb58559df81dccfe773aae1b1358");
 
     record Migration(int version, String name) {
         public String resource() {
@@ -145,7 +166,8 @@ sealed interface MigrationRunner {
     /// file changed, the first applied version `loaded` lacks, and the first pending version below the highest applied
     /// one each fail startup.
     static Result<List<Loaded>> pending(List<Loaded> loaded, Map<Integer, String> applied) {
-        return untampered(loaded, applied).flatMap(_ -> allInBuild(loaded, applied))
+        return untampered(loaded, applied).onSuccess(_ -> logLegacy(loaded, applied))
+                         .flatMap(_ -> allInBuild(loaded, applied))
                          .map(_ -> unapplied(loaded, applied))
                          .flatMap(unapplied -> afterApplied(unapplied, applied));
     }
@@ -157,9 +179,23 @@ sealed interface MigrationRunner {
     }
 
     private static boolean changed(Loaded migration, Map<Integer, String> applied) {
-        return Option.option(applied.get(migration.migration().version()))
+        return Option.option(applied.get(version(migration)))
                      .filter(sha -> !sha.equals(migration.sha256()))
+                     .filter(sha -> !isLegacy(migration, sha))
                      .isPresent();
+    }
+
+    private static boolean isLegacy(Loaded migration, String sha) {
+        return sha.equals(LEGACY_SHA256.get(version(migration)));
+    }
+
+    private static void logLegacy(List<Loaded> loaded, Map<Integer, String> applied) {
+        loaded.stream()
+              .filter(migration -> Option.option(applied.get(version(migration)))
+                                         .filter(sha -> !sha.equals(migration.sha256()))
+                                         .isPresent())
+              .forEach(migration -> LOG.info("migration V{} applied with its pre-squash bytes (legacy sha256 accepted, row left as is)",
+                                             version(migration)));
     }
 
     private static Result<Unit> allInBuild(List<Loaded> loaded, Map<Integer, String> applied) {
