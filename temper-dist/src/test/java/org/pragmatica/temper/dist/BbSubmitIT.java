@@ -439,19 +439,15 @@ class BbSubmitIT {
 
     @Test
     void aMalformedBbPgIsolateOrRequireDocker_isRefused_beforeAnyConnection() throws Exception {
-        for (var value : List.of("no", "2", "00", "0;id")) {
-            var viaTemper = bbTemper(env("BB_PG_ISOLATE",
-                                         value,
-                                         "BB_SUBMIT",
-                                         dir.resolve("absent").toString()),
-                                     "build",
-                                     "t3-x");
-            var viaSubmit = submit(noAncestor("BB_PG_ISOLATE", value), TARGET, "work/co/x");
+        for (var name : List.of("BB_PG_ISOLATE", "BB_REQUIRE_DOCKER")) {
+            for (var value : List.of("no", "2", "00", "0;id")) {
+                var viaTemper = bbTemper(env(name, value, "BB_SUBMIT", dir.resolve("absent").toString()), "build", "t3-x");
+                var viaSubmit = submit(noAncestor(name, value), TARGET, "work/co/x");
 
-            assertThat(viaTemper.rc()).as(value).isEqualTo(2);
-            assertThat(viaSubmit.rc()).as(value).isEqualTo(2);
+                assertThat(viaTemper.rc()).as(name + "=" + value).isEqualTo(2);
+                assertThat(viaSubmit.rc()).as(name + "=" + value).isEqualTo(2);
+            }
         }
-
         assertThat(sshCalls()).isEmpty();
     }
 
