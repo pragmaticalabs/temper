@@ -19,7 +19,7 @@
 # - Optional BB_SSH_PROXY=<user@host> and BB_KNOWN_HOSTS=<existing file> (set by bb-temper for a host reached through a jump host, which may only
 #   admit the jump host's network): ssh then goes through that host (ProxyCommand ssh -W) and with the host keys pinned in
 #   that file (StrictHostKeyChecking=yes). A malformed value is refused (exit 2) before any ssh. Unset: ssh as before.
-# - BB_DEDUP, BB_QUEUE, BB_PG_ISOLATE (0 or 1; else exit 2) are forwarded. Any other BB_* variable in the environment that is
+# - BB_DEDUP, BB_QUEUE, BB_PG_ISOLATE, BB_REQUIRE_DOCKER (0 or 1; else exit 2) are forwarded. Any other BB_* variable in the environment that is
 #   not forwarded or read here (read: BB_SSH_KEY BB_SSH_PROXY BB_KNOWN_HOSTS BB_TEMPER_HOSTS BB_SESSION) gets one stderr line
 #   naming it, and the build is queued all the same.
 # The ssh is never retried: a dropped session after the enqueue would enqueue twice. The exit code is ssh's, which is
@@ -56,16 +56,17 @@ if [ -n "${BB_PR:-}" ]; then [[ $BB_PR =~ $PR_RE ]] || die "BB_PR must match $PR
 if [ -n "${BB_LANE:-}" ]; then [[ $BB_LANE =~ $WORD_RE ]] || die "BB_LANE must match $WORD_RE"; env_words="BB_LANE=$BB_LANE $env_words"; fi
 if [ -n "${BB_AGENT:-}" ]; then [[ $BB_AGENT =~ $WORD_RE ]] || die "BB_AGENT must match $WORD_RE"; env_words="BB_AGENT=$BB_AGENT $env_words"; fi
 # bb-build's own switches (0 or 1): BB_DEDUP=0 runs an identical build anyway, BB_QUEUE=0 bypasses the queue,
-# BB_PG_ISOLATE=0 opts a port-group ticket out of netns isolation (no iso=1 in the ticket).
+# BB_PG_ISOLATE=0 opts a port-group ticket out of netns isolation (no iso=1 in the ticket); BB_REQUIRE_DOCKER is forwarded the same way.
 if [ -n "${BB_DEDUP:-}" ]; then [[ $BB_DEDUP =~ ^[01]$ ]] || die "BB_DEDUP must be 0 or 1"; env_words="$env_words BB_DEDUP=$BB_DEDUP"; fi
 if [ -n "${BB_QUEUE:-}" ]; then [[ $BB_QUEUE =~ ^[01]$ ]] || die "BB_QUEUE must be 0 or 1"; env_words="$env_words BB_QUEUE=$BB_QUEUE"; fi
 if [ -n "${BB_PG_ISOLATE:-}" ]; then [[ $BB_PG_ISOLATE =~ ^[01]$ ]] || die "BB_PG_ISOLATE must be 0 or 1"; env_words="$env_words BB_PG_ISOLATE=$BB_PG_ISOLATE"; fi
+if [ -n "${BB_REQUIRE_DOCKER:-}" ]; then [[ $BB_REQUIRE_DOCKER =~ ^[01]$ ]] || die "BB_REQUIRE_DOCKER must be 0 or 1"; env_words="$env_words BB_REQUIRE_DOCKER=$BB_REQUIRE_DOCKER"; fi
 # Any other BB_* in the environment that is neither forwarded nor read here is dropped: say so. Never a refusal. Skipped when
 # bb-temper (which sets BB_UNFORWARDED_WARNED) has already checked; its own variables are known here so a call through it is quiet.
 if [ -z "${BB_UNFORWARDED_WARNED:-}" ]; then
   while IFS= read -r v; do
     case $v in
-      BB_OWNER|BB_PR|BB_LANE|BB_AGENT|BB_DEDUP|BB_QUEUE|BB_PG_ISOLATE|BB_SSH_KEY|BB_SSH_PROXY|BB_KNOWN_HOSTS|BB_TEMPER_HOSTS) ;;
+      BB_OWNER|BB_PR|BB_LANE|BB_AGENT|BB_DEDUP|BB_QUEUE|BB_PG_ISOLATE|BB_REQUIRE_DOCKER|BB_SSH_KEY|BB_SSH_PROXY|BB_KNOWN_HOSTS|BB_TEMPER_HOSTS) ;;
       BB_HOST|BB_HOSTS_CMD|BB_SUBMIT|BB_UNFORWARDED_WARNED|BB_SESSION|BB_SESSION_*) ;;
       BB_*) echo "bb-submit: warning: $v is set but is not forwarded to bb-build (dropped)" >&2 ;;
     esac

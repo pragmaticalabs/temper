@@ -401,42 +401,44 @@ class BbSubmitIT {
     /// BB_PG_ISOLATE=0 reaches bb-build on every path (#27: both tools dropped it, so a group ticket kept iso=1 and nothing said so).
     /// Mutation: drop the forward in bb-submit, or in either bb-temper path, and the matching row goes red.
     @Test
-    void submit_forwardsBbPgIsolate() throws Exception {
-        var run = submit(noAncestor("BB_PG_ISOLATE", "0"), TARGET, "~/work/co/x", "-B");
+    void submit_forwardsBbPgIsolateAndRequireDocker() throws Exception {
+        var run = submit(noAncestor("BB_PG_ISOLATE", "0", "BB_REQUIRE_DOCKER", "1"), TARGET, "~/work/co/x", "-B");
 
         assertThat(run.rc()).as(run.err()).isZero();
-        assertThat(remoteCommand()).isEqualTo("BB_OWNER=t3 BB_PG_ISOLATE=0 ~/tools/bb-build ~/work/co/x -B");
+        assertThat(remoteCommand()).isEqualTo("BB_OWNER=t3 BB_PG_ISOLATE=0 BB_REQUIRE_DOCKER=1 ~/tools/bb-build ~/work/co/x -B");
     }
 
     @Test
-    void bbTemper_withoutBbSubmit_forwardsBbPgIsolate() throws Exception {
+    void bbTemper_withoutBbSubmit_forwardsBbPgIsolateAndRequireDocker() throws Exception {
         var run = bbTemper(env("BB_SUBMIT",
                                dir.resolve("absent").toString(),
                                "BB_PG_ISOLATE",
-                               "0"),
+                               "0",
+                               "BB_REQUIRE_DOCKER",
+                               "1"),
                            "build",
                            "t3-x",
                            "-B");
 
         assertThat(run.rc()).as(run.err()).isZero();
         assertThat(sshCalls()).singleElement()
-                  .satisfies(call -> assertThat(call.get(7)).isEqualTo("BB_OWNER=t3 BB_PG_ISOLATE=0 ~/tools/bb-build ~/work/co/t3-x -B "));
+                  .satisfies(call -> assertThat(call.get(7)).isEqualTo("BB_OWNER=t3 BB_PG_ISOLATE=0 BB_REQUIRE_DOCKER=1 ~/tools/bb-build ~/work/co/t3-x -B "));
     }
 
     @Test
-    void bbTemper_throughBbSubmit_forwardsBbPgIsolate() throws Exception {
-        var run = bbTemper(noAncestor("BB_SUBMIT", MacScripts.SUBMIT.toString(), "BB_PG_ISOLATE", "0"),
+    void bbTemper_throughBbSubmit_forwardsBbPgIsolateAndRequireDocker() throws Exception {
+        var run = bbTemper(noAncestor("BB_SUBMIT", MacScripts.SUBMIT.toString(), "BB_PG_ISOLATE", "0", "BB_REQUIRE_DOCKER", "1"),
                            "build",
                            "t3-x",
                            "-B");
 
         assertThat(run.rc()).as(run.err()).isZero();
         assertThat(sshCalls()).singleElement()
-                  .satisfies(call -> assertThat(call.getLast()).isEqualTo("BB_OWNER=t3 BB_PG_ISOLATE=0 ~/tools/bb-build ~/work/co/t3-x -B"));
+                  .satisfies(call -> assertThat(call.getLast()).isEqualTo("BB_OWNER=t3 BB_PG_ISOLATE=0 BB_REQUIRE_DOCKER=1 ~/tools/bb-build ~/work/co/t3-x -B"));
     }
 
     @Test
-    void aMalformedBbPgIsolate_isRefused_beforeAnyConnection() throws Exception {
+    void aMalformedBbPgIsolateOrRequireDocker_isRefused_beforeAnyConnection() throws Exception {
         for (var value : List.of("no", "2", "00", "0;id")) {
             var viaTemper = bbTemper(env("BB_PG_ISOLATE",
                                          value,
@@ -485,6 +487,7 @@ class BbSubmitIT {
         known.put("BB_DEDUP", "0");
         known.put("BB_QUEUE", "1");
         known.put("BB_PG_ISOLATE", "0");
+        known.put("BB_REQUIRE_DOCKER", "1");
         known.put("BB_SESSION", "lead1");
         known.put("BB_SESSION_PID", "5");
         known.put("BB_TEMPER_HOSTS", home.resolve(".config/bb-temper/hosts").toString());
