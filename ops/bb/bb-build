@@ -13,7 +13,10 @@
 # bb-portgroup.py from the checkout's own poms and the args) is granted only while no other port-group run is running.
 # BB_PORT_GROUP=1 forces membership, BB_PORT_GROUP=0 forces exclusion.
 # REQUIRE DOCKER (2026-11-12): both maven launches below end with -Daether.requireDocker=true, after the caller's args (pragmatica #2591: a Docker IT
-# class FAILS instead of silently not running when Docker is absent; temper ignores the property). Not an override point.
+# class FAILS instead of silently not running when Docker is absent; temper ignores the property). Override point (#31, 2026-11-12):
+# BB_REQUIRE_DOCKER=0 at enqueue omits the flag from both launches, for a run that must see how a guard behaves WITHOUT it (pragmatica #3090);
+# the value is ^[01]$ (anything else: refused, exit 2, nothing queued), unset or 1 = the flag as above. A 0 ticket carries the line
+# requireDocker=0 (bb-tickets shows it, bb-queue marks the row [no-requireDocker]) and a 0 build is never deduped against a guarded one.
 # ISOLATED SLOTS (2026-11-11): a group ticket's maven runs inside its own docker network namespace (bb-netns-run: host userland
 # mounted read-only, checkout and $HOME at the same paths, own loopback), so identical fixed ports cannot collide and up to N
 # (~/work/port-group-slots, default 3) group tickets run at once per host, each holding a slot (bb-queue shows it). No change to the
@@ -62,14 +65,15 @@ if [ "${1:-}" = __run ]; then
   # granted (lock held): launch, and keep the lock until the reactor is visible so the next grant counts it
   NOW=$(date +%s)
   rm -f "$B/queued" "$B/rc" "$B/end"; touch "$B/run.marker"; echo "$NOW" > "$B/start"; printf '%q ' "$@" > "$B/args"   # for bb-report's EMPTY RUN check
+  RDF=(-Daether.requireDocker=true); [ "$(field "$T" requireDocker)" != 0 ] || RDF=()   # #31: the ticket's own record decides
   SLOT=""; [ "$(field "$T" iso)" = 1 ] && SLOT=$(pg_free_slot)
   printf 'started=%s\nwaited=%s\n' "$NOW" "$WAITED" >> "$T"; [ -z "$SLOT" ] || printf 'group_slot=%s\n' "$SLOT" >> "$T"; mv "$T" "$Q/running/$ID"; T=$Q/running/$ID
   (
     cd "$CO"
     if [ "$(field "$T" iso)" = 1 ]; then
-      "$(dirname "$SELF")/bb-netns-run" "$ID" "$CO" "$MVN" "$@" -Daether.requireDocker=true > "$B/build.log" 2>&1
+      "$(dirname "$SELF")/bb-netns-run" "$ID" "$CO" "$MVN" "$@" ${RDF[@]+"${RDF[@]}"} > "$B/build.log" 2>&1
     else
-      env -u HCLOUD_TOKEN JAVA_HOME=/usr/lib/jvm/java-25-openjdk-amd64 "$MVN" "$@" -Daether.requireDocker=true > "$B/build.log" 2>&1
+      env -u HCLOUD_TOKEN JAVA_HOME=/usr/lib/jvm/java-25-openjdk-amd64 "$MVN" "$@" ${RDF[@]+"${RDF[@]}"} > "$B/build.log" 2>&1
     fi
     rc=$?; date +%s > "$B/end"; echo $rc > "$B/rc"
   ) 8>&- &
@@ -96,6 +100,7 @@ CO=$(cd "$1" && pwd); shift
 case "$BB_OWNER" in *[!A-Za-z0-9_]*|"") echo "refusing: BB_OWNER must be [A-Za-z0-9_]+" >&2; exit 4;; esac
 case "$(basename "$CO")" in "$BB_OWNER"-*) ;; *) echo "refusing: $CO is not owned by BB_OWNER=$BB_OWNER (name must start with $BB_OWNER-)" >&2; exit 4;; esac
 [ $# -gt 0 ] || set -- clean install
+case "${BB_REQUIRE_DOCKER:-1}" in 0|1) ;; *) echo "refusing: BB_REQUIRE_DOCKER must be 0 or 1 (or unset)" >&2; exit 2;; esac
 B=$CO/.bb; mkdir -p "$B"
 [ -f "$B/rc" ] || [ ! -f "$B/start" ] || { echo "refusing: a build appears to be running in $CO (.bb/start without .bb/rc)" >&2; exit 3; }
 # Host-killing test guard (2026-09-27, #1553): StreamPublishReshuffleTest leaks sockets without bound and
@@ -144,7 +149,7 @@ esac
 SHA=$(git -C "$CO" rev-parse HEAD)
 KEY=""
 if [ -z "$(git -C "$CO" status --porcelain --untracked-files=normal)" ]; then
-  KEY=$( { printf '%s\n' "$SHA"; grep -v '^-Dmaven.repo.local=' "$CO/.mvn/maven.config" 2>/dev/null; printf '%s\0' "$@"; } | sha256sum | cut -c1-16)
+  KEY=$( { printf '%s\n' "$SHA"; grep -v '^-Dmaven.repo.local=' "$CO/.mvn/maven.config" 2>/dev/null; printf '%s\0' "$@"; [ "${BB_REQUIRE_DOCKER:-1}" = 1 ] || printf 'requireDocker=0\0'; } | sha256sum | cut -c1-16)
 else
   echo "dedup: skipped (working tree has changes vs $SHA)"
 fi
@@ -190,6 +195,7 @@ AG=$(ownerval BB_AGENT "$WORD_RE") && OWNER_FIELDS+="agent=$AG"$'\n'
 LN=$(ownerval BB_LANE "$WORD_RE") && OWNER_FIELDS+="lane=$LN"$'\n'
 PRN=$(ownerval BB_PR '^[1-9][0-9]{0,9}$') && OWNER_FIELDS+="pr=$PRN"$'\n'
 OWNER_FIELDS+="output=$B/build.log"$'\n'
+[ "${BB_REQUIRE_DOCKER:-1}" = 1 ] || OWNER_FIELDS+="requireDocker=0"$'\n'
 [ -z "$DETACHED_READER" ] || OWNER_FIELDS+="detached_reader=$DETACHED_READER"$'\n'
 
 ID=$(date +%s%N)-$$

@@ -8,7 +8,7 @@
 # Lists, in this order: every regular file of running/, then of waiting/, each by `created` (numeric; a missing or
 # non-numeric one first, then by id), at most 500 each; then done/ files whose `ended` (else the file's mtime) is at or
 # after now-86400, newest first, at most 200. A name that is not a ticket id ^[A-Za-z0-9._-]{1,64}$ is skipped.
-# Per ticket every line `^[a-z_]{1,32}=` is a field, the last value of a key wins (as field() in bb-queue-lib.sh does); a
+# Per ticket every line `^[A-Za-z_]{1,32}=` is a field (capitals since #31: requireDocker), the last value of a key wins (as field() in bb-queue-lib.sh does); a
 # value over 4096 bytes or holding a byte outside 0x20-0x7e is dropped and its key listed in "dropped".
 # progressAt (RUNNING tickets only, additive, a string like every field): the newest mtime, epoch s, of any
 # <co>/**/target/surefire-reports/TEST-*.xml or <co>/**/target/failsafe-reports/TEST-*.xml, `co` the ticket's checkout field,
@@ -93,7 +93,7 @@ mode == 2 && NF == 3 && length($2) <= 64 {
     e = index(line, "=")
     if (e < 2) continue
     k = substr(line, 1, e - 1)
-    if (k !~ /^[a-z_]+$/ || length(k) > 32) continue
+    if (k !~ /^[A-Za-z_]+$/ || length(k) > 32) continue
     if (!(k in val)) order[++nk] = k
     val[k] = substr(line, e + 1)
   }

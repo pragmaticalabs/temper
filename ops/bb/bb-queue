@@ -127,6 +127,7 @@ row TICKET OWNER PRIO AGE CHECKOUT ARGS
 for f in "$Q"/running/*; do
   snap "$f" || continue; TRACKED=$((TRACKED + 1))
   s=""; waiter_alive "${f##*/}" || s=" [waiter gone]"; if [ "$(fv group)" = 1 ]; then if [ "$(fv iso)" = 1 ]; then s="$s [port-group slot $(fv group_slot)/$(pg_slots), isolated netns]"; else s="$s [port-group host-exclusive]"; fi; fi
+  [ "$(fv requireDocker)" = 0 ] && s="$s [no-requireDocker]"
   [ -n "$(fv load_override)" ] && s="$s [granted by load override: $(fv load_override | cut -d' ' -f2-3)]"
   row "${f##*/}" "$(fv owner)" "$(prio "$(fv owner)" "$(fv sha)")" "$(age "$(fv started)")" "$(basename "$(fv co)")" "$(fv args)$s"
 done
@@ -139,6 +140,7 @@ for id in $(order); do
   snap "$Q/waiting/$id" || continue; i=$((i + 1))
   c=$(fv created); num "$c" && c=$((c / 1000000000))
   s=""; waiter_alive "$id" || s=" [waiter gone]"; if [ "$(fv group)" = 1 ]; then if [ "$(fv iso)" = 1 ]; then s="$s [port-group isolated]"; else s="$s [port-group host-exclusive]"; fi; fi
+  [ "$(fv requireDocker)" = 0 ] && s="$s [no-requireDocker]"
   b=$(fv blocked_since); if num "$b"; then
     if [ $(( $(date +%s) - b )) -ge "$STARVE" ]; then s="$s [cap-blocked $(age "$b"): DRAINING the host for it]"; else s="$s [cap-blocked $(age "$b"); others backfill]"; fi
   fi
