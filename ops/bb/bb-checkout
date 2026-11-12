@@ -2,8 +2,9 @@
 # bb-checkout <name> <sha-or-ref> -- isolated pragmatica checkout at ~/work/co/<name>, own .m2-local.
 # Fetches the mirror from GitHub first, so any pushed SHA resolves. Refuses to reuse an existing dir.
 # Probe commits (probes-init.sh): if ~/work/probes.git exists its refs/probes/* are fetched into the checkout as
-# refs/remotes/probes/*, so <ref> may also be a SHA that exists only there or probes/<owner>/<name>. The mirror is tried
-# first; a ref that resolves in neither makes the run fail and leaves no checkout dir. At most once per 24 h a best-effort
+# refs/remotes/probes/*, so <ref> may also be a SHA that exists only there or probes/<owner>/<name>. A <ref> of the form
+# probes/<owner>/<name> resolves ONLY as refs/remotes/probes/<owner>/<name> in the clone (a public branch or tag of that name in
+# the mirror never shadows it); any other <ref> is tried in the mirror first; a ref that resolves in neither makes the run fail and leaves no checkout dir. At most once per 24 h a best-effort
 # bb-probe-reap runs afterwards; its failure never fails the checkout.
 set -euo pipefail
 [ $# -eq 2 ] || { echo "usage: bb-checkout <name> <sha-or-ref>" >&2; exit 2; }
@@ -22,7 +23,10 @@ PROBES=$HOME/work/probes.git
 MADE=
 # a failed run removes only the dir this run created
 trap 'rc=$?; [ "$rc" = 0 ] || [ -z "$MADE" ] || rm -rf "$CO"' EXIT
-SHA=$(git -C "$MIRROR" rev-parse --verify "$REF^{commit}" 2> /dev/null) || SHA=
+PROBE_REF=
+case $REF in probes/*/*) PROBE_REF=$REF ;; esac
+SHA=
+[ -n "$PROBE_REF" ] || SHA=$(git -C "$MIRROR" rev-parse --verify "$REF^{commit}" 2> /dev/null) || SHA=
 [ -n "$SHA" ] || [ -d "$PROBES" ] || { echo "refusing: $REF is not in the mirror (and there is no $PROBES)" >&2; exit 5; }
 mkdir -p "$HOME/work/co"
 git clone -q --no-checkout "$MIRROR" "$CO"
@@ -35,7 +39,8 @@ if [ -d "$PROBES" ]; then
   fi
 fi
 if [ -z "$SHA" ]; then
-  SHA=$(git -C "$CO" rev-parse --verify "$REF^{commit}" 2> /dev/null) \
+  FULL=$REF; [ -z "$PROBE_REF" ] || FULL=refs/remotes/$PROBE_REF
+  SHA=$(git -C "$CO" rev-parse --verify "$FULL^{commit}" 2> /dev/null) \
     || { echo "refusing: $REF resolves neither in the mirror nor in $PROBES (nothing created)" >&2; exit 5; }
 fi
 git -C "$CO" checkout -q --detach "$SHA"

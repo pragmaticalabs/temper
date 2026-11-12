@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # bb-probe-reap -- deletes the old refs of the per-host probes repo ~/work/probes.git (see probes-init.sh), then
-# `git gc --prune=now` so their objects go too.
+# `git gc --prune=1.hour.ago` so their objects go too.
 #
-# A refs/probes/* ref is deleted when its REFLOG CREATION time (the oldest reflog entry) is older than TTL_DAYS. Never the
-# commit date: a mutation of an old base commit is a brand-new ref and must survive. A ref without a reflog is kept, with a
+# A refs/probes/* ref is deleted when its LAST UPDATE time (the newest reflog entry: the time of the last push) is older than
+# TTL_DAYS, so re-pushing an existing name renews it. Never the commit date: a mutation of an old base commit is a brand-new
+# ref and must survive. A ref without a reflog is kept, with a
 # warning (its age is unknown). Output: `deleted <ref> <sha> created=<unix>` per deletion, `kept ...` warnings on stderr.
 #
 # Scope: ~/work/probes.git ONLY. The argument (default that path) must be that very directory (not a symlink), a bare repository
@@ -29,7 +30,7 @@ while read -r ref sha; do
   case $ref in refs/probes/*) ;; *) continue ;; esac
   log=$REPO/logs/$ref
   if [ ! -s "$log" ]; then echo "bb-probe-reap: kept $ref: no reflog, age unknown" >&2; continue; fi
-  created=$(head -n 1 "$log" | sed -nE 's/^[^>]*> ([0-9]+) [-+][0-9]{4}.*$/\1/p')
+  created=$(tail -n 1 "$log" | sed -nE 's/^[^>]*> ([0-9]+) [-+][0-9]{4}.*$/\1/p')
   if [ -z "$created" ]; then echo "bb-probe-reap: kept $ref: unreadable reflog, age unknown" >&2; continue; fi
   if [ "$created" -lt "$cutoff" ]; then
     git -C "$REPO" update-ref -d "$ref" "$sha"
@@ -37,5 +38,7 @@ while read -r ref sha; do
     deleted=$((deleted + 1))
   fi
 done < <(git -C "$REPO" for-each-ref --format='%(refname) %(objectname)' refs/probes/)
-git -C "$REPO" gc --prune=now -q
+# 1.hour.ago, not now: a margin for the loose objects of a push in flight. Receive-pack's quarantine already keeps an
+# incoming push's objects out of the repo until its refs are updated, so this is belt and braces.
+git -C "$REPO" gc --prune=1.hour.ago -q
 echo "bb-probe-reap: $deleted deleted"

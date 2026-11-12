@@ -27,7 +27,8 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 ///
 /// Probes (each: break it, the named test goes red, revert): loosen the hook regex ->
 /// [#theHook_rejectsEveryRefOutsideProbesOwnerName]; age by commit date instead of reflog creation ->
-/// [#theReaper_agesByReflogCreation_notByCommitDate]; let the reaper walk every ref instead of refs/probes ->
+/// [#theReaper_agesByReflogCreation_notByCommitDate]; age by the first reflog entry -> [#theReaper_ageIsTheLastUpdate_aRePushRenewsIt]; prune=now ->
+/// [#theReaper_deletesARefWhoseReflogIsOlderThan7Days_andItsObjects]; resolve probes/ refs mirror-first -> [#aProbesRef_isNotShadowedByAMirrorBranchOfTheSameName]; let the reaper walk every ref instead of refs/probes ->
 /// [#theReaper_touchesOnlyRefsProbes]; drop the reaper's path guard -> [#theReaper_refusesAnyPathButProbesGit]; make the checkout
 /// resolve only in the mirror -> [#aShaOnlyInProbes_isCheckedOut_bySha_andByRefName]; fetch probes into refs/heads instead of
 /// refs/remotes -> [#bbMutatePreflight_holds_forAProbesCommit]; keep a half-made dir -> [#anUnknownRef_fails_andLeavesNoCheckoutDir];
@@ -286,6 +287,22 @@ class BbProbesIT {
     }
 
     @Test
+    void aProbesRef_isNotShadowedByAMirrorBranchOfTheSameName() throws Exception {
+        ok(init());
+        var y = pushNew("refs/probes/a/b", "2026-11-11T00:00:00Z");
+
+        ok(git(lane, "checkout", "-q", "--detach", base));
+        var x = commit("public", "2026-11-11T00:00:00Z");
+
+        ok(git(lane, "push", "-q", "origin", x + ":refs/heads/probes/a/b"));
+        assertThat(x).isNotEqualTo(y);
+        var run = ok(checkout("s1-a", "probes/a/b"));
+
+        assertThat(run.stdout()).contains("sha=" + y);
+        assertThat(ok(git(co("s1-a"), "rev-parse", "HEAD")).stdout().strip()).isEqualTo(y);
+    }
+
+    @Test
     void theProbeRef_survivesFurtherCheckouts_whichPruneTheMirror() throws Exception {
         ok(init());
         var sha = pushNew("refs/probes/s1/x", "2026-11-11T00:00:00Z");
@@ -386,7 +403,22 @@ class BbProbesIT {
 
         assertThat(run.stdout()).contains("deleted refs/probes/s1/old " + sha);
         assertThat(refSha(probes, "refs/probes/s1/old")).isNull();
-        assertThat(git(probes, "cat-file", "-e", sha + "^{commit}").rc()).as("gc --prune=now took the object").isNotZero();
+        assertThat(git(probes, "cat-file", "-e", sha + "^{commit}").rc()).as("gc --prune=1.hour.ago keeps a fresh object").isZero();
+        ageObjects(2 * 3600L);
+        ok(reap());
+        assertThat(git(probes, "cat-file", "-e", sha + "^{commit}").rc()).as("an object older than the margin is pruned").isNotZero();
+        ok(git(probes, "fsck", "--no-dangling"));
+    }
+
+    /// back-dates every object file of probes.git, so that gc sees it as older than its prune margin
+    private void ageObjects(long ageSeconds) throws IOException {
+        var when = java.nio.file.attribute.FileTime.from(Instant.now().minusSeconds(ageSeconds));
+
+        try (var files = Files.walk(probes.resolve("objects"))) {
+            for (var path : files.filter(Files::isRegularFile).toList()) {
+                Files.setLastModifiedTime(path, when);
+            }
+        }
     }
 
     @Test
@@ -407,13 +439,34 @@ class BbProbesIT {
     }
 
     @Test
-    void theReaper_ageIsTheFirstReflogEntry_aLaterUpdateDoesNotRenewIt() throws Exception {
+    void theReaper_ageIsTheLastUpdate_aRePushRenewsIt() throws Exception {
         ok(init());
         pushNew("refs/probes/s1/x", OLD_DATE);
         ageReflog("refs/probes/s1/x", 8 * DAY);
         var newer = probeCommit("2026-11-11T00:00:00Z");
 
         ok(git(lane, "push", "-q", "-f", probes.toString(), newer + ":refs/probes/s1/x"));
+        var log = probes.resolve("logs/refs/probes/s1/x");
+
+        assertThat(Files.readAllLines(log)).as("a first (old) entry and a later (fresh) one").hasSize(2);
+        var run = ok(reap());
+
+        assertThat(run.stdout()).doesNotContain("deleted refs/");
+        assertThat(refSha(probes, "refs/probes/s1/x")).isEqualTo(newer);
+    }
+
+    @Test
+    void theReaper_anOldLastUpdate_isReaped_evenWithSeveralEntries() throws Exception {
+        ok(init());
+        pushNew("refs/probes/s1/x", OLD_DATE);
+        var newer = probeCommit("2026-11-11T00:00:00Z");
+
+        ok(git(lane, "push", "-q", "-f", probes.toString(), newer + ":refs/probes/s1/x"));
+        var log = probes.resolve("logs/refs/probes/s1/x");
+        var stamp = Instant.now().getEpochSecond() - 8 * DAY;
+        var lines = Files.readAllLines(log).stream().map(l -> l.replaceFirst("> \\d+ ", "> " + stamp + " ")).toList();
+
+        Files.write(log, lines);
         var run = ok(reap());
 
         assertThat(run.stdout()).contains("deleted refs/probes/s1/x " + newer);
