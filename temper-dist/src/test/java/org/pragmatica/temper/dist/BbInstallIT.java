@@ -186,6 +186,10 @@ class BbInstallIT {
         assertThat(pin("BB_BUILD_PRE31")).isEqualTo(BbFixtures.md5(prev("bb-build.pre31")));
         assertThat(pin("BB_QUEUE_PRE31")).isEqualTo(BbFixtures.md5(prev("bb-queue.pre31")));
         assertThat(pin("BB_TICKETS_PRE31")).isEqualTo(BbFixtures.md5(prev("bb-tickets.pre31")));
+        assertThat(pin("BB_BUILD_PRERC")).isEqualTo(BbFixtures.md5(prev("bb-build.prerc")));
+        assertThat(pin("BB_QUEUE_PRERC")).isEqualTo(BbFixtures.md5(prev("bb-queue.prerc")));
+        assertThat(pin("BB_LIB_PRERC")).isEqualTo(BbFixtures.md5(prev("bb-queue-lib.sh.prerc")));
+        assertThat(pin("BB_WAIT_PRERC")).isEqualTo(BbFixtures.md5(prev("bb-wait.prerc")));
         assertThat(pin("BB_HOLD_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-hold")));
         assertThat(pin("BB_WAIT_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-wait")));
         assertThat(pin("BB_NETNS_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-netns-run")));
@@ -337,6 +341,29 @@ class BbInstallIT {
         assertThat(tools.resolve("bb-build.bak-" + pin("BB_BUILD_PRE31"))).hasBinaryContent(prev("bb-build.pre31"));
     }
 
+    /// The bb-build, bb-queue-lib.sh, bb-queue and bb-wait live since #33 (BB_*_PRERC: the ticket rc= was read from .bb/rc) are accepted sources and are replaced, backed up under their md5.
+    @Test
+    void aHostRunningThePreRcTools_isUpdatedToTheOnesThatRecordTheExitStatus() throws Exception {
+        var tools = host("h1");
+
+        assertThat(install("builder@h1").rc()).isZero();
+        var names = List.of("bb-build", "bb-queue", "bb-queue-lib.sh", "bb-wait");
+        for (var name : names) {
+            Files.write(tools.resolve(name), prev(name + ".prerc"));
+        }
+
+        var run = install("builder@h1");
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        for (var name : names) {
+            var key = (name.equals("bb-queue-lib.sh") ? "BB_LIB" : name.toUpperCase().replace('-', '_')) + "_";
+
+            assertThat(run.stdout()).contains("installed builder@h1 " + name + " before=" + pin(key + "PRERC") + " after=" + pin(key + "NEW"));
+            assertThat(tools.resolve(name)).hasBinaryContent(Files.readAllBytes(OPS_BB.resolve(name)));
+            assertThat(tools.resolve(name + ".bak-" + pin(key + "PRERC"))).hasBinaryContent(prev(name + ".prerc"));
+        }
+    }
+
     /// The bb-netns-run of 2026-11-11 (BB_NETNS_PREV, no docker socket in the container; live on c3/c4/d1) is an accepted source and is replaced, backed up under its md5.
     @Test
     void aHostRunningThePreviousNetnsRun_isUpdatedToTheOneThatReachesDocker() throws Exception {
@@ -419,6 +446,7 @@ class BbInstallIT {
                                                                  + " expected=" + BbFixtures.BB_BUILD_OLD
                                                                  + "|a1100c916b866ad3716bc4095ddb1991|cae49573d06f632d3081f7d5be1e9b66|" + pin("BB_BUILD_LIVE")
                                                                  + "|" + pin("BB_BUILD_PRE31")
+                                                                 + "|" + pin("BB_BUILD_PRERC")
                                                                  + "|" + pin("BB_BUILD_NEW"));
         assertThat(listing(good)).isEqualTo(goodBefore);
         assertThat(listing(diverged)).isEqualTo(divergedBefore);
@@ -453,11 +481,13 @@ class BbInstallIT {
         assertThat(run.stdout()).as("every accepted pin is named")
                   .contains("bb-queue-lib.sh installed=" + BbFixtures.md5("other lib\n".getBytes())
                            + " expected=" + BbFixtures.BB_LIB_OLD
-                           + "|621b2252c3da05e7dd1161d076908864|" + pin("BB_LIB_NEW"))
+                           + "|621b2252c3da05e7dd1161d076908864|" + pin("BB_LIB_PRERC")
+                           + "|" + pin("BB_LIB_NEW"))
                   .contains("bb-queue installed=" + BbFixtures.md5("unrelated tool\n".getBytes())
                            + " expected=" + BbFixtures.BB_QUEUE_OLD
                            + "|a04b7be02f840d4f1e2bd19c54c52b3f|" + pin("BB_QUEUE_LIVE")
                            + "|" + pin("BB_QUEUE_PRE31")
+                           + "|" + pin("BB_QUEUE_PRERC")
                            + "|" + pin("BB_QUEUE_NEW"));
     }
 
