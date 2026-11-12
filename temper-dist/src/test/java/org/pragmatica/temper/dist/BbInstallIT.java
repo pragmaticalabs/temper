@@ -179,6 +179,7 @@ class BbInstallIT {
         assertThat(pin("BB_QUEUE_PREV")).isEqualTo(BbFixtures.md5(prev("bb-queue")));
         assertThat(pin("BB_QUEUE_LIVE")).isEqualTo(BbFixtures.md5(prev("bb-queue.live")));
         assertThat(pin("BB_PORTGROUP_PREV")).isEqualTo(BbFixtures.md5(prev("bb-portgroup.py")));
+        assertThat(pin("BB_BUILD_LIVE")).isEqualTo(BbFixtures.md5(prev("bb-build.live")));
         assertThat(pin("BB_NETNS_PREV")).isEqualTo(BbFixtures.md5(prev("bb-netns-run")));
         assertThat(pin("BB_HOLD_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-hold")));
         assertThat(pin("BB_WAIT_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-wait")));
@@ -281,6 +282,20 @@ class BbInstallIT {
         assertThat(ok.stdout()).contains("installed builder@h1 bb-portgroup.py before=" + pin("BB_PORTGROUP_PREV") + " after=" + pin("BB_PORTGROUP_NEW"));
         assertThat(tools.resolve("bb-portgroup.py.bak-" + pin("BB_PORTGROUP_PREV"))).hasBinaryContent(prev("bb-portgroup.py"));
         assertThat(tools.resolve("bb-build.bak-" + pin("BB_BUILD_PREV"))).hasBinaryContent(prev("bb-build"));
+    }
+
+    /// The bb-build the 2026-11-11 hosts run (BB_BUILD_LIVE, no requireDocker flag) is an accepted source and is replaced, backed up under its md5.
+    @Test
+    void aHostRunningTheLiveBbBuild_isUpdatedToTheOneThatRequiresDocker() throws Exception {
+        var tools = host("h1");
+
+        assertThat(install("builder@h1").rc()).isZero();
+        Files.write(tools.resolve("bb-build"), prev("bb-build.live"));
+        var run = install("builder@h1");
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        assertThat(run.stdout()).contains("installed builder@h1 bb-build before=" + pin("BB_BUILD_LIVE") + " after=" + pin("BB_BUILD_NEW"));
+        assertThat(tools.resolve("bb-build.bak-" + pin("BB_BUILD_LIVE"))).hasBinaryContent(prev("bb-build.live"));
     }
 
     /// The bb-netns-run of 2026-11-11 (BB_NETNS_PREV, no docker socket in the container; live on c3/c4/d1) is an accepted source and is replaced, backed up under its md5.
