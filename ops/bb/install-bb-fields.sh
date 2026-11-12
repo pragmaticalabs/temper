@@ -14,7 +14,7 @@
 #   with no ssh made.
 # Phase 1, read-only, EVERY target first: installed bb-build is one of BB_BUILD_OLD|MID|PREV|LIVE|PRE31|NEW, bb-queue-lib.sh one of BB_LIB_OLD|PREV|NEW,
 #   bb-queue one of BB_QUEUE_OLD|PREV|LIVE|PRE31|NEW, bb-tickets is absent, BB_TICKETS_OLD|PRE31|NEW, bb-hold is absent, BB_HOLD_OLD (the 2026-11-09
-#   host snapshot) or BB_HOLD_NEW, bb-wait is absent or its NEW, bb-netns-run is absent, BB_NETNS_PREV or BB_NETNS_NEW, bb-portgroup.py is absent, BB_PORTGROUP_PREV or BB_PORTGROUP_NEW, bb-mutate is absent or BB_MUTATE_NEW. Any mismatch prints `refused <target> <file> installed=<md5|absent>
+#   host snapshot) or BB_HOLD_NEW, bb-wait is absent or its NEW, bb-netns-run is absent, BB_NETNS_PREV or BB_NETNS_NEW, bb-portgroup.py is absent, BB_PORTGROUP_PREV or BB_PORTGROUP_NEW, bb-mutate is absent, BB_MUTATE_OLD or BB_MUTATE_NEW. Any mismatch prints `refused <target> <file> installed=<md5|absent>
 #   expected=<pin>[|<pin>...]` (every accepted pin except `absent`, in the order above) for every mismatch on every target and exits 65 having written nothing anywhere; an unreachable target is 69.
 # Phase 2, per target and per file to change (bb-mutate, bb-tickets, bb-hold, bb-wait, bb-netns-run, bb-portgroup.py, bb-queue-lib.sh, bb-queue,
 #   then bb-build: the helpers and the lib before the tools that call or source them), one remote `bash -s` script: receive the file as
@@ -55,7 +55,8 @@ readonly BB_NETNS_PREV=9661165d4ef938ea43eec5b8d2d619d9   # 2026-11-11: no docke
 readonly BB_NETNS_NEW=bf05b7c51c2f7863ee685a195273e195
 readonly BB_PORTGROUP_PREV=a93ade2ff7dddcc75cee3d4169a08499   # the 2026-11-09 host snapshot, live on c4/d1 since 2026-11-11
 readonly BB_PORTGROUP_NEW=884caf3cf37b12cf5cf1d97e96f76a4c
-readonly BB_MUTATE_NEW=f9bfbd37c5feafe67995f6716e8fecb0
+readonly BB_MUTATE_OLD=f9bfbd37c5feafe67995f6716e8fecb0   # the host snapshot, identical on all four hosts: batch credit unsound for multi-module specs
+readonly BB_MUTATE_NEW=fb97c07e442d441f8c42b3057108c600
 readonly TARGET_RE='^[a-z_][a-z0-9_-]{0,31}@[A-Za-z0-9.:-]+$'
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -91,6 +92,7 @@ accepted_of() {  # the md5s a host may hold besides absent, in the order the ref
     bb-tickets) echo "$BB_TICKETS_OLD $BB_TICKETS_PRE31 $BB_TICKETS_NEW" ;;
     bb-portgroup.py) echo "$BB_PORTGROUP_PREV $BB_PORTGROUP_NEW" ;;
     bb-netns-run) echo "$BB_NETNS_PREV $BB_NETNS_NEW" ;;
+    bb-mutate) echo "$BB_MUTATE_OLD $BB_MUTATE_NEW" ;;
     *) new_of "$1" ;;
   esac
 }

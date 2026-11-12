@@ -191,6 +191,7 @@ class BbInstallIT {
         assertThat(pin("BB_NETNS_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-netns-run")));
         assertThat(pin("BB_PORTGROUP_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-portgroup.py")));
         assertThat(pin("BB_MUTATE_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-mutate")));
+        assertThat(pin("BB_MUTATE_OLD")).isEqualTo(BbFixtures.md5(prev("bb-mutate")));
     }
 
     /// The 2026-11-09 repo version of bb-build, bb-queue-lib.sh or bb-queue (what cloudbb-3 holds), vendored verbatim as `bb/<name>.prev`.
@@ -202,7 +203,11 @@ class BbInstallIT {
         }
     }
 
-    private static final List<String> NEW_FILES = List.of("bb-mutate", "bb-hold", "bb-wait", "bb-netns-run", "bb-portgroup.py");
+    private static final List<String> NEW_FILES = List.of("bb-mutate",
+                                                          "bb-hold",
+                                                          "bb-wait",
+                                                          "bb-netns-run",
+                                                          "bb-portgroup.py");
 
     @Test
     void success_installsAllFourFiles_keepsBackups_andASecondRunChangesNothing() throws Exception {
@@ -369,6 +374,21 @@ class BbInstallIT {
         assertThat(run.stdout()).contains("installed builder@h1 bb-queue before=" + pin("BB_QUEUE_LIVE")
                                          + " after=" + pin("BB_QUEUE_NEW"));
         assertThat(tools.resolve("bb-queue")).hasBinaryContent(Files.readAllBytes(OPS_BB.resolve("bb-queue")));
+    }
+
+    /// The bb-mutate on all four hosts (BB_MUTATE_OLD, batch credit unsound for multi-module specs) is an accepted source and is replaced, backed up under its md5.
+    @Test
+    void aHostRunningTheOldBbMutate_isUpdatedToTheBatchSoundOne() throws Exception {
+        var tools = host("h1");
+
+        Files.write(tools.resolve("bb-mutate"), prev("bb-mutate"));
+        var run = install("builder@h1");
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        assertThat(run.stdout()).contains("installed builder@h1 bb-mutate before=" + pin("BB_MUTATE_OLD")
+                                         + " after=" + pin("BB_MUTATE_NEW"));
+        assertThat(tools.resolve("bb-mutate")).hasBinaryContent(Files.readAllBytes(OPS_BB.resolve("bb-mutate")));
+        assertThat(tools.resolve("bb-mutate.bak-" + pin("BB_MUTATE_OLD"))).hasBinaryContent(prev("bb-mutate"));
     }
 
     /// c4/d1 shape: a host already holding the live set is accepted and nothing is written.
