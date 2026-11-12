@@ -7,6 +7,11 @@
 #   /proc/<pid>/cwd, pgrep and the queue's kill set see containerized processes exactly like host ones (same uid, same paths).
 # BB_NETNS_NETWORK overrides the docker network (default bridge); it exists only for the negative control (container:<name> shares another run namespace).
 # Name bb-<ticket-id>: `bb-queue cancel --running` docker-kills it. No HCLOUD_TOKEN and no other host env enters the container.
+# DOCKER (2026-11-12): the host docker socket (BB_DOCKER_SOCK overrides the path, tests only) it is mounted at /var/run/docker.sock with its
+#   group added, and TESTCONTAINERS_HOST_OVERRIDE=<gateway of the network the container runs on> lets testcontainers reach the sibling containers' published
+#   ports from inside the namespace (their ports are published on the host, i.e. on the gateway). No gateway = exit 3 (fail closed, never a silent skip).
+#   Before maven a canary runs `docker version` inside the container; if the daemon cannot be reached: "docker unreachable inside netns", exit 97.
+#   No socket = exit 3, the same fail-closed rule: a netns ticket never runs without docker (BB_PG_ISOLATE=0 at enqueue is the host-run escape).
 # stdout/stderr are maven's (the waiter redirects them to .bb/build.log); the exit code is maven's (125-127 = docker itself failed).
 set -u
 [ $# -ge 3 ] || { echo "usage: bb-netns-run <ticket-id> <checkout> <mvn> [args...]" >&2; exit 2; }
@@ -22,4 +27,11 @@ ARGS=(--rm --init --name "bb-$ID" --label "bb.ticket=$ID" --user "$(id -u):$(id 
       -e "HOME=$HOME" -e "USER=$(id -un)" -e JAVA_HOME=/usr/lib/jvm/java-25-openjdk-amd64 -e PATH=/usr/local/bin:/usr/bin:/bin)
 for d in alternatives java-25-openjdk java-openjdk ssl ca-certificates; do [ -e "/etc/$d" ] && ARGS+=(-v "/etc/$d:/etc/$d:ro"); done
 for v in LANG LC_ALL TZ MAVEN_OPTS; do [ -n "${!v:-}" ] && ARGS+=(-e "$v=${!v}"); done
-exec docker run "${ARGS[@]}" "$IMG" "$MVN" "$@"
+SOCK=${BB_DOCKER_SOCK:-/var/run/docker.sock}; NET=${BB_NETNS_NETWORK:-bridge}
+[ -S "$SOCK" ] || { echo "bb-netns-run: no docker socket at $SOCK: a netns ticket must reach docker (BB_PG_ISOLATE=0 at enqueue runs it on the host)" >&2; exit 3; }
+GW=$(docker network inspect -f '{{(index .IPAM.Config 0).Gateway}}' "$NET" 2> /dev/null) || GW=""
+[ -n "$GW" ] || { echo "bb-netns-run: docker socket present but no gateway of network '$NET' (docker network inspect failed): refusing to run without docker" >&2; exit 3; }
+SG=$(stat -c %g "$SOCK") || { echo "bb-netns-run: cannot stat $SOCK" >&2; exit 3; }
+ARGS+=(-v "$SOCK:/var/run/docker.sock" --group-add "$SG" -e "TESTCONTAINERS_HOST_OVERRIDE=$GW")
+CANARY='docker version --format {{.Server.Version}} > /dev/null 2>&1 || { echo "bb-netns-run: docker unreachable inside netns" >&2; exit 97; }; exec "$@"'
+exec docker run "${ARGS[@]}" "$IMG" /usr/bin/bash -c "$CANARY" bb-netns "$MVN" "$@"

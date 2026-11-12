@@ -12,6 +12,8 @@
 # PORT GROUP (2026-09-29): a run that will execute tests of a fixed-port module (~/work/port-group-modules; decided by
 # bb-portgroup.py from the checkout's own poms and the args) is granted only while no other port-group run is running.
 # BB_PORT_GROUP=1 forces membership, BB_PORT_GROUP=0 forces exclusion.
+# REQUIRE DOCKER (2026-11-12): both maven launches below end with -Daether.requireDocker=true, after the caller's args (pragmatica #2591: a Docker IT
+# class FAILS instead of silently not running when Docker is absent; temper ignores the property). Not an override point.
 # ISOLATED SLOTS (2026-11-11): a group ticket's maven runs inside its own docker network namespace (bb-netns-run: host userland
 # mounted read-only, checkout and $HOME at the same paths, own loopback), so identical fixed ports cannot collide and up to N
 # (~/work/port-group-slots, default 3) group tickets run at once per host, each holding a slot (bb-queue shows it). No change to the
@@ -65,9 +67,9 @@ if [ "${1:-}" = __run ]; then
   (
     cd "$CO"
     if [ "$(field "$T" iso)" = 1 ]; then
-      "$(dirname "$SELF")/bb-netns-run" "$ID" "$CO" "$MVN" "$@" > "$B/build.log" 2>&1
+      "$(dirname "$SELF")/bb-netns-run" "$ID" "$CO" "$MVN" "$@" -Daether.requireDocker=true > "$B/build.log" 2>&1
     else
-      env -u HCLOUD_TOKEN JAVA_HOME=/usr/lib/jvm/java-25-openjdk-amd64 "$MVN" "$@" > "$B/build.log" 2>&1
+      env -u HCLOUD_TOKEN JAVA_HOME=/usr/lib/jvm/java-25-openjdk-amd64 "$MVN" "$@" -Daether.requireDocker=true > "$B/build.log" 2>&1
     fi
     rc=$?; date +%s > "$B/end"; echo $rc > "$B/rc"
   ) 8>&- &
