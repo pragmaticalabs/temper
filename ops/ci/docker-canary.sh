@@ -15,7 +15,9 @@ if [ "${CANARY_SKIP_DOCKER_INFO:-}" != 1 ] && ! docker info >/dev/null 2>&1; the
     fail=1
 fi
 
-reports=$(find "$root" -type f -name 'TEST-*.xml' \( -path '*/target/surefire-reports*/*' -o -path '*/target/failsafe-reports/*' \) | sort)
+# Only <module>/target/{surefire,failsafe}-reports/TEST-*.xml: tests under test write their own fixture reports deeper
+# down (temper-worker/target/docker-it/...), and those are not this build's results.
+reports=$(find "$root" -mindepth 4 -maxdepth 4 -type f -name 'TEST-*.xml' \( -path '*/target/surefire-reports*/*' -o -path '*/target/failsafe-reports/*' \) | sort)
 if [ -z "$reports" ]; then
     echo "::error::no surefire/failsafe reports under $root: nothing ran" >&2
     exit 1

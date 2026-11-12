@@ -16,6 +16,10 @@ mk skip '<testsuite name="A" tests="1" skipped="1"><testcase name="t"><skipped><
 for bad in zero skip; do
     if "$here/docker-canary.sh" "$tmp/$bad" >/dev/null 2>&1; then echo "FAIL: $bad must fail"; exit 1; fi
 done
+mk fixture "$nested"
+mkdir -p "$tmp/fixture/m/target/docker-it/e/target/surefire-reports"
+printf '%s\n' '<testsuite name="F" tests="0"></testsuite>' > "$tmp/fixture/m/target/docker-it/e/target/surefire-reports/TEST-f.xml"
+"$here/docker-canary.sh" "$tmp/fixture" >/dev/null || { echo "FAIL: a test's own fixture report must be ignored"; exit 1; }
 mkdir -p "$tmp/empty"
 if "$here/docker-canary.sh" "$tmp/empty" >/dev/null 2>&1; then echo "FAIL: no reports must fail"; exit 1; fi
 echo "docker canary self-test: ok"
