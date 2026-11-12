@@ -21,7 +21,8 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 /// Probes (each red, then reverted): drop the `-v <sock>:/var/run/docker.sock` mount ->
 /// [#withTheSocket_theContainerGetsTheMount_theGroup_andTheGatewayOverride]; hard-code a gateway ->
 /// [#theGatewayIsThatOfTheNetworkTheContainerRunsOn] and the first; drop the `[ -n "$GW" ]` refusal ->
-/// [#withoutAGateway_theRunFailsClosed_andDockerNeverRuns]; drop the canary -> [#aDockerThatCannotBeReached_failsBeforeMaven].
+/// [#withoutAGateway_theRunFailsClosed_andDockerNeverRuns]; let a missing socket through ->
+/// [#withoutTheSocket_theRunFailsClosed_andDockerNeverRuns]; drop the canary -> [#aDockerThatCannotBeReached_failsBeforeMaven].
 class BbNetnsDockerIT {
     private static final Path SCRIPT = BbFixtures.OPS_BB.resolve("bb-netns-run");
 
@@ -105,13 +106,13 @@ class BbNetnsDockerIT {
     }
 
     @Test
-    void withoutTheSocket_theContainerGetsNoDockerAndNoOverride() throws Exception {
+    void withoutTheSocket_theRunFailsClosed_andDockerNeverRuns() throws Exception {
         var run = netns(Map.of());
 
-        assertThat(run.rc()).as(run.stderr()).isZero();
-        assertThat(run.stdout()).contains("MAVEN RAN -B verify");
-        assertThat(dockerLog()).doesNotContain("docker.sock").doesNotContain("--group-add").doesNotContain("TESTCONTAINERS_HOST_OVERRIDE")
-                               .doesNotContain("network inspect").doesNotContain("docker version");
+        assertThat(run.rc()).isEqualTo(3);
+        assertThat(run.stderr()).contains("no docker socket at " + socket);
+        assertThat(run.stdout()).doesNotContain("MAVEN RAN");
+        assertThat(dockerLog()).doesNotContain("docker run");
     }
 
     @Test
