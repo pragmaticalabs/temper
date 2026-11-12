@@ -1,6 +1,7 @@
 package org.pragmatica.temper.controller;
 
 import java.security.SecureRandom;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.util.List;
@@ -561,6 +562,8 @@ public record Controller(ControllerConfig config,
                                                                                config.repo().origin(),
                                                                                clock)),
                                      CloseTask.closeTask(store.tasks(), git.merges(), clock),
+                                     git.mirror(),
+                                     Duration.ofMinutes(config.fleet().laneStaleMin()),
                                      clock);
     }
 

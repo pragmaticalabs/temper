@@ -103,6 +103,7 @@ public sealed interface ConfigLoader {
                                     "queueWaitAlarmMin",
                                     "portGroupStallAlarmMin",
                                     "portGroupHeldAgeAlarmMin",
+                                    "laneStaleMin",
                                     DEPRECATED_PORTGROUP_HELD_ALARM_MIN);
 
     /// Reads the build's version ([ControllerVersion#bundled]), then parses the file.
@@ -349,11 +350,12 @@ public sealed interface ConfigLoader {
                                                                   Fleet.DEFAULT_PORTGROUP_STALL_ALARM_MIN),
                                                      alarmMinutes(doc,
                                                                   "portGroupHeldAgeAlarmMin",
-                                                                  Fleet.DEFAULT_PORTGROUP_HELD_AGE_ALARM_MIN))
+                                                                  Fleet.DEFAULT_PORTGROUP_HELD_AGE_ALARM_MIN),
+                                                     alarmMinutes(doc, "laneStaleMin", Fleet.DEFAULT_LANE_STALE_MIN))
                                                 .map(Fleet::fleet));
     }
 
-    /// `[fleet] queueWaitAlarmMin`, `portGroupStallAlarmMin`, `portGroupHeldAgeAlarmMin`: a whole number from 1 to
+    /// `[fleet] queueWaitAlarmMin`, `portGroupStallAlarmMin`, `portGroupHeldAgeAlarmMin`, `laneStaleMin`: a whole number from 1 to
     /// [Fleet#MAX_ALARM_MIN]; anything else refuses the start. There is no off switch.
     private static Result<Integer> alarmMinutes(TomlDocument doc, String key, int fallback) {
         return TomlValues.optionalWholeBetween(option(doc.sections().get("fleet")).or(Map.of()),

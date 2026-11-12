@@ -288,7 +288,9 @@ public sealed interface TaskVerbs {
                                  granted.items(),
                                  granted.rulings(),
                                  granted.evidence(),
-                                 granted.jobs());
+                                 granted.jobs(),
+                                 granted.checkpoint(),
+                                 granted.warnings());
     }
 
     // ---- lease verbs -------------------------------------------------------------------------------------------------

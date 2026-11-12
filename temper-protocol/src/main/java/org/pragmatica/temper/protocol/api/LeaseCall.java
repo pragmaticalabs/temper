@@ -11,8 +11,22 @@ import org.pragmatica.lang.Option;
 public sealed interface LeaseCall {
     long epoch();
 
-    /// `POST tasks/{id}/heartbeat`.
-    record Heartbeat(long epoch) implements LeaseCall {}
+    /// `POST tasks/{id}/heartbeat`; the optional `report` is the agent's self-reported tree (head, dirty, unpushed).
+    record Heartbeat(long epoch, Option<Tree> report) implements LeaseCall {
+        public Heartbeat(long epoch) {
+            this(epoch, Option.none());
+        }
+    }
+
+    /// The tree an agent reports at a heartbeat: HEAD sha, changed files, commits not pushed.
+    record Tree(String head, int dirty, int unpushed) {}
+
+    /// `POST tasks/{id}/checkpoint`: the pushed head, the lane's checklist and read map, and a note; at most 16 KB on the wire.
+    record Checkpoint(long epoch,
+                      String pushedSha,
+                      List<CheckpointDto.Item> checklist,
+                      List<CheckpointDto.Entry> readMap,
+                      String note) implements LeaseCall {}
 
     /// `POST tasks/{id}/wait`: linked jobs, CI, or both.
     record Wait(long epoch, Option<List<Long>> jobs, Option<Boolean> ci) implements LeaseCall {}

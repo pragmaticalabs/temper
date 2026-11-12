@@ -91,6 +91,8 @@ final class ControllerHarness implements AutoCloseable {
                                                            LinkTiming.DEFAULT.unrecordedAfter());
 
     final Map<String, String> refs = new ConcurrentHashMap<>(Map.of("main", SHA_A));
+    /// Shas the fake mirror treats as ancestors of a branch's tip (a lane checkpoint's `pushedSha`), by branch.
+    final Map<String, Set<String>> onBranch = new ConcurrentHashMap<>();
     final Store store;
     final FakeSsh ssh;
     final Controller.Running running;
@@ -358,6 +360,14 @@ final class ControllerHarness implements AutoCloseable {
             @Override
             public Promise<Option<Sha>> branchTip(Ref branch) {
                 return Promise.success(Option.option(refs.get(branch.value())).flatMap(sha -> Sha.sha(sha).option()));
+            }
+
+            @Override
+            public Promise<Boolean> branchContains(Ref branch, Sha sha) {
+                return Promise.success(sha.value()
+                                          .equals(refs.get(branch.value())) || onBranch.getOrDefault(branch.value(),
+                                                                                                     Set.of())
+                                                                                       .contains(sha.value()));
             }
         };
         var tree = new TreeReader() {

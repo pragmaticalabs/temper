@@ -1,7 +1,5 @@
 package org.pragmatica.temper.controller.git;
 
-import org.pragmatica.temper.testsupport.HermeticProcess;
-
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -13,10 +11,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Nested;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.io.TempDir;
+import org.pragmatica.temper.testsupport.HermeticProcess;
 import org.pragmatica.lang.Option;
 import org.pragmatica.lang.Promise;
 import org.pragmatica.lang.Result;
@@ -38,7 +33,13 @@ import org.pragmatica.temper.protocol.exec.Completed;
 import org.pragmatica.temper.protocol.exec.ProcessRunner;
 import org.pragmatica.temper.protocol.exec.Spawned;
 
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Nested;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
 import static org.assertj.core.api.Assertions.assertThat;
+
 
 class GitCliTest {
     /// Against a real origin repository in a temp dir (needs only the `git` binary).
@@ -46,14 +47,18 @@ class GitCliTest {
     class RealGit {
         @TempDir
         Path dir;
+
         private Path origin;
         private GitCli git;
         private String head;
 
         private String run(Path in, String... argv) throws IOException, InterruptedException {
             var process = HermeticProcess.builder(argv).directory(in.toFile()).redirectErrorStream(true).start();
-            var out = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8).trim();
+            var out = new String(process.getInputStream().readAllBytes(),
+                                 StandardCharsets.UTF_8).trim();
+
             assertThat(process.waitFor()).as(String.join(" ", argv) + ": " + out).isZero();
+
             return out;
         }
 
@@ -93,10 +98,48 @@ class GitCliTest {
             result.onFailure(cause -> assertThat(((Refusal) cause).code()).isEqualTo("source"));
         }
 
+        /// Lane checkpoint: `pushedSha` must be the branch's tip or an ancestor. Mutation: make `branchContains` ask
+        /// `containedInBranch` (any branch) and the "other branch" case turns red.
+        @Test
+        void branchContains_tipAndAncestorYes_otherBranchUnknownShaUnknownBranchNo() throws Exception {
+            run(origin, "git", "checkout", "-q", "-b", "lane");
+            Files.writeString(origin.resolve("lane.txt"), "lane\n");
+            run(origin, "git", "add", ".");
+            run(origin, "git", "commit", "-q", "-m", "lane one");
+            var laneOne = run(origin, "git", "rev-parse", "HEAD");
+
+            Files.writeString(origin.resolve("lane.txt"), "lane two\n");
+            run(origin, "git", "commit", "-q", "-a", "-m", "lane two");
+            var laneTip = run(origin, "git", "rev-parse", "HEAD");
+
+            run(origin, "git", "checkout", "-q", "main");
+            Files.writeString(origin.resolve("main.txt"), "main\n");
+            run(origin, "git", "add", ".");
+            run(origin, "git", "commit", "-q", "-m", "main two");
+            var mainTip = run(origin, "git", "rev-parse", "HEAD");
+            var lane = Ref.ref("lane").unwrap();
+
+            assertThat(git.branchContains(lane,
+                                          Sha.sha(laneTip).unwrap()).await().unwrap()).as("the tip").isTrue();
+            assertThat(git.branchContains(lane,
+                                          Sha.sha(laneOne).unwrap()).await().unwrap()).as("an ancestor").isTrue();
+            assertThat(git.branchContains(lane,
+                                          Sha.sha(head).unwrap()).await().unwrap()).as("the fork point is an ancestor")
+                      .isTrue();
+            assertThat(git.branchContains(lane,
+                                          Sha.sha(mainTip).unwrap()).await().unwrap()).as("on another branch only")
+                      .isFalse();
+            assertThat(git.branchContains(lane,
+                                          Sha.sha("1".repeat(40)).unwrap()).await().unwrap()).as("unknown object")
+                      .isFalse();
+            assertThat(git.branchContains(Ref.ref("no-such-branch").unwrap(),
+                                          Sha.sha(head).unwrap()).await().unwrap()).as("unknown branch")
+                      .isFalse();
+        }
+
         @Test
         void containedInBranch_afterFetch_trueForHeadFalseForUnknown() {
             git.fetch().await().unwrap();
-
             assertThat(git.containedInBranch(Sha.sha(head).unwrap()).await().unwrap()).isTrue();
             assertThat(git.containedInBranch(Sha.sha("1".repeat(40)).unwrap()).await().unwrap()).isFalse();
         }
@@ -104,15 +147,15 @@ class GitCliTest {
         @Test
         void fetch_secondCallFetchesIntoExistingMirror() {
             git.fetch().await().unwrap();
-
             assertThat(git.fetch().await().isSuccess()).isTrue();
         }
 
         @Test
         void facts_readsDeclaringFile_wholeWordOnly_fetchingWhenNeeded() {
-            var facts = git.facts(Sha.sha(head).unwrap(), Set.of("StreamPublishReshuffleTest")).await().unwrap();
-
+            var facts = git.facts(Sha.sha(head).unwrap(),
+                                  Set.of("StreamPublishReshuffleTest")).await().unwrap();
             var sources = facts.sources("StreamPublishReshuffleTest");
+
             assertThat(sources).hasSize(1);
             assertThat(sources.getFirst().path()).isEqualTo("aether/x/src/test/java/StreamPublishReshuffleTest.java");
             assertThat(sources.getFirst().content()).contains("class StreamPublishReshuffleTest {}");
@@ -123,7 +166,9 @@ class GitCliTest {
         void file_readsAFileInTheTree_noneForAnAbsentPath() {
             var sha = Sha.sha(head).unwrap();
 
-            assertThat(git.file(sha, "aether/x/src/test/java/StreamPublishReshuffleTest.java").await().unwrap()
+            assertThat(git.file(sha, "aether/x/src/test/java/StreamPublishReshuffleTest.java")
+                          .await()
+                          .unwrap()
                           .map(bytes -> new String(bytes, StandardCharsets.UTF_8))).isEqualTo(Option.some("class StreamPublishReshuffleTest {}\n"));
             assertThat(git.file(sha, "tools/ember-shard-weights.txt").await().unwrap().isEmpty()).isTrue();
         }
@@ -136,6 +181,7 @@ class GitCliTest {
     class PullHeads {
         @TempDir
         Path dir;
+
         private Path bare;
         private Path work;
         private GitCli git;
@@ -144,15 +190,21 @@ class GitCliTest {
         private String head;
         private final Map<Long, Promise<PullOrigin>> origins = new ConcurrentHashMap<>();
         private final List<PullNumber> asked = new CopyOnWriteArrayList<>();
+
         private final PullOrigins pulls = pull -> {
             asked.add(pull);
-            return origins.getOrDefault(pull.value(), Causes.cause("unscripted " + pull).promise());
+
+            return origins.getOrDefault(pull.value(),
+                                        Causes.cause("unscripted " + pull).promise());
         };
 
         private String run(Path in, String... argv) throws IOException, InterruptedException {
             var process = HermeticProcess.builder(argv).directory(in.toFile()).redirectErrorStream(true).start();
-            var out = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8).trim();
+            var out = new String(process.getInputStream().readAllBytes(),
+                                 StandardCharsets.UTF_8).trim();
+
             assertThat(process.waitFor()).as(String.join(" ", argv) + ": " + out).isZero();
+
             return out;
         }
 
@@ -163,6 +215,7 @@ class GitCliTest {
             run(work, "git", "add", file);
             run(work, "git", "commit", "-q", "-m", file);
             run(work, "git", "push", "-q", "origin", "HEAD:" + ref);
+
             return run(work, "git", "rev-parse", "HEAD");
         }
 
@@ -183,15 +236,20 @@ class GitCliTest {
             pullOnly = pushedOnlyAs("refs/pull/7/head", "pr7");
             mergeOnly = pushedOnlyAs("refs/pull/7/merge", "merge7");
             git = GitCli.gitCli(ProcessRunner.processRunner(), bare.toString(), dir.resolve("mirror.git"));
-            assertThat(run(bare, "git", "branch", "--contains", pullOnly)).as("the fixture's PR head is on no branch").isEmpty();
+            assertThat(run(bare, "git", "branch", "--contains", pullOnly)).as("the fixture's PR head is on no branch")
+                      .isEmpty();
         }
 
         private List<PullNumber> pullHeads(String sha) {
-            return git.pullHeadsContaining(Sha.sha(sha).unwrap()).await().unwrap();
+            return git.pullHeadsContaining(Sha.sha(sha).unwrap())
+                      .await()
+                      .unwrap();
         }
 
         private Result<PushedSource> resolved(SourceRequest request) {
-            return SourceResolver.sourceResolver(git, git, pulls).resolve(request).await();
+            return SourceResolver.sourceResolver(git, git, pulls)
+                                 .resolve(request)
+                                 .await();
         }
 
         private Result<PushedSource> bySha(String sha) {
@@ -200,13 +258,13 @@ class GitCliTest {
 
         private static void assertRefused(Result<PushedSource> result, String code) {
             assertThat(result.isFailure()).as("refused " + code).isTrue();
-            result.onFailure(cause -> assertThat(((Refusal) cause).code()).as(cause.message()).isEqualTo(code));
+            result.onFailure(cause -> assertThat(((Refusal) cause).code()).as(cause.message())
+                                                .isEqualTo(code));
         }
 
         @Test
         void pullHeadsContaining_thePullRequest_shaOnlyOnAPullHead() {
             git.fetch().await().unwrap();
-
             assertThat(git.containedInBranch(Sha.sha(pullOnly).unwrap()).await().unwrap()).isFalse();
             assertThat(pullHeads(pullOnly)).containsExactly(new PullNumber(7));
         }
@@ -214,9 +272,14 @@ class GitCliTest {
         @Test
         void pullHeadsContaining_none_shaOnlyOnAPullMergeRef() throws Exception {
             git.fetch().await().unwrap();
-
-            assertThat(run(dir, "git", "--git-dir", dir.resolve("mirror.git").toString(), "cat-file", "-t", mergeOnly))
-                .as("the --mirror clone brought the merge ref's commit").isEqualTo("commit");
+            assertThat(run(dir,
+                           "git",
+                           "--git-dir",
+                           dir.resolve("mirror.git").toString(),
+                           "cat-file",
+                           "-t",
+                           mergeOnly)).as("the --mirror clone brought the merge ref's commit")
+                      .isEqualTo("commit");
             assertThat(git.containedInBranch(Sha.sha(mergeOnly).unwrap()).await().unwrap()).isFalse();
             assertThat(pullHeads(mergeOnly)).isEmpty();
         }
@@ -224,12 +287,18 @@ class GitCliTest {
         @Test
         void containedInBranch_andPullHeads_none_shaInTheMirrorOnNoRef() throws Exception {
             var orphan = pushedOnlyAs("refs/heads/tmp", "orphan");
+
             git.fetch().await().unwrap();
             run(work, "git", "push", "-q", "origin", "--delete", "tmp");
             git.fetch().await().unwrap();
-
-            assertThat(run(dir, "git", "--git-dir", dir.resolve("mirror.git").toString(), "cat-file", "-t", orphan))
-                .as("the object outlives its pruned branch").isEqualTo("commit");
+            assertThat(run(dir,
+                           "git",
+                           "--git-dir",
+                           dir.resolve("mirror.git").toString(),
+                           "cat-file",
+                           "-t",
+                           orphan)).as("the object outlives its pruned branch")
+                      .isEqualTo("commit");
             assertThat(git.containedInBranch(Sha.sha(orphan).unwrap()).await().unwrap()).isFalse();
             assertThat(pullHeads(orphan)).isEmpty();
         }
@@ -237,7 +306,6 @@ class GitCliTest {
         @Test
         void pullHeadsContaining_none_unknownObject() {
             git.fetch().await().unwrap();
-
             assertThat(pullHeads("1".repeat(40))).isEmpty();
         }
 
@@ -258,7 +326,6 @@ class GitCliTest {
             git.fetch().await().unwrap();
             run(work, "git", "push", "-q", "origin", "--delete", "refs/pull/7/head");
             git.fetch().await().unwrap();
-
             assertThat(pullHeads(pullOnly)).isEmpty();
         }
 
@@ -266,7 +333,6 @@ class GitCliTest {
         @Test
         void resolve_bySha_pushedSource_shaOnlyOnASameRepoPullHead() {
             origins.put(7L, Promise.success(PullOrigin.SAME_REPO));
-
             var source = bySha(pullOnly).unwrap();
 
             assertThat(source.sha().value()).isEqualTo(pullOnly);
@@ -277,7 +343,6 @@ class GitCliTest {
         @Test
         void resolve_bySha_refusesForkPr_shaOnlyOnAForkPullHead() {
             origins.put(7L, Promise.success(PullOrigin.FORK));
-
             assertRefused(bySha(pullOnly), "fork-pr");
         }
 
@@ -286,14 +351,13 @@ class GitCliTest {
             run(work, "git", "push", "-q", "origin", pullOnly + ":refs/pull/9/head");
             origins.put(7L, Promise.success(PullOrigin.FORK));
             origins.put(9L, Promise.success(PullOrigin.SAME_REPO));
-
             assertThat(bySha(pullOnly).unwrap().sha().value()).isEqualTo(pullOnly);
         }
 
         @Test
         void resolve_bySha_refusesPrOriginUnverified_originUnknown() {
-            origins.put(7L, PullOriginError.Status.FACTORY.apply(429).promise());
-
+            origins.put(7L,
+                        PullOriginError.Status.FACTORY.apply(429).promise());
             var result = bySha(pullOnly);
 
             assertRefused(result, "pr-origin-unverified");
@@ -305,8 +369,8 @@ class GitCliTest {
         void resolve_bySha_sameRepoReachedFirst_aNewerUnverifiedPullHeadNotAsked() throws Exception {
             run(work, "git", "push", "-q", "origin", pullOnly + ":refs/pull/9/head");
             origins.put(7L, Promise.success(PullOrigin.SAME_REPO));
-            origins.put(9L, PullOriginError.Status.FACTORY.apply(403).promise());
-
+            origins.put(9L,
+                        PullOriginError.Status.FACTORY.apply(403).promise());
             assertThat(bySha(pullOnly).unwrap().sha().value()).isEqualTo(pullOnly);
             assertThat(asked).containsExactly(new PullNumber(7));
         }
@@ -321,13 +385,14 @@ class GitCliTest {
             run(work, "git", "commit", "-q", "-m", "pr5");
             var five = run(work, "git", "rev-parse", "HEAD");
             var refspecs = new java.util.ArrayList<>(List.of("git", "push", "-q", "origin", five + ":refs/pull/5/head"));
+
             for (long n = 6; n <= 80; n++) {
                 refspecs.add(pullOnly + ":refs/pull/" + n + "/head");
                 origins.put(n, Promise.success(PullOrigin.FORK));
             }
+
             run(work, refspecs.toArray(String[]::new));
             origins.put(5L, Promise.success(PullOrigin.SAME_REPO));
-
             assertThat(bySha(pullOnly).unwrap().sha().value()).isEqualTo(pullOnly);
             assertThat(asked).containsExactly(new PullNumber(5));
         }
@@ -336,8 +401,8 @@ class GitCliTest {
         void resolve_bySha_refusesPrOriginUnverified_forkAndUnverifiedPullHeads() throws Exception {
             run(work, "git", "push", "-q", "origin", pullOnly + ":refs/pull/9/head");
             origins.put(7L, Promise.success(PullOrigin.FORK));
-            origins.put(9L, PullOriginError.Status.FACTORY.apply(403).promise());
-
+            origins.put(9L,
+                        PullOriginError.Status.FACTORY.apply(403).promise());
             assertRefused(bySha(pullOnly), "pr-origin-unverified");
         }
 
@@ -350,19 +415,23 @@ class GitCliTest {
             run(work, "git", "add", "child");
             run(work, "git", "commit", "-q", "-m", "child of pr7");
             var descendant = run(work, "git", "rev-parse", "HEAD");
+
             run(work, "git", "push", "-q", "origin", descendant + ":refs/pull/40/head");
             run(work, "git", "push", "-q", "origin", pullOnly + ":refs/pull/2/head");
             run(work, "git", "push", "-q", "origin", pullOnly + ":refs/pull/10/head");
             git.fetch().await().unwrap();
-
-            assertThat(pullHeads(pullOnly)).containsExactly(new PullNumber(2), new PullNumber(7), new PullNumber(10), new PullNumber(40));
+            assertThat(pullHeads(pullOnly)).containsExactly(new PullNumber(2),
+                                                            new PullNumber(7),
+                                                            new PullNumber(10),
+                                                            new PullNumber(40));
         }
 
         /// An origin already known costs no call, and a known same-repo PR wins even after an earlier candidate fails.
         @Test
         void resolve_bySha_knownSameRepo_noApiCall() throws Exception {
             run(work, "git", "push", "-q", "origin", pullOnly + ":refs/pull/9/head");
-            origins.put(9L, PullOriginError.Status.FACTORY.apply(403).promise());
+            origins.put(9L,
+                        PullOriginError.Status.FACTORY.apply(403).promise());
             PullOrigins knowing = new PullOrigins() {
                 @Override
                 public Promise<PullOrigin> origin(PullNumber pull) {
@@ -376,8 +445,9 @@ class GitCliTest {
                            : Option.none();
                 }
             };
-
-            var source = SourceResolver.sourceResolver(git, git, knowing).resolve(SourceRequest.bySha(pullOnly).unwrap()).await();
+            var source = SourceResolver.sourceResolver(git, git, knowing)
+                                       .resolve(SourceRequest.bySha(pullOnly).unwrap())
+                                       .await();
 
             assertThat(source.unwrap().sha().value()).isEqualTo(pullOnly);
             assertThat(asked).isEmpty();
@@ -390,16 +460,19 @@ class GitCliTest {
             var requests = new java.util.concurrent.atomic.AtomicInteger();
             var server = com.sun.net.httpserver.HttpServer.create(new java.net.InetSocketAddress("127.0.0.1", 0), 0);
             var answer = "{\"head\":{\"repo\":{\"full_name\":\"o/r\"}},\"base\":{\"repo\":{\"full_name\":\"o/r\"}}}".getBytes();
-            server.createContext("/", exchange -> {
-                requests.incrementAndGet();
-                exchange.sendResponseHeaders(200, answer.length);
-                try (var out = exchange.getResponseBody()) {
-                    out.write(answer);
-                }
-            });
+
+            server.createContext("/",
+                                 exchange -> {
+                                     requests.incrementAndGet();
+                                     exchange.sendResponseHeaders(200, answer.length);
+                                     try (var out = exchange.getResponseBody()) {
+                                     out.write(answer);
+                                 }
+                                 });
             server.start();
             try {
-                var judge = GitHubPulls.gitHubPulls(java.net.URI.create("http://127.0.0.1:" + server.getAddress().getPort()),
+                var judge = GitHubPulls.gitHubPulls(java.net.URI.create("http://127.0.0.1:" + server.getAddress()
+                                                                                                    .getPort()),
                                                     "git@github.com:o/r.git");
                 var resolver = SourceResolver.sourceResolver(git, git, judge);
 
@@ -428,14 +501,13 @@ class GitCliTest {
         @Test
         void resolve_byPullRef_refusesForkPr_forkPullHead() {
             origins.put(7L, Promise.success(PullOrigin.FORK));
-
-            assertRefused(resolved(SourceRequest.byRef("refs/pull/7/head").unwrap()), "fork-pr");
+            assertRefused(resolved(SourceRequest.byRef("refs/pull/7/head").unwrap()),
+                          "fork-pr");
         }
 
         @Test
         void resolve_byPullRef_pushedSource_sameRepoPullHead() {
             origins.put(7L, Promise.success(PullOrigin.SAME_REPO));
-
             var source = resolved(SourceRequest.byRef("refs/pull/7/head").unwrap()).unwrap();
 
             assertThat(source.sha().value()).isEqualTo(pullOnly);
@@ -444,7 +516,8 @@ class GitCliTest {
 
         @Test
         void resolve_byMergeRef_refusesSource() {
-            assertRefused(resolved(SourceRequest.byRef("refs/pull/7/merge").unwrap()), "source");
+            assertRefused(resolved(SourceRequest.byRef("refs/pull/7/merge").unwrap()),
+                          "source");
             assertThat(asked).isEmpty();
         }
 
@@ -461,31 +534,44 @@ class GitCliTest {
     class Reactor {
         @TempDir
         Path dir;
+
         private Path origin;
         private GitCli git;
 
         private String run(String... argv) throws IOException, InterruptedException {
             var process = HermeticProcess.builder(argv).directory(origin.toFile()).redirectErrorStream(true).start();
-            var out = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8).trim();
+            var out = new String(process.getInputStream().readAllBytes(),
+                                 StandardCharsets.UTF_8).trim();
+
             assertThat(process.waitFor()).as(String.join(" ", argv) + ": " + out).isZero();
+
             return out;
         }
 
         private String commit(String message) throws Exception {
             run("git", "add", "-A");
             run("git", "commit", "-q", "-m", message);
+
             return run("git", "rev-parse", "HEAD");
         }
 
         private void pom(String module, String... modules) throws IOException {
             var directory = Files.createDirectories(origin.resolve(module));
+
             Files.writeString(directory.resolve("pom.xml"),
-                              "<project><modules>" + String.join("", Arrays.stream(modules).map(m -> "<module>" + m + "</module>").toList())
-                              + "</modules></project>");
+                              "<project><modules>" + String.join("",
+                                                                 Arrays.stream(modules)
+                                                                       .map(m -> "<module>" + m + "</module>")
+                                                                       .toList())
+                             + "</modules></project>");
         }
 
         private Option<ReactorModules> reactorAt(String sha) {
-            return git.facts(Sha.sha(sha).unwrap(), Set.of()).await().unwrap().reactor();
+            return git.facts(Sha.sha(sha).unwrap(),
+                             Set.of())
+                      .await()
+                      .unwrap()
+                      .reactor();
         }
 
         @BeforeEach
@@ -507,8 +593,10 @@ class GitCliTest {
             Files.writeString(origin.resolve(".mvn/maven.config"), "-T 1C\n--no-transfer-progress\n");
             var sha = commit("reactor");
 
-            assertThat(reactorAt(sha).map(found -> found.paths())).isEqualTo(Option.some(Set.of("", "core", "aether",
-                                                                                                                   "aether/ember")));
+            assertThat(reactorAt(sha).map(found -> found.paths())).isEqualTo(Option.some(Set.of("",
+                                                                                                "core",
+                                                                                                "aether",
+                                                                                                "aether/ember")));
         }
 
         @Test
@@ -516,6 +604,7 @@ class GitCliTest {
             pom("", "core", "gone");
             pom("core");
             var missing = commit("missing pom");
+
             pom("", "core");
             Files.createDirectories(origin.resolve(".mvn"));
             Files.writeString(origin.resolve(".mvn/maven.config"), "-Pwith-e2e\n");
@@ -534,7 +623,10 @@ class GitCliTest {
             ProcessRunner runner = new ProcessRunner() {
                 @Override
                 public Promise<Completed> run(Command command) {
-                    var rc = command.argv().contains("for-each-ref") ? 128 : 0;
+                    var rc = command.argv().contains("for-each-ref")
+                             ? 128
+                             : 0;
+
                     return Promise.success(Completed.completed("git", rc, new byte[0], "fatal".getBytes(), false));
                 }
 
@@ -544,7 +636,6 @@ class GitCliTest {
                 }
             };
             var git = GitCli.gitCli(runner, "origin", Path.of("/m"));
-
             var result = git.containedInBranch(Sha.sha("a".repeat(40)).unwrap()).await();
 
             assertThat(result.isFailure()).isTrue();
@@ -556,7 +647,11 @@ class GitCliTest {
             ProcessRunner runner = new ProcessRunner() {
                 @Override
                 public Promise<Completed> run(Command command) {
-                    return Promise.success(Completed.completed("git", 128, new byte[0], "not a git repository".getBytes(), false));
+                    return Promise.success(Completed.completed("git",
+                                                               128,
+                                                               new byte[0],
+                                                               "not a git repository".getBytes(),
+                                                               false));
                 }
 
                 @Override
@@ -564,8 +659,11 @@ class GitCliTest {
                     return Causes.cause("unused").result();
                 }
             };
-
-            var result = GitCli.gitCli(runner, "origin", Path.of("/m")).containedInBranch(Sha.sha("a".repeat(40)).unwrap()).await();
+            var result = GitCli.gitCli(runner,
+                                       "origin",
+                                       Path.of("/m"))
+                               .containedInBranch(Sha.sha("a".repeat(40)).unwrap())
+                               .await();
 
             assertThat(result.isFailure()).as("a broken mirror is a 503, not a source refusal").isTrue();
             result.onFailure(cause -> assertThat(cause).isInstanceOf(GitError.class));
@@ -578,6 +676,7 @@ class GitCliTest {
                 @Override
                 public Promise<Completed> run(Command command) {
                     seen.add(command.argv());
+
                     return Promise.success(Completed.completed("git", 2, new byte[0], new byte[0], false));
                 }
 
@@ -588,7 +687,6 @@ class GitCliTest {
             };
 
             GitCli.gitCli(runner, "--upload-pack=evil", Path.of("/m")).lsRemote(Ref.ref("main").unwrap()).await();
-
             assertThat(seen.getFirst()).containsSequence("--exit-code", "--", "--upload-pack=evil");
         }
 
@@ -603,8 +701,13 @@ class GitCliTest {
                     @Override
                     public Promise<Completed> run(Command command) {
                         var argv = command.argv();
-                        var rc = argv.contains(failing) ? 128 : 0;
-                        var out = argv.contains("ls-tree") ? "tools/ember-shard-weights.txt\n" : "";
+                        var rc = argv.contains(failing)
+                                 ? 128
+                                 : 0;
+                        var out = argv.contains("ls-tree")
+                                  ? "tools/ember-shard-weights.txt\n"
+                                  : "";
+
                         return Promise.success(Completed.completed("git", rc, out.getBytes(), "fatal".getBytes(), false));
                     }
 
@@ -613,11 +716,16 @@ class GitCliTest {
                         return Causes.cause("unused").result();
                     }
                 };
-
-                var result = GitCli.gitCli(runner, "origin", Path.of("/m")).file(Sha.sha(sha).unwrap(), "tools/ember-shard-weights.txt").await();
+                var result = GitCli.gitCli(runner,
+                                           "origin",
+                                           Path.of("/m"))
+                                   .file(Sha.sha(sha).unwrap(),
+                                         "tools/ember-shard-weights.txt")
+                                   .await();
 
                 assertThat(result.isFailure()).as(failing).isTrue();
-                result.onFailure(cause -> assertThat(((GitError.Failed) cause).operation()).as(failing).isEqualTo(failing));
+                result.onFailure(cause -> assertThat(((GitError.Failed) cause).operation()).as(failing)
+                                                    .isEqualTo(failing));
             }
         }
 
@@ -630,8 +738,13 @@ class GitCliTest {
                 @Override
                 public Promise<Completed> run(Command command) {
                     var argv = command.argv();
-                    var rc = argv.contains("show") ? 128 : 0;
-                    var out = argv.contains("grep") ? sha + ":X.java\n" : "";
+                    var rc = argv.contains("show")
+                             ? 128
+                             : 0;
+                    var out = argv.contains("grep")
+                              ? sha + ":X.java\n"
+                              : "";
+
                     return Promise.success(Completed.completed("git", rc, out.getBytes(), "fatal".getBytes(), false));
                 }
 
@@ -640,13 +753,18 @@ class GitCliTest {
                     return Causes.cause("unused").result();
                 }
             };
-
-            var result = GitCli.gitCli(runner, "origin", Path.of("/m")).facts(Sha.sha(sha).unwrap(), Set.of("X")).await();
+            var result = GitCli.gitCli(runner,
+                                       "origin",
+                                       Path.of("/m"))
+                               .facts(Sha.sha(sha).unwrap(),
+                                      Set.of("X"))
+                               .await();
 
             assertThat(result.isFailure()).isTrue();
-            result.onFailure(cause -> assertThat(cause).as(cause.getClass().getName()).isInstanceOf(GitError.Failed.class));
+            result.onFailure(cause -> assertThat(cause).as(cause.getClass().getName())
+                                                .isInstanceOf(GitError.Failed.class));
             result.onFailure(cause -> assertThat(((GitError.Failed) cause).operation()).as("the git call that failed, not a wrapper")
-                                                                                  .isEqualTo("show"));
+                                                .isEqualTo("show"));
         }
     }
 }
