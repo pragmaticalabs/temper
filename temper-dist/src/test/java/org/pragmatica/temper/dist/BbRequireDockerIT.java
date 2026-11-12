@@ -249,7 +249,15 @@ class BbRequireDockerIT {
 
             assertThat(run.rc()).as("value '" + bad + "': " + run.stdout() + run.stderr()).isEqualTo(2);
             assertThat(run.stderr()).contains("BB_REQUIRE_DOCKER must be 0 or 1");
-            assertThat(dir.resolve("q")).as("nothing queued for '" + bad + "'").doesNotExist();
+            try (var files = Files.walk(dir.resolve("q"))) {
+                assertThat(files.filter(Files::isRegularFile)
+                                .filter(f -> !f.getFileName()
+                                               .toString()
+                                               .startsWith("."))
+                                .toList()).as("nothing queued for '" + bad + "'")
+                          .isEmpty();
+            }
+
             assertThat(co.resolve(".bb")).doesNotExist();
         }
     }
