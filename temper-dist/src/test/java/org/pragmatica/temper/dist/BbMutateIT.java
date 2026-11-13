@@ -158,7 +158,7 @@ class BbMutateIT {
     @Test
     void bbVia_isSanitizedAndBounded() throws Exception {
         specName = "my spec+v1.json";
-        batch(modules(null), mutation("m_A", "A", "ATest", "MUT"), mutation("x".repeat(80), "C", "CTest", "fine"));
+        batch(modules(null), mutation("m+A", "A", "ATest", "MUT"), mutation("x".repeat(80), "C", "CTest", "fine"));
         var vias = Files.readAllLines(home.resolve("via.log"));
 
         assertThat(vias).hasSize(2);
