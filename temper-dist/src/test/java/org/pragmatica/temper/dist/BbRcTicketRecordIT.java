@@ -298,7 +298,8 @@ class BbRcTicketRecordIT {
     /// CTO 2026-11-13: lanes deleted `.bb/rc` to "reset" a checkout. bb-build then refused with "a build appears to be running", which
     /// told them nothing. Once the build's ticket is in done/ (its started= equals `.bb/start`) and no waiting/running ticket names the
     /// checkout, the refusal names the hand deletion, the ticket and what to do instead; a live ticket or no ticket at all keeps the
-    /// running message. Probes: drop the done/ lookup -> red; drop the live-ticket check -> the running-ticket half red.
+    /// running message. Probes: drop the done/ lookup -> red; drop the live-ticket check -> the running-ticket half red; drop the
+    /// state=finished check -> the orphaned/cancelled half red.
     @Test
     void aDeletedRc_ofAFinishedTicket_isRefusedAsAHandDeletion_whileALiveTicketStillReadsAsRunning() throws Exception {
         var co = checkout("rct-g");
@@ -336,6 +337,19 @@ class BbRcTicketRecordIT {
         assertThat(ticketless.rc()).as(ticketless.stdout() + ticketless.stderr()).isEqualTo(3);
         assertThat(ticketless.stderr()).contains("a build appears to be running in " + co)
                   .doesNotContain("deleted by hand");
+        // v50a: an orphaned (reaped) or cancelled run carries started= too, but its killed build may never have written .bb/rc, so its
+        // done/ ticket is not evidence of a hand deletion; only state=finished with a numeric rc= is
+        for (var state : List.of("orphaned", "cancelled")) {
+            var gone = ticket("done", state + "-" + BbFixtures.RUN, co, 5, 0);
+
+            Files.writeString(gone, "started=1\nstate=" + state + "\n", java.nio.file.StandardOpenOption.APPEND);
+            var killed = tool("bb-build", Map.of("BB_MAX_REACTORS", "0", "BB_DEDUP", "0"), co.toString(), "-B", "again");
+
+            assertThat(killed.rc()).as(state + ": " + killed.stdout() + killed.stderr()).isEqualTo(3);
+            assertThat(killed.stderr()).as(state).contains("a build appears to be running in " + co)
+                      .doesNotContain("deleted by hand");
+            Files.delete(gone);
+        }
     }
 
     /// A running ticket whose waiter is gone, whose checkout holds a plain `.bb/rc` (`fileRc`) written for the ticket's own run.

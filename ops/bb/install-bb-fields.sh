@@ -49,7 +49,7 @@ readonly BB_BUILD_LIVE=015b2a2261a6789c5af215b3745a2b84   # what c3/c4/d1 run si
 readonly BB_BUILD_PRE31=6abf8a6e0ae685dd7dbf32372f317883   # live on all four hosts since 2026-11-12: requireDocker flag always on
 readonly BB_BUILD_PRERC=50920a7137f237aaa512d84d117ad4f2   # live on all four hosts from 2026-11-12: the ticket rc= is read from .bb/rc (replaced by the exit-status record)
 readonly BB_BUILD_PREVIA=01e0bc34ea0effa8a8273a781f8ea52d   # live from the 2026-11-13 install: no via= ticket field (issue #46)
-readonly BB_BUILD_NEW=2200e005c2558eb1fdf432311b37fea6
+readonly BB_BUILD_NEW=eb10b2f4ea6c244444e95aa56bcf7e09
 readonly BB_TICKETS_OLD=472cd816644fe0ee0902b8da3d33de8e   # before the per-ticket progressAt (issue #10)
 readonly BB_TICKETS_PRE31=e1aeba98541ba781295001f956b08c8d   # live since 2026-11-12: drops a ticket key with a capital letter
 readonly BB_TICKETS_NEW=6174119f0cd567c5dc462d1e063c6214

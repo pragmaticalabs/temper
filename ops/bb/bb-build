@@ -112,11 +112,15 @@ B=$CO/.bb; mkdir -p "$B"
 if [ ! -f "$B/rc" ] && [ -f "$B/start" ]; then
   # .bb/start without .bb/rc: a build still running, or a finished build whose .bb/rc a lane deleted (CTO 2026-11-13: three verifier
   # lanes rm'd it to "reset" a checkout). Name the second case: no waiting/running ticket for this checkout and a done/ ticket whose
-  # started= is this .bb/start. Anything else (e.g. a BB_QUEUE=0 build, which has no ticket) keeps the running message.
+  # started= is this .bb/start, state=finished and a numeric rc= (its build wrote .bb/rc; an orphaned or cancelled run may never have).
+  # Anything else (e.g. a BB_QUEUE=0 build, which has no ticket) keeps the running message. done/ holds tens of thousands of tickets,
+  # so one grep finds the few with this started= instead of a field() fork per file (v50a: ~2 min on bigboy).
   S=$(cat "$B/start"); LIVE=""; FIN=""
   for f in "$Q"/waiting/* "$Q"/running/*; do [ -f "$f" ] && [ "$(field "$f" co)" = "$CO" ] && LIVE=${f##*/}; done
-  if [ -z "$LIVE" ]; then
-    for f in "$Q"/done/*; do [ -f "$f" ] && [ "$(field "$f" co)" = "$CO" ] && [ "$(field "$f" started)" = "$S" ] && { FIN=${f##*/}; break; }; done
+  if [ -z "$LIVE" ] && [ -n "$S" ] && [ -d "$Q/done" ]; then
+    for f in $(grep -rlxF -e "started=$S" "$Q/done" 2>/dev/null || true); do
+      [ "$(field "$f" co)" = "$CO" ] && [ "$(field "$f" state)" = finished ] && [[ $(field "$f" rc) =~ ^[0-9]+$ ]] && { FIN=${f##*/}; break; }
+    done
   fi
   [ -z "$FIN" ] || { echo "refusing: .bb/rc in $CO was deleted by hand after ticket $FIN finished; never rm it (its verdict is the ticket record: bb-wait $FIN); rerun bb-build in a fresh checkout (a rerun in a checkout whose .bb/rc is intact clears it itself)" >&2; exit 3; }
   echo "refusing: a build appears to be running in $CO (.bb/start without .bb/rc)" >&2; exit 3
