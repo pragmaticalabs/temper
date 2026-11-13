@@ -641,6 +641,34 @@ final class ControllerHarness implements AutoCloseable {
                          response.headers().firstValue("Temper-Version").orElse(""));
     }
 
+    private static final java.util.regex.Pattern TRIAGED = java.util.regex.Pattern.compile("\"stage\"\\s*:\\s*\"TRIAGED\"");
+
+    /// `GET /tasks/<id>` once a sweep at `now` has advanced the task out of TRIAGED (T1). A sweep is not a barrier: it
+    /// skips a row another transaction holds locked (`FOR UPDATE SKIP LOCKED`; a task not swept is seen at the next
+    /// sweep), and this controller's own TaskSweeper sweeps at start and every tick, so one sweep can return with the
+    /// task still TRIAGED. The barrier is the observed stage: sweep until it is gone, within 10 s.
+    Reply advanced(long id, Supplier<Instant> now) throws IOException, InterruptedException {
+        var deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos();
+        Reply reply;
+
+        do {
+            store.tasks().sweep(now.get()).await(Pg.WAIT).unwrap();
+            reply = get("/tasks/" + id);
+        } while (TRIAGED.matcher(reply.body()).find() && System.nanoTime() < deadline && pause());
+
+        if (TRIAGED.matcher(reply.body()).find()) {
+            throw new AssertionError("task " + id + " still TRIAGED after 10 s of sweeps: " + reply.body());
+        }
+
+        return reply;
+    }
+
+    private static boolean pause() throws InterruptedException {
+        Thread.sleep(20);
+
+        return true;
+    }
+
     Reply get(String path) throws IOException, InterruptedException {
         return call("GET", path, "", true);
     }

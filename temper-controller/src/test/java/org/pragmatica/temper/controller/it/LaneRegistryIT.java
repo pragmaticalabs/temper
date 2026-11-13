@@ -48,9 +48,9 @@ class LaneRegistryIT {
                                   + "\",\"createdBy\":\"cto\"}");
 
         assertThat(created.status()).as(created.body()).isEqualTo(201);
-        harness.store.tasks().sweep(Instant.now()).await(Pg.WAIT).unwrap();
 
-        return view(harness.get("/tasks/" + JSON.readString(created.body(), TaskView.class).unwrap().id()));
+        return view(harness.advanced(JSON.readString(created.body(), TaskView.class).unwrap().id(),
+                                     Instant::now));
     }
 
     private static TaskView view(ControllerHarness.Reply reply) {
