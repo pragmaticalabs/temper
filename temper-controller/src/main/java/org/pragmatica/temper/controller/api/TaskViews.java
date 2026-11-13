@@ -8,7 +8,6 @@ import org.pragmatica.lang.Option;
 import org.pragmatica.temper.controller.task.ClaimTask;
 import org.pragmatica.temper.domain.model.JobId;
 import org.pragmatica.temper.domain.model.Sha;
-import org.pragmatica.temper.domain.task.LeaseTerms;
 import org.pragmatica.temper.domain.task.Stage;
 import org.pragmatica.temper.domain.task.Status;
 import org.pragmatica.temper.domain.task.TaskId;
@@ -86,27 +85,15 @@ sealed interface TaskViews {
                                                                    observed.at())));
     }
 
-    /// The clock is the report's `lastHbAt`; a LEASED task with no report row (every lease granted before V20) falls back
-    /// to the lease's own TTL clock: `until` minus the stage's TTL, which is the last accepted lease-token call (a claim,
-    /// a heartbeat or a linked submit) as the lease recorded it. That is not the last heartbeat strictly (a submit also
-    /// restarts it), and the controller-start extension moves it forward; both only make a lane look fresher, never staler.
+    /// The clock is the report's `lastHbAt`: written by every claim and heartbeat, and for a task LEASED before V20 by V20's
+    /// one-time backfill from `task_events`. Nothing else restarts it (a linked submit or evidence extends the TTL only).
     private static Option<Long> hbAge(TaskRow row, TaskReport report, Instant now) {
         return row.state()
                   .status() == Status.LEASED
                ? report.lastHbAt()
-                       .orElse(() -> leaseClock(row))
                        .map(at -> Math.max(0,
                                            Duration.between(at, now).toSeconds()))
                : none();
-    }
-
-    private static Option<Instant> leaseClock(TaskRow row) {
-        var ttl = LeaseTerms.forStage(row.state().stage()).ttl();
-
-        return row.state()
-                  .lease()
-                  .until()
-                  .map(until -> until.minus(ttl));
     }
 
     private static TreeReportDto treeReport(TaskReport.Reported reported) {

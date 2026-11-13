@@ -29,16 +29,12 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /// `hbAge` and `stale` (lane registry): stale is STRICTLY more than the limit since the last heartbeat or claim of a
 /// LEASED task. Mutation: change `age > staleAfter` to `>=` → the exactly-at-the-limit case is red; drop the LEASED
-/// condition in `hbAge` → the READY case shows an age; drop the `.orElse(() -> leaseClock(row))` fallback → the pre-V20 case is red.
+/// condition in `hbAge` → the READY case shows an age.
 class TaskViewsTest {
     private static final Instant T0 = Instant.parse("2026-11-12T10:00:00Z");
     private static final Duration LIMIT = Duration.ofMinutes(20);
 
     private static TaskRow row(Status status) {
-        return row(status, LeaseState.NONE);
-    }
-
-    private static TaskRow row(Status status, LeaseState lease) {
         return TaskRow.taskRow(TaskId.taskId(7).unwrap(),
                                "s",
                                "t",
@@ -56,7 +52,7 @@ class TaskViewsTest {
                                                    status,
                                                    none(),
                                                    Counters.counters(0, 3, 0, 1, 0, 0),
-                                                   lease,
+                                                   LeaseState.NONE,
                                                    none(),
                                                    none(),
                                                    none(),
@@ -111,46 +107,8 @@ class TaskViewsTest {
         assertThat(view.stale()).isFalse();
     }
 
-    private static LeaseState leaseLastCalledAtT0() {
-        // CODE's TTL is 30 min: a lease whose last accepted call was at T0 runs until T0 + 30 min.
-        return new LeaseState(3,
-                              some("h"),
-                              some("w"),
-                              some(T0.plus(Duration.ofMinutes(30))),
-                              some(T0.plusSeconds(3600)),
-                              none());
-    }
-
     @Test
-    void aLeasedTaskWithoutAReportRow_takesItsClockFromTheLease() {
-        var leased = row(Status.LEASED, leaseLastCalledAtT0());
-        var fresh = TaskViews.taskView(leased, none(), TaskReport.NONE, T0.plusSeconds(30), LIMIT);
-        var atLimit = TaskViews.taskView(leased, none(), TaskReport.NONE, T0.plus(LIMIT), LIMIT);
-        var over = TaskViews.taskView(leased,
-                                      none(),
-                                      TaskReport.NONE,
-                                      T0.plus(LIMIT).plusSeconds(1),
-                                      LIMIT);
-
-        assertThat(fresh.hbAge().unwrap()).isEqualTo(30L);
-        assertThat(fresh.stale()).isFalse();
-        assertThat(atLimit.stale()).isFalse();
-        assertThat(over.stale()).as("a pre-V20 lease silent past the limit is exactly the stale case").isTrue();
-    }
-
-    @Test
-    void aReportRow_winsOverTheLeaseClock() {
-        var view = TaskViews.taskView(row(Status.LEASED, leaseLastCalledAtT0()),
-                                      none(),
-                                      heartbeatAt(T0.plusSeconds(600)),
-                                      T0.plusSeconds(700),
-                                      LIMIT);
-
-        assertThat(view.hbAge().unwrap()).isEqualTo(100L);
-    }
-
-    @Test
-    void aLeasedTaskWithNeitherReportNorLeaseClock_isNotReportedStale() {
+    void aLeasedTaskWithoutAReportRow_showsNoAge_andIsNotReportedStale() {
         var view = TaskViews.taskView(row(Status.LEASED),
                                       none(),
                                       TaskReport.NONE,

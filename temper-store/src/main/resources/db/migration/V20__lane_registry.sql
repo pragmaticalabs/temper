@@ -36,3 +36,14 @@ CREATE TABLE task_report (
   observed_turns int CHECK (observed_turns >= 0),
   observed_at timestamptz
 );
+
+-- One-time backfill of the heartbeat clock for tasks that are LEASED when this migration runs (leased before V20, so
+-- no heartbeat or claim has written a row yet): the time of the latest claim ('leased') or 'heartbeat' event of the
+-- task's CURRENT epoch, which task_events records exactly. Without it a lane that died around the deploy shows no
+-- hbAge and is never stale until its TTL expires it. Other events (lease-extended at controller start, job-linked)
+-- are not a heartbeat and do not count; a LEASED task with no such event gets no row.
+INSERT INTO task_report (task_id, last_hb_at)
+SELECT t.id, max(e.at)
+FROM tasks t JOIN task_events e ON e.task_id = t.id AND e.epoch = t.lease_epoch
+WHERE t.status = 'LEASED' AND e.kind IN ('leased', 'heartbeat')
+GROUP BY t.id;

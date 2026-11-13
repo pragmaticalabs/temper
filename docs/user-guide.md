@@ -615,7 +615,7 @@ A `queue-wait` ticket first seen above both of its thresholds fires the higher o
 whose condition still holds on each host's latest listing, are `GET /api/v1/fleet/alarms` (READ scope; one row per
 expected host, in the `fleet/tickets` order). The limits are the controller config's `[fleet] queueWaitAlarmMin`
 (default 60), `portGroupStallAlarmMin` (30) and `portGroupHeldAgeAlarmMin` (360), whole minutes from 1 to 10080; anything else refuses the controller's start, and there is no
-off switch. `[fleet] laneStaleMin` (default 20, whole minutes from 1 to 10080) is the heartbeat silence after which a LEASED task shows `stale` in `GET /api/v1/tasks`; a lease with no heartbeat record (granted before this release) is measured from its own TTL clock, the last accepted lease-token call. The former `portGroupHeldAlarmMin` is still accepted, warned about at start and ignored. A build log's size or
+off switch. `[fleet] laneStaleMin` (default 20, whole minutes from 1 to 10080) is the heartbeat silence after which a LEASED task shows `stale` in `GET /api/v1/tasks`; only a claim or a heartbeat restarts that clock (a linked submit or evidence extends the lease but not this clock). Leases held when the release is installed start from their last claim or heartbeat event. The former `portGroupHeldAlarmMin` is still accepted, warned about at start and ignored. A build log's size or
 mtime is never progress, and maven's log lines carry no timestamp, so only report files count: one test class that runs
 longer than the stall limit shows as stalled until its report is written. Nobody is paged unless someone follows the stream, watches kiln, or runs `alarm-check`.
 
