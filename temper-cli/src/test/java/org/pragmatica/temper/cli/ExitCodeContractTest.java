@@ -572,6 +572,36 @@ class ExitCodeContractTest {
 
                                      return cli.run((MODULE_TEST_SHA + " --task 42").split(" "));
                                  }),
+                         new Row("14 task checkpoint refused (HTTP 422 checkpoint-too-large)",
+                                 ExitCode.CHECKPOINT_TOO_LARGE,
+                                 Optional.empty(),
+                                 (controller, cli) -> {
+                                     leaseFile(cli, 42, 7);
+                                     controller.on("POST /tasks/42/checkpoint",
+                                                   Reply.json(422, "{\"error\":\"checkpoint-too-large\"}"));
+
+                                     return cli.run("task", "checkpoint", "42", "--pushed-sha", Fixtures.SHA);
+                                 }),
+                         new Row("15 task checkpoint refused (HTTP 422 pushed-sha-not-on-branch)",
+                                 ExitCode.SHA_NOT_ON_BRANCH,
+                                 Optional.empty(),
+                                 (controller, cli) -> {
+                                     leaseFile(cli, 42, 7);
+                                     controller.on("POST /tasks/42/checkpoint",
+                                                   Reply.json(422, "{\"error\":\"pushed-sha-not-on-branch\"}"));
+
+                                     return cli.run("task", "checkpoint", "42", "--pushed-sha", Fixtures.SHA);
+                                 }),
+                         new Row("16 task checkpoint with the controller's mirror unavailable (HTTP 503)",
+                                 ExitCode.MIRROR_UNAVAILABLE,
+                                 Optional.empty(),
+                                 (controller, cli) -> {
+                                     leaseFile(cli, 42, 7);
+                                     controller.on("POST /tasks/42/checkpoint",
+                                                   Reply.json(503, "{\"error\":\"git unavailable\"}"));
+
+                                     return cli.run("task", "checkpoint", "42", "--pushed-sha", Fixtures.SHA);
+                                 }),
                          new Row("13 a judged CLI against a controller of another judged build (D-6)",
                                  ExitCode.VERSION_SKEW,
                                  Optional.empty(),
@@ -813,6 +843,9 @@ class ExitCodeContractTest {
                                                                                                                       11,
                                                                                                                       12,
                                                                                                                       13,
+                                                                                                                      14,
+                                                                                                                      15,
+                                                                                                                      16,
                                                                                                                       64,
                                                                                                                       69,
                                                                                                                       77);
