@@ -4,7 +4,7 @@
 # this command returns at once; a detached waiter launches maven when its ticket is granted (priority order from
 # ~/work/priorities, FIFO among equals, under the reactor cap). Poll for .bb/rc exactly as before.
 # Writes in <checkout>/.bb/: queued (ticket id, while waiting), run.marker (at launch), build.log, start/end
-# epochs, rc (maven's own exit code, written INSIDE the job; 5 = queue wait expired, 9 = cancelled/abandoned
+# epochs, rc (a 444 convenience copy of maven's exit code, written INSIDE the job; 5 = queue wait expired, 9 = cancelled/abandoned
 # before maven started). Call rc: 0 queued; 2 usage; 3 already running/queued here; 4 owner; 6 #1553 guard;
 # 7 identical build running/queued elsewhere; 8 identical build already finished (paths printed); 10 -Dtest without
 # -Dit.test on forge-tests (failsafe ignores -Dtest). BB_DEDUP=0
@@ -23,6 +23,11 @@
 # tests. BB_PG_ISOLATE=0 at enqueue = the old host-exclusive behaviour for that ticket (ticket has no iso=1).
 # LOAD GATE (2026-11-11): a ticket is also granted only while load5/cores < 1.2 (BB_LOAD_MAX); the oldest grantable ticket goes
 # regardless once it waited > 1200 s (BB_LOAD_STARVE_SECS) while < 2 reactors run (BB_LOAD_STARVE_REACTORS). See pick() in the lib.
+# VERDICT SOURCE (2026-11-12, bbrc1; reap and too-late cancel fixed 2026-11-13): the ticket's rc= is the exit status of the build subshell
+# as returned by `wait` in the waiter, never a read of .bb/rc. A ticket whose waiter is gone (reap, or a cancel that finds the build
+# already ended) is finalized as orphaned with NO rc: bb-wait exits 70, and .bb/rc is not read into it. .bb/rc is a read-only (444) copy
+# written before the ticket is finalized, replaced only by rm/rename (write_rc in the lib), never by `>`.
+# GUARANTEE: the verdict comes from mvn's exit status, never from the checkout; any later disagreement in the checkout is detected (RC-MISMATCH, exit 71); deliberate tampering with queue/done by the same uid stays possible.
 # Every ticket reaching done/ appends one line to ~/work/bb-ticket-log.tsv. `bb-wait <ticket>` blocks until it finishes (exit = rc).
 # TICKET OWNER FIELDS (T3, 2026-11): the ticket gains optional key=value lines after group_reason= and before args= (readers
 # take the LAST line of a key, so every existing reader ignores them): session_pid, session_start (epoch s) and session_label
@@ -75,7 +80,9 @@ if [ "${1:-}" = __run ]; then
     else
       env -u HCLOUD_TOKEN JAVA_HOME=/usr/lib/jvm/java-25-openjdk-amd64 "$MVN" "$@" ${RDF[@]+"${RDF[@]}"} > "$B/build.log" 2>&1
     fi
-    rc=$?; date +%s > "$B/end"; echo $rc > "$B/rc"
+    rc=$?; date +%s > "$B/end"
+    write_rc "$B" "$rc"   # convenience copy for pollers, 444; the ticket's rc= comes from this subshell's exit status below
+    exit "$rc"
   ) 8>&- &
   C=$!
   for _ in $(seq 120); do
@@ -84,10 +91,10 @@ if [ "${1:-}" = __run ]; then
     sleep 0.5
   done
   flock -u 8
-  wait "$C"
+  wait "$C"; BRC=$?   # the build's exit status: the verdict. Never re-read from $B/rc, which a lane can delete or rewrite
   flock 8
   [ -f "$T" ] || exit 0   # cancel or reap already finalized this ticket (first writer wins): do not recreate running/<id> or overwrite done/<id>
-  printf 'state=finished\nrc=%s\nended=%s\n' "$(cat "$B/rc" 2>/dev/null || echo unknown)" "$(cat "$B/end" 2>/dev/null)" >> "$T"
+  printf 'state=finished\nrc=%s\nended=%s\n' "$BRC" "$(cat "$B/end" 2>/dev/null || date +%s)" >> "$T"
   to_done "$T"
   exit 0
 fi

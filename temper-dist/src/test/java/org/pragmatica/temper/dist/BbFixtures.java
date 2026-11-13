@@ -16,6 +16,7 @@ import org.pragmatica.temper.testsupport.HermeticProcess;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+
 /// Shared plumbing of the bb script ITs (T3 WP-B): the real scripts under `ops/bb`, a process runner, and the bytes of
 /// the bigboy `bb-build` the first commit of `ops/bb/bb-build` imported, vendored verbatim.
 final class BbFixtures {
@@ -51,7 +52,9 @@ final class BbFixtures {
         try (var in = BbFixtures.class.getResourceAsStream("/bb/bb-build.original")) {
             assertThat(in).as("test resource bb/bb-build.original").isNotNull();
             var bytes = in.readAllBytes();
+
             assertThat(md5(bytes)).as("the vendored fixture holds the bigboy file verbatim").isEqualTo(BB_BUILD_OLD);
+
             return bytes;
         }
     }
@@ -61,7 +64,9 @@ final class BbFixtures {
         try (var in = BbFixtures.class.getResourceAsStream("/bb/bb-queue.original")) {
             assertThat(in).as("test resource bb/bb-queue.original").isNotNull();
             var bytes = in.readAllBytes();
+
             assertThat(md5(bytes)).as("the vendored fixture holds the bigboy file verbatim").isEqualTo(BB_QUEUE_OLD);
+
             return bytes;
         }
     }
@@ -70,6 +75,7 @@ final class BbFixtures {
         Files.createDirectories(file.getParent());
         Files.writeString(file, content);
         Files.setPosixFilePermissions(file, PosixFilePermissions.fromString("rwxr-xr-x"));
+
         return file;
     }
 
@@ -77,37 +83,60 @@ final class BbFixtures {
         // hermetic: a BB_* variable of the build host (bb-submit exports BB_SESSION_*, BB_AGENT, BB_LANE, BB_PR into the maven
         // run that hosts this test) must not reach the script under test; only what the test passes does
         var builder = HermeticProcess.builder(command, env);
+
         if (cwd != null) {
             builder.directory(cwd.toFile());
         }
+
         var process = builder.start();
+
         try (var in = process.getOutputStream()) {
             if (stdin != null) {
                 in.write(stdin.getBytes(StandardCharsets.UTF_8));
             }
         } catch (IOException ignored) {
-            // the script may refuse before reading stdin
+        // the script may refuse before reading stdin
         }
-        var stderrBytes = new byte[][] {new byte[0]};
+
+        var stderrBytes = new byte[][]{new byte[0]};
         var reader = Thread.ofVirtual().start(() -> {
             try {
-                stderrBytes[0] = process.getErrorStream().readAllBytes();
+                stderrBytes[0] = process.getErrorStream()
+                                        .readAllBytes();
             } catch (IOException ignored) {
-                // process gone
+            // process gone
             }
         });
-        var stdout = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+        var stdout = new String(process.getInputStream().readAllBytes(),
+                                StandardCharsets.UTF_8);
+
         reader.join();
         assertThat(process.waitFor(120, TimeUnit.SECONDS)).isTrue();
+
         return new Outcome(process.exitValue(), stdout, new String(stderrBytes[0], StandardCharsets.UTF_8));
     }
+
+    /// This JVM's pid. Tests that start real or stand-in waiters suffix their ticket ids with it: the queue finds waiters with
+    /// `pgrep -u $USER -f "bb-build __run <id>"`, which sees every process of the uid on the host, so concurrent IT JVMs with fixed
+    /// ids killed, reaped or counted each other's waiters (fl43, #43). Production ids (timestamp-pid) are unique already.
+    static final String RUN = Long.toString(ProcessHandle.current().pid());
 
     /// pids of this user's processes whose argument text is `bb-build __run <id>` (the waiter's own test), recorded so
     /// the caller kills exactly them.
     static List<Long> waiters(String id) throws IOException, InterruptedException {
-        var found = run(List.of("pgrep", "-u", System.getProperty("user.name"), "-f", "--", "bb-build __run " + id + "( |$)"), Map.of(), null, null);
+        var found = run(List.of("pgrep",
+                                "-u",
+                                System.getProperty("user.name"),
+                                "-f",
+                                "--",
+                                "bb-build __run " + id + "( |$)"),
+                        Map.of(),
+                        null,
+                        null);
         var pids = new ArrayList<Long>();
+
         found.stdout().lines().filter(line -> !line.isBlank()).forEach(line -> pids.add(Long.parseLong(line.strip())));
+
         return pids;
     }
 
@@ -115,9 +144,10 @@ final class BbFixtures {
         pids.forEach(pid -> ProcessHandle.of(pid).ifPresent(handle -> {
             handle.destroyForcibly();
             try {
-                handle.onExit().get(10, TimeUnit.SECONDS);
+                handle.onExit()
+                      .get(10, TimeUnit.SECONDS);
             } catch (Exception ignored) {
-                // gone or unkillable: the temp directory removal will say
+            // gone or unkillable: the temp directory removal will say
             }
         }));
     }
