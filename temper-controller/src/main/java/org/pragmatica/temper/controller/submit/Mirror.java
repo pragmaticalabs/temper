@@ -23,4 +23,8 @@ public interface Mirror {
     /// The tip of `branch` after a fetch (m3-design §5.4 `base-unknown`, §6.5 a claim's read point); none when the mirror
     /// has no such branch.
     Promise<Option<Sha>> branchTip(Ref branch);
+    /// Whether `sha` is `branch`'s tip or one of its ancestors, after a fetch (a lane checkpoint's `pushedSha`, issue
+    /// lane-registry WP1). False for a branch the mirror lacks and for an object it does not have; a mirror that cannot
+    /// answer fails rather than says no.
+    Promise<Boolean> branchContains(Ref branch, Sha sha);
 }

@@ -27,6 +27,7 @@ import org.pragmatica.temper.domain.task.TaskError;
 import org.pragmatica.temper.domain.task.TaskId;
 import org.pragmatica.temper.domain.task.TaskState;
 import org.pragmatica.temper.protocol.api.ParkRequestDto;
+import org.pragmatica.temper.store.api.Checkpoint;
 import org.pragmatica.temper.store.api.ClaimGrant;
 import org.pragmatica.temper.store.api.ClaimedTask;
 import org.pragmatica.temper.store.api.NewEvidence;
@@ -35,6 +36,7 @@ import org.pragmatica.temper.store.api.SweepOutcome;
 import org.pragmatica.temper.store.api.TaskDetail;
 import org.pragmatica.temper.store.api.TaskEventRow;
 import org.pragmatica.temper.store.api.TaskQuery;
+import org.pragmatica.temper.store.api.TaskReport;
 import org.pragmatica.temper.store.api.TaskRow;
 import org.pragmatica.temper.store.api.TaskStore;
 
@@ -140,7 +142,58 @@ record PgTaskStore(Db db) implements TaskStore {
         return db.inTransaction(tx -> unlocked(tx, id).flatMap(row -> claimed(tx, row, grant, at))
                                               .mapWith(row -> detailIn(tx,
                                                                        row.id()),
-                                                       ClaimedTask::claimedTask));
+                                                       ClaimedTask::claimedTask)
+                                              .flatMap(claimed -> withLane(tx, claimed, at)));
+    }
+
+    /// The lane's part of a claim, in the claim's own transaction: the predecessor's last report is read, then the
+    /// heartbeat clock restarts at the claim; the latest checkpoint travels with the answer.
+    private static Promise<ClaimedTask> withLane(QueryExecutor tx, ClaimedTask claimed, Instant at) {
+        return TaskLane.claimed(tx,
+                                claimed.row().id(),
+                                at)
+                       .mapWith(_ -> TaskLane.latest(tx,
+                                                     claimed.row().id()),
+                                (predecessor, checkpoint) -> ClaimedTask.claimedTask(claimed.row(),
+                                                                                     claimed.detail(),
+                                                                                     checkpoint,
+                                                                                     predecessor));
+    }
+
+    @Override
+    public Promise<TaskRow> heartbeat(Lease lease, Option<TaskReport.Tree> tree, Instant requested) {
+        var now = TaskCommands.stored(requested);
+
+        return db.inTransaction(tx -> TaskCommands.lockedOrMissing(tx,
+                                                                   lease.task())
+                                                  .flatMap(row -> leaseCommand(tx,
+                                                                               row,
+                                                                               lease,
+                                                                               new Command.Heartbeat(),
+                                                                               now))
+                                                  .flatMap(row -> TaskLane.heartbeat(tx, lease, tree, now).map(_ -> row)));
+    }
+
+    @Override
+    public Promise<Checkpoint> checkpoint(Lease lease, Checkpoint.New checkpoint, Instant requested) {
+        return db.inTransaction(tx -> TaskLane.checkpoint(tx, lease, checkpoint, TaskCommands.stored(requested)));
+    }
+
+    @Override
+    public Promise<Option<Checkpoint>> latestCheckpoint(TaskId id) {
+        return TaskLane.latest(db.executor(), id);
+    }
+
+    @Override
+    public Promise<Map<TaskId, TaskReport>> reports(List<TaskId> ids) {
+        return ids.isEmpty()
+               ? Promise.success(Map.of())
+               : TaskLane.reports(db.executor(), ids);
+    }
+
+    @Override
+    public Promise<Unit> observe(TaskId id, int ctxK, int turns, Instant requested) {
+        return TaskLane.observe(db.executor(), id, ctxK, turns, TaskCommands.stored(requested));
     }
 
     /// A read only: the lease holds now (`(id, LEASED, epoch, hash)`), else `LEASE_LOST`. The writes stay fenced by their

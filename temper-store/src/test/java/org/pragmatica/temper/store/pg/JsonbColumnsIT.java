@@ -7,6 +7,7 @@ import org.pragmatica.postgres.PgResultSet;
 import org.pragmatica.temper.domain.report.Outcome;
 import org.pragmatica.temper.domain.task.Command;
 import org.pragmatica.temper.domain.task.Stage;
+import org.pragmatica.temper.store.api.Checkpoint;
 import org.pragmatica.temper.store.api.MacProcess;
 import org.pragmatica.temper.store.api.NewFleetEvent;
 import org.pragmatica.temper.store.api.NewMacPost;
@@ -22,12 +23,14 @@ import org.junit.jupiter.params.provider.MethodSource;
 import static org.assertj.core.api.Assertions.assertThat;
 
 
-/// Every JSON column of V1, V2, V10 and V16 (the task tables, m3-design §5.3) is really `jsonb` (m0-design §5.2). The store binds `$n::jsonb`, and Postgres assigns a
+/// Every JSON column of V1, V2, V10, V16 and V20 (the task tables, m3-design §5.3) is really `jsonb` (m0-design §5.2). The store binds `$n::jsonb`, and Postgres assigns a
 /// jsonb value to a `text` column without complaint, so a column declared `text` would pass every store test while
 /// losing jsonb operators and indexing. The catalog is read directly, and a jsonb-only operator runs on stored rows.
 @Tag("pg")
 class JsonbColumnsIT {
     private static final List<String> JSONB_COLUMNS = List.of("bb_snapshot.tickets",
+                                                              "task_checkpoint.checklist",
+                                                              "task_checkpoint.read_map",
                                                               "gh_budget.team_members",
                                                               "events.payload",
                                                               "fleet_events.payload",
@@ -66,6 +69,14 @@ class JsonbColumnsIT {
         var task = TaskFixture.inCode(tasks, TaskFixture.T0);
         var lease = TaskFixture.claim(tasks, task.id(), "h", TaskFixture.T0).unwrap();
 
+        tasks.checkpoint(lease,
+                         new Checkpoint.New("c".repeat(40),
+                                            List.of(new Checkpoint.Item("item", true)),
+                                            List.of(new Checkpoint.Entry("f.md", "1-2")),
+                                            "n"),
+                         TaskFixture.T0)
+             .await(PgFixture.WAIT)
+             .unwrap();
         tasks.evidence(lease,
                        TaskFixture.evidence(),
                        TaskFixture.next(Stage.VERIFY),

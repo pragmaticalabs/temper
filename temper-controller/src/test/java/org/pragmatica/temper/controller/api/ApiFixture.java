@@ -65,6 +65,7 @@ import org.pragmatica.temper.protocol.json.TemperJson;
 
 import static org.pragmatica.lang.Unit.unit;
 
+
 /// The router with every route over in-memory fakes and a scripted git, behind the full token and a read token (D3).
 /// The digest route is the real [DigestRoutes] over a digest that always fails: its answer is not under test here,
 /// only that the route is in the list and reachable. The gate route is the real [GateRoutes] over the fake jobs'
@@ -118,14 +119,17 @@ final class ApiFixture {
 
     private ApiFixture(List<String> portGroupModules, Supplier<Instant> clock, List<ControllerConfig.Host> hosts) {
         var mapper = TemperJson.mapper();
+
         responses = Responses.responses(mapper);
         GitRemote remote = ref -> gitCalls.incrementAndGet() < 0
                                   ? Promise.<Sha> promise()
                                   : gitDown
-                                  ? GitError.Failed.FACTORY.apply("ls-remote", Causes.cause("network down")).promise()
-                                  : refs.containsKey(ref.value())
-                                    ? Sha.sha(refs.get(ref.value())).async()
-                                    : Refusal.refusal(RefusalCode.SOURCE, "ref " + ref + " not found").promise();
+                                    ? GitError.Failed.FACTORY.apply("ls-remote",
+                                                                    Causes.cause("network down"))
+                                                             .promise()
+                                    : refs.containsKey(ref.value())
+                                      ? Sha.sha(refs.get(ref.value())).async()
+                                      : Refusal.refusal(RefusalCode.SOURCE, "ref " + ref + " not found").promise();
         var mirror = new Mirror() {
             @Override
             public Promise<Unit> fetch() {
@@ -135,6 +139,7 @@ final class ApiFixture {
             @Override
             public Promise<Boolean> containedInBranch(Sha sha) {
                 gitCalls.incrementAndGet();
+
                 return Promise.success(containedShas.contains(sha.value()));
             }
 
@@ -147,26 +152,41 @@ final class ApiFixture {
             public Promise<Option<Sha>> branchTip(Ref branch) {
                 return Promise.success(Option.option(refs.get(branch.value())).flatMap(sha -> Sha.sha(sha).option()));
             }
+
+            @Override
+            public Promise<Boolean> branchContains(Ref branch, Sha sha) {
+                return Promise.success(sha.value().equals(refs.get(branch.value())));
+            }
         };
         var treeReader = new TreeReader() {
             @Override
             public Promise<TreeFacts> facts(Sha sha, Set<String> names) {
                 gitCalls.incrementAndGet();
+
                 return treeDown
-                       ? GitError.Failed.FACTORY.apply("show", Causes.cause("mirror broken")).promise()
+                       ? GitError.Failed.FACTORY.apply("show",
+                                                       Causes.cause("mirror broken"))
+                                                .promise()
                        : Promise.success(TreeFacts.treeFacts(Map.copyOf(tree), reactor));
             }
 
             @Override
             public Promise<Option<byte[]>> file(Sha sha, String path) {
                 fileReads.add(sha.value() + ":" + path);
+
                 return filesDown
-                       ? GitError.Failed.FACTORY.apply("show", Causes.cause("mirror broken")).promise()
-                       : FakeStores.later(5, Promise.success(Option.option(files.get(path)).map(text -> text.getBytes(StandardCharsets.UTF_8))));
+                       ? GitError.Failed.FACTORY.apply("show",
+                                                       Causes.cause("mirror broken"))
+                                                .promise()
+                       : FakeStores.later(5,
+                                          Promise.success(Option.option(files.get(path)).map(text -> text.getBytes(StandardCharsets.UTF_8))));
             }
         };
-        var links = HostLinks.hostLinks(hosts.stream().map(host -> HostLink.hostLink(host, linkEnv(mapper))).toList(), jobs);
-        var submit = SubmitJob.submitJob(SubmitJob.Steps.steps(SourceResolver.sourceResolver(remote, mirror, pull -> Causes.cause("no PR heads in this fixture").promise()),
+        var links = HostLinks.hostLinks(hosts.stream().map(host -> HostLink.hostLink(host, linkEnv(mapper))).toList(),
+                                        jobs);
+        var submit = SubmitJob.submitJob(SubmitJob.Steps.steps(SourceResolver.sourceResolver(remote,
+                                                                                             mirror,
+                                                                                             pull -> Causes.cause("no PR heads in this fixture").promise()),
                                                                refusals,
                                                                treeReader,
                                                                jobs,
@@ -183,7 +203,10 @@ final class ApiFixture {
                                                                              .equals(Digests.sha256Hex(LEASE_TOKEN).unwrap())
                                                                         ? Promise.unitPromise()
                                                                         : TaskError.General.LEASE_LOST.promise()));
-        var feed = EventFeed.eventFeed(events, jobs, wake, TimeSpan.timeSpan(200).millis());
+        var feed = EventFeed.eventFeed(events,
+                                       jobs,
+                                       wake,
+                                       TimeSpan.timeSpan(200).millis());
         var routes = ApiRoutes.apiRoutes(responses,
                                          mapper,
                                          submit,
@@ -199,13 +222,23 @@ final class ApiFixture {
                                          clock,
                                          LinkTiming.DEFAULT.startBound());
         Digest digest = request -> Causes.cause("no digest in this fixture").promise();
+
         results.gates = jobs;
         var gate = GateRoutes.gateRoutes(responses, jobs, links, Instant::now, LinkTiming.DEFAULT.startBound());
+
         this.routes = Stream.of(routes.routes(),
-                                DigestRoutes.digestRoutes(responses, digest, links, LinkTiming.DEFAULT.startBound()).routes(),
+                                DigestRoutes.digestRoutes(responses,
+                                                          digest,
+                                                          links,
+                                                          LinkTiming.DEFAULT.startBound())
+                                            .routes(),
                                 gate.routes(),
                                 SubscriberRoutes.subscriberRoutes(responses, mapper, feed, jobs).routes(),
-                                DiffRoutes.diffRoutes(responses, results, links, Instant::now, LinkTiming.DEFAULT.startBound())
+                                DiffRoutes.diffRoutes(responses,
+                                                      results,
+                                                      links,
+                                                      Instant::now,
+                                                      LinkTiming.DEFAULT.startBound())
                                           .routes(),
                                 KnownRoutes.knownRoutes(responses, mapper, known).routes(),
                                 RerunRoutes.rerunRoutes(routes,
@@ -257,6 +290,7 @@ final class ApiFixture {
 
     private Unit record(List<UnitRef> refsToKill) {
         cancelled.add(refsToKill);
+
         return unit();
     }
 
@@ -264,7 +298,11 @@ final class ApiFixture {
         return call(router, method, pathAndQuery, body, headers);
     }
 
-    static ApiResponse call(Router router, HttpMethod method, String pathAndQuery, String body, Map<String, String> headers) {
+    static ApiResponse call(Router router,
+                            HttpMethod method,
+                            String pathAndQuery,
+                            String body,
+                            Map<String, String> headers) {
         return router.handle(ApiRequest.apiRequest(request(method, pathAndQuery, body, headers)))
                      .await()
                      .unwrap();
@@ -288,8 +326,11 @@ final class ApiFixture {
                     ? QueryParams.queryParams(java.util.Arrays.stream(parts[1].split("&"))
                                                               .map(pair -> pair.split("=", 2))
                                                               .collect(java.util.stream.Collectors.toMap(pair -> pair[0],
-                                                                                                         pair -> List.of(pair.length > 1 ? pair[1] : ""))))
+                                                                                                         pair -> List.of(pair.length > 1
+                                                                                                                         ? pair[1]
+                                                                                                                         : ""))))
                     : QueryParams.empty();
+
         return new HttpRequest() {
             @Override
             public String requestId() {

@@ -1,8 +1,10 @@
 package org.pragmatica.temper.controller.api;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
@@ -28,9 +30,11 @@ import org.pragmatica.temper.controller.http.Route;
 import org.pragmatica.temper.controller.task.ClaimTask;
 import org.pragmatica.temper.controller.task.CloseTask;
 import org.pragmatica.temper.controller.task.CreateTask;
+import org.pragmatica.temper.controller.submit.Mirror;
 import org.pragmatica.temper.controller.task.TaskRefusal;
 import org.pragmatica.temper.domain.DomainError;
 import org.pragmatica.temper.domain.model.JobId;
+import org.pragmatica.temper.domain.model.Sha;
 import org.pragmatica.temper.domain.model.Values;
 import org.pragmatica.temper.domain.task.Command;
 import org.pragmatica.temper.domain.task.Lease;
@@ -44,11 +48,16 @@ import org.pragmatica.temper.domain.task.TaskId;
 import org.pragmatica.temper.domain.task.Waiting;
 import org.pragmatica.temper.protocol.api.ClaimRequest;
 import org.pragmatica.temper.protocol.api.LeaseCall;
+import org.pragmatica.temper.protocol.api.ObserveCall;
 import org.pragmatica.temper.protocol.api.ParkCall;
 import org.pragmatica.temper.protocol.api.TaskCreateRequest;
 import org.pragmatica.temper.protocol.api.TaskDecision;
+import org.pragmatica.temper.protocol.api.TaskView;
+import org.pragmatica.temper.store.api.Checkpoint;
 import org.pragmatica.temper.store.api.StoreError;
+import org.pragmatica.temper.store.api.TaskDetail;
 import org.pragmatica.temper.store.api.TaskQuery;
+import org.pragmatica.temper.store.api.TaskReport;
 import org.pragmatica.temper.store.api.TaskRow;
 import org.pragmatica.temper.store.api.TaskStore;
 
@@ -71,7 +80,9 @@ import static org.pragmatica.temper.domain.DomainError.invalid;
 /// | GET | `tasks/{id}` | read | `TaskView` with its detail · 404 |
 /// | GET | `tasks/{id}/events` | read | `[TaskEventDto]` · 404 |
 /// | POST | `tasks/{id}/claim`, `tasks/claim?stage=S` | worker | 200 `ClaimResponse` · 404 · 409 `not-ready` · 204 nothing ready |
-/// | POST | `tasks/{id}/heartbeat` | lease | 204 · 409 `lease-lost` |
+/// | POST | `tasks/{id}/heartbeat` | lease | 204 · 409 `lease-lost`; the optional `report` `{head, dirty, unpushed}` is the agent's SELF-REPORT |
+/// | POST | `tasks/{id}/checkpoint` | lease | 201 `CheckpointDto` · 409 `lease-lost` · 422 `checkpoint-too-large` (body over 16 KB), `pushed-sha-not-on-branch` |
+/// | POST | `tasks/{id}/observe` | full | 204 · 404 · 400; context and turns MEASURED by the parent, never by the lease holder |
 /// | POST | `tasks/{id}/wait` | lease | 204 · 422 (`job-not-linked`, `nothing-awaited`) · 409 |
 /// | POST | `tasks/{id}/release` | lease | 204 · 409 |
 /// | POST | `tasks/{id}/park` | lease or full | 200 `TaskView` · 422 (request invalid) · 409 |
@@ -87,6 +98,8 @@ public record TaskRoutes(Responses responses,
                          CreateTask create,
                          ClaimTask claim,
                          CloseTask close,
+                         Mirror mirror,
+                         Duration staleAfter,
                          Supplier<Instant> clock) {
     /// The maintainer's commands carry no identity of their own: one full token (attribution, not authority).
     public static final String CTO = "cto";
@@ -94,6 +107,10 @@ public record TaskRoutes(Responses responses,
     /// A lease holder's name (`claim --worker NAME`) [G]: the owner alphabet plus `.` and `-`.
     public static final Pattern HOLDER = Pattern.compile("^[A-Za-z0-9_.-]{1,64}$");
     public static final int MAX_ITEM = 400;
+    /// A checkpoint request body is at most 16 KB (lane registry WP1); a larger one is 422 `checkpoint-too-large`.
+    public static final int MAX_CHECKPOINT_BYTES = 16 * 1024;
+    /// The bounds of a parent observation: context in thousands of tokens, turns.
+    public static final int MAX_OBSERVED = 10_000_000;
     private static final String MERGED = "merged";
     private static final Set<String> CLOSE_HOW = Set.of(MERGED, "abandoned");
 
@@ -103,8 +120,10 @@ public record TaskRoutes(Responses responses,
                                         CreateTask create,
                                         ClaimTask claim,
                                         CloseTask close,
+                                        Mirror mirror,
+                                        Duration staleAfter,
                                         Supplier<Instant> clock) {
-        return new TaskRoutes(responses, mapper, tasks, create, claim, close, clock);
+        return new TaskRoutes(responses, mapper, tasks, create, claim, close, mirror, staleAfter, clock);
     }
 
     /// `tasks/next` precedes `tasks/{id}`: the router takes the first match.
@@ -117,6 +136,8 @@ public record TaskRoutes(Responses responses,
                        readRoute("tasks/{id}/events", this::taskEvents),
                        scopedRoute(HttpMethod.POST, "tasks/{id}/claim", Route.Scope.WORKER, this::claimTask),
                        scopedRoute(HttpMethod.POST, "tasks/{id}/heartbeat", Route.Scope.LEASE, this::heartbeat),
+                       scopedRoute(HttpMethod.POST, "tasks/{id}/checkpoint", Route.Scope.LEASE, this::checkpoint),
+                       route(HttpMethod.POST, "tasks/{id}/observe", this::observe),
                        scopedRoute(HttpMethod.POST, "tasks/{id}/wait", Route.Scope.LEASE, this::waitOn),
                        scopedRoute(HttpMethod.POST, "tasks/{id}/release", Route.Scope.LEASE, this::release),
                        scopedRoute(HttpMethod.POST, "tasks/{id}/park", Route.Scope.LEASE_OR_WRITE, this::park),
@@ -133,21 +154,46 @@ public record TaskRoutes(Responses responses,
                      .async()
                      .map(CreateTask.Request::request)
                      .flatMap(create::execute)
-                     .map(row -> responses.json(HttpStatus.CREATED,
-                                                TaskViews.taskView(row,
-                                                                   none())))
+                     .flatMap(row -> viewOf(row,
+                                            none()))
+                     .map(view -> responses.json(HttpStatus.CREATED, view))
                      .mapError(TaskRoutes::classify);
     }
 
     private Promise<ApiResponse> listTasks(ApiRequest request) {
         return taskQuery(request).async()
                         .flatMap(tasks::list)
-                        .map(this::viewsResponse)
+                        .flatMap(this::viewsResponse)
                         .mapError(TaskRoutes::classify);
     }
 
-    private ApiResponse viewsResponse(List<TaskRow> rows) {
-        return responses.ok(rows.stream().map(row -> TaskViews.taskView(row, none())).toList());
+    private Promise<ApiResponse> viewsResponse(List<TaskRow> rows) {
+        return tasks.reports(rows.stream().map(TaskRow::id).toList())
+                    .map(reports -> responses.ok(views(rows,
+                                                       reports,
+                                                       clock.get())));
+    }
+
+    private List<TaskView> views(List<TaskRow> rows, Map<TaskId, TaskReport> reports, Instant now) {
+        return rows.stream()
+                   .map(row -> TaskViews.taskView(row,
+                                                  none(),
+                                                  reports.getOrDefault(row.id(),
+                                                                       TaskReport.NONE),
+                                                  now,
+                                                  staleAfter))
+                   .toList();
+    }
+
+    /// The task as shown: its lane report read beside it, the heartbeat clock against one `now`.
+    private Promise<TaskView> viewOf(TaskRow row, Option<TaskDetail> detail) {
+        return tasks.reports(List.of(row.id()))
+                    .map(reports -> TaskViews.taskView(row,
+                                                       detail,
+                                                       reports.getOrDefault(row.id(),
+                                                                            TaskReport.NONE),
+                                                       clock.get(),
+                                                       staleAfter));
     }
 
     private static Result<TaskQuery> taskQuery(ApiRequest request) {
@@ -172,7 +218,7 @@ public record TaskRoutes(Responses responses,
                      .async()
                      .flatMap(stage -> tasks.ready(stage, TaskQuery.MAX_LIMIT))
                      .map(TaskRoutes::firstPerStage)
-                     .map(this::viewsResponse)
+                     .flatMap(this::viewsResponse)
                      .mapError(TaskRoutes::classify);
     }
 
@@ -191,9 +237,9 @@ public record TaskRoutes(Responses responses,
     private Promise<ApiResponse> showTask(ApiRequest request) {
         return taskId(request).async()
                      .flatMap(this::existing)
-                     .mapWith(row -> tasks.detail(row.id()),
-                              (row, detail) -> TaskViews.taskView(row,
-                                                                  some(detail)))
+                     .flatMap(row -> tasks.detail(row.id())
+                                          .flatMap(detail -> viewOf(row,
+                                                                    some(detail))))
                      .map(responses::ok)
                      .mapError(TaskRoutes::classify);
     }
@@ -262,12 +308,130 @@ public record TaskRoutes(Responses responses,
     /// A command of the maintainer's on a task.
     record TaskCommand(TaskId task, Command command) {}
 
+    /// T3, and with a `report` the tree the agent SELF-REPORTS (dirty files, unpushed commits) as of this heartbeat; the
+    /// controller cannot observe the tree. Without one the heartbeat is exactly what it was (plus its time, for `hbAge`).
     private Promise<ApiResponse> heartbeat(ApiRequest request) {
-        return parsed(request, LeaseCall.Heartbeat.class).flatMap(body -> leased(request,
-                                                                                 body.epoch(),
-                                                                                 success(new Command.Heartbeat())))
+        return parsed(request, LeaseCall.Heartbeat.class).flatMap(body -> Result.all(lease(request,
+                                                                                           body.epoch()),
+                                                                                     tree(body.report()))
+                                                                                .map(HeartbeatCall::new))
                      .async()
-                     .flatMap(this::appliedLeased)
+                     .flatMap(call -> tasks.heartbeat(call.lease(),
+                                                      call.tree(),
+                                                      clock.get()))
+                     .map(_ -> Responses.noContent())
+                     .mapError(TaskRoutes::classify);
+    }
+
+    record HeartbeatCall(Lease lease, Option<TaskReport.Tree> tree) {}
+
+    record CheckpointCall(Lease lease, Checkpoint.New body) {}
+
+    record Observation(TaskId task, int ctxK, int turns) {}
+
+    private static Result<Option<TaskReport.Tree>> tree(Option<LeaseCall.Tree> report) {
+        return Values.optional(report, TaskRoutes::treeOf);
+    }
+
+    private static Result<TaskReport.Tree> treeOf(LeaseCall.Tree body) {
+        return Result.all(Sha.sha(body.head()),
+                          count(body.dirty(),
+                                "dirty"),
+                          count(body.unpushed(),
+                                "unpushed"))
+                     .map((head, dirty, unpushed) -> new TaskReport.Tree(head.value(),
+                                                                         dirty,
+                                                                         unpushed));
+    }
+
+    private static Result<Integer> count(int value, String name) {
+        return Verify.ensure(value, Verify.Is::between, 0, MAX_OBSERVED, invalid(name));
+    }
+
+    // ---- checkpoint (lane registry WP1) -----------------------------------------------------------------------------
+    /// Fenced first (409 `lease-lost` before anything is judged), then the pushed sha must be the task branch's tip or an
+    /// ancestor of it in the mirror (422 `pushed-sha-not-on-branch`), then stored as the next version under the same fence
+    /// held atomically by the insert. Does not extend the TTL.
+    private Promise<ApiResponse> checkpoint(ApiRequest request) {
+        return request.body().length > MAX_CHECKPOINT_BYTES
+               ? TaskRefusal.CHECKPOINT_TOO_LARGE.<ApiResponse> promise().mapError(TaskRoutes::classify)
+               : parsed(request, LeaseCall.Checkpoint.class).flatMap(body -> Result.all(lease(request,
+                                                                                              body.epoch()),
+                                                                                        checkpointOf(body))
+                                                                                   .map(CheckpointCall::new))
+                       .async()
+                       .flatMap(this::checkpointed)
+                       .map(stored -> responses.json(HttpStatus.CREATED,
+                                                     TaskViews.checkpointDto(stored)))
+                       .mapError(TaskRoutes::classify);
+    }
+
+    private Promise<Checkpoint> checkpointed(CheckpointCall call) {
+        return tasks.holds(call.lease())
+                    .flatMap(_ -> existing(call.lease().task()))
+                    .flatMap(row -> Sha.sha(call.body().pushedSha())
+                                       .async()
+                                       .flatMap(sha -> mirror.branchContains(row.branch(),
+                                                                             sha)))
+                    .flatMap(onBranch -> onBranch
+                                         ? tasks.checkpoint(call.lease(),
+                                                            call.body(),
+                                                            clock.get())
+                                         : TaskRefusal.PUSHED_SHA_NOT_ON_BRANCH.<Checkpoint> promise());
+    }
+
+    private static Result<Checkpoint.New> checkpointOf(LeaseCall.Checkpoint body) {
+        return Result.all(Sha.sha(body.pushedSha()),
+                          entries(body.checklist(),
+                                  item -> item.item() != null
+                                          && !item.item()
+                                                  .isBlank()
+                                          && item.item()
+                                                 .length() <= MAX_ITEM,
+                                  "checklist"),
+                          entries(body.readMap(),
+                                  entry -> entry.path() != null
+                                           && !entry.path()
+                                                    .isBlank()
+                                           && entry.lines() != null,
+                                  "readMap"))
+                     .map((sha, checklist, readMap) -> new Checkpoint.New(sha.value(),
+                                                                          checklist.stream()
+                                                                                   .map(item -> new Checkpoint.Item(item.item(),
+                                                                                                                    item.done()))
+                                                                                   .toList(),
+                                                                          readMap.stream()
+                                                                                 .map(entry -> new Checkpoint.Entry(entry.path(),
+                                                                                                                    entry.lines()))
+                                                                                 .toList(),
+                                                                          Option.option(body.note()).or("")));
+    }
+
+    private static <T> Result<List<T>> entries(List<T> raw, java.util.function.Predicate<T> valid, String name) {
+        var entries = Option.option(raw).or(List.of());
+
+        return entries.stream()
+                      .allMatch(valid)
+               ? success(entries)
+               : invalid(name).apply("entry invalid")
+                        .result();
+    }
+
+    // ---- observe (parent side) ---------------------------------------------------------------------------------------
+    /// The parent's measurement of an agent: full token only, since the agent's lease token must not be able to write the
+    /// number its own stop rule is judged by. Any task state; an unknown task is 404.
+    private Promise<ApiResponse> observe(ApiRequest request) {
+        return parsed(request, ObserveCall.class).flatMap(body -> Result.all(taskId(request),
+                                                                             count(body.ctxK(),
+                                                                                   "ctxK"),
+                                                                             count(body.turns(),
+                                                                                   "turns"))
+                                                                        .map(Observation::new))
+                     .async()
+                     .flatMap(seen -> tasks.observe(seen.task(),
+                                                    seen.ctxK(),
+                                                    seen.turns(),
+                                                    clock.get()))
                      .map(_ -> Responses.noContent())
                      .mapError(TaskRoutes::classify);
     }
@@ -302,7 +466,7 @@ public record TaskRoutes(Responses responses,
     private Promise<ApiResponse> park(ApiRequest request) {
         return parsed(request, ParkCall.class).async()
                      .flatMap(body -> parked(request, body))
-                     .map(this::viewResponse)
+                     .flatMap(this::viewResponse)
                      .mapError(TaskRoutes::classify);
     }
 
@@ -372,7 +536,7 @@ public record TaskRoutes(Responses responses,
                                                                                ruleOf(body)))
                      .async()
                      .flatMap(this::appliedByCto)
-                     .map(this::viewResponse)
+                     .flatMap(this::viewResponse)
                      .mapError(TaskRoutes::classify);
     }
 
@@ -388,7 +552,7 @@ public record TaskRoutes(Responses responses,
         return parsed(request, TaskDecision.Close.class).flatMap(body -> closeOf(request, body))
                      .async()
                      .flatMap(close::execute)
-                     .map(this::viewResponse)
+                     .flatMap(this::viewResponse)
                      .mapError(TaskRoutes::classify);
     }
 
@@ -407,12 +571,12 @@ public record TaskRoutes(Responses responses,
                                                                                  item(body.item()).map(Command.Bounce::new)))
                      .async()
                      .flatMap(this::appliedByCto)
-                     .map(this::viewResponse)
+                     .flatMap(this::viewResponse)
                      .mapError(TaskRoutes::classify);
     }
 
-    private ApiResponse viewResponse(TaskRow row) {
-        return responses.ok(TaskViews.taskView(row, none()));
+    private Promise<ApiResponse> viewResponse(TaskRow row) {
+        return viewOf(row, none()).map(responses::ok);
     }
 
     /// The maintainer's item, free text [G]: present, at most [#MAX_ITEM] characters.

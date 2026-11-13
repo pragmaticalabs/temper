@@ -9,7 +9,10 @@ import org.pragmatica.temper.domain.state.JobState;
 
 /// One task in `GET /api/v1/tasks` and `GET /tasks/{id}` (m3-design §11.1): its facts, its stage and status, its
 /// counters and lease (never the token or its hash), and, on `GET /tasks/{id}` and in the create answer, the `detail`:
-/// checklist items, rulings, accepted evidence ids and linked jobs. The spot-audit flag is never shown: it is invisible
+/// checklist items, rulings, accepted evidence ids and linked jobs. The lane registry adds `hbAge` (seconds since the
+/// last heartbeat or claim of a LEASED task) and `stale` (`hbAge` over the controller's `[fleet] laneStaleMin`);
+/// `report`, the tree the agent SELF-REPORTED at its last heartbeat (as of `report.at`, never observed by the
+/// controller); and `observed`, the context and turns the PARENT measured. The spot-audit flag is never shown: it is invisible
 /// to workers (§7.7), and they hold a read token.
 public record TaskView(long id,
                        String slug,
@@ -44,7 +47,11 @@ public record TaskView(long id,
                        String createdBy,
                        Instant createdAt,
                        Option<Instant> closedAt,
-                       Option<Detail> detail) {
+                       Option<Detail> detail,
+                       Option<Long> hbAge,
+                       boolean stale,
+                       Option<TreeReportDto> report,
+                       Option<ObservedDto> observed) {
     /// The checklist (§7.6), every ruling, the accepted evidence ids and the linked jobs.
     public record Detail(List<Item> items, List<RulingDto> rulings, List<Long> evidence, List<LinkedJob> jobs) {}
 

@@ -14,15 +14,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
-import java.util.List;
 
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.Timeout;
-import org.junit.jupiter.api.io.TempDir;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.MethodSource;
 import org.pragmatica.lang.utils.Causes;
 import org.pragmatica.temper.cli.merge.GhMerge;
 import org.pragmatica.temper.domain.diff.DiffObstacle;
@@ -44,12 +36,21 @@ import org.pragmatica.temper.protocol.api.SubmitRequest;
 import org.pragmatica.temper.protocol.api.SubscriberView;
 import org.pragmatica.temper.protocol.json.TemperJson;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.fail;
-import static org.junit.jupiter.api.Assumptions.assumeFalse;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
+
 import static org.pragmatica.lang.Option.none;
 import static org.pragmatica.lang.Option.some;
 import static org.pragmatica.temper.cli.FakeController.Reply;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.fail;
+import static org.junit.jupiter.api.Assumptions.assumeFalse;
+
 
 /// A3 (m0-design §9): a table over every row of spec §8.1 plus the Q-15 rulings, each run as a whole CLI
 /// invocation against the in-process fake controller (real JDK HTTP client, real token file).
@@ -94,8 +95,11 @@ class ExitCodeContractTest {
                                  ExitCode.ACCEPTED,
                                  Optional.of("submit 41 QUEUED sha=0cf5631 recipe=module-test deduplicated=false"),
                                  (controller, cli) -> {
-                                     controller.onJson("POST /jobs", Fixtures.submitted(41, JobState.QUEUED, false))
-                                               .onJson("GET /jobs/41", Fixtures.job(41, JobState.QUEUED));
+                                     controller.onJson("POST /jobs",
+                                                       Fixtures.submitted(41, JobState.QUEUED, false))
+                                               .onJson("GET /jobs/41",
+                                                       Fixtures.job(41, JobState.QUEUED));
+
                                      return cli.run(MODULE_TEST_SHA.split(" "));
                                  }),
                          new Row("0 wait PASSED", ExitCode.PASSED, Optional.empty(), waitFor("PASSED")),
@@ -109,6 +113,7 @@ class ExitCodeContractTest {
                                                               controller.write(Fixtures.refused("R-M2",
                                                                                                 "-Dmaven.repo.local is not allowed",
                                                                                                 some(42L)))));
+
                                      return cli.run(MODULE_TEST_SHA.split(" "));
                                  }),
                          new Row("2 wait on a refused job",
@@ -116,6 +121,7 @@ class ExitCodeContractTest {
                                  Optional.of("wait 42 REFUSED reason=R-M2"),
                                  (controller, cli) -> {
                                      controller.onJson("GET /jobs/42", Fixtures.job(42, JobState.REFUSED, some("R-M2")));
+
                                      return cli.run("wait", "42");
                                  }),
                          new Row("3 wait EMPTY", ExitCode.EMPTY, Optional.empty(), waitFor("EMPTY")),
@@ -126,6 +132,7 @@ class ExitCodeContractTest {
                                  Optional.empty(),
                                  (controller, cli) -> {
                                      controller.on("GET /jobs/41/log", Reply.json(503, "{\"error\":\"host down\"}"));
+
                                      return cli.run("log", "41");
                                  }),
                          new Row("6 wait CANCELLED", ExitCode.CANCELLED, Optional.empty(), waitFor("CANCELLED")),
@@ -134,6 +141,7 @@ class ExitCodeContractTest {
                                  Optional.of("wait 41 RUNNING"),
                                  (controller, cli) -> {
                                      controller.onJson("GET /jobs/41", Fixtures.job(41, JobState.RUNNING));
+
                                      return cli.run("wait", "41", "--timeout", "10s");
                                  }),
                          new Row("9 result before terminal (Q-15)",
@@ -141,14 +149,18 @@ class ExitCodeContractTest {
                                  Optional.of("result 41 RUNNING"),
                                  (controller, cli) -> {
                                      controller.onJson("GET /jobs/41", Fixtures.job(41, JobState.RUNNING));
+
                                      return cli.run("result", "41");
                                  }),
                          new Row("10 submit deduplicated, id printed",
                                  ExitCode.DEDUPLICATED,
                                  Optional.of("submit 40 PASSED sha=0cf5631 recipe=mvn deduplicated=true"),
                                  (controller, cli) -> {
-                                     controller.onJson("POST /jobs", Fixtures.submitted(40, JobState.PASSED, true))
-                                               .onJson("GET /jobs/40", Fixtures.job(40, JobState.PASSED));
+                                     controller.onJson("POST /jobs",
+                                                       Fixtures.submitted(40, JobState.PASSED, true))
+                                               .onJson("GET /jobs/40",
+                                                       Fixtures.job(40, JobState.PASSED));
+
                                      return cli.run("submit", "mvn", "--ref", "main", "--", "-pl", "core", "verify");
                                  }),
                          new Row("64 unknown command",
@@ -163,8 +175,16 @@ class ExitCodeContractTest {
                                  ExitCode.REFUSED,
                                  Optional.empty(),
                                  (controller, cli) -> {
-                                     controller.on("POST /refusals", Reply.json(409, "{\"error\":\"Refusal R-9 exists\"}"));
-                                     return cli.run("refusal", "add", "R-9", "--matcher", matcherFile(controller, cli).toString(), "--reason", "why");
+                                     controller.on("POST /refusals",
+                                                   Reply.json(409, "{\"error\":\"Refusal R-9 exists\"}"));
+
+                                     return cli.run("refusal",
+                                                    "add",
+                                                    "R-9",
+                                                    "--matcher",
+                                                    matcherFile(controller, cli).toString(),
+                                                    "--reason",
+                                                    "why");
                                  }),
                          new Row("0 subscribe a job, its state and the resulting scope (m2-design §2.4)",
                                  ExitCode.ACCEPTED,
@@ -175,7 +195,9 @@ class ExitCodeContractTest {
                                                               controller.write(SubscriberView.subscriberView("cto",
                                                                                                              List.of("job:41"),
                                                                                                              7))))
-                                               .onJson("GET /jobs/41", Fixtures.job(41, JobState.RUNNING));
+                                               .onJson("GET /jobs/41",
+                                                       Fixtures.job(41, JobState.RUNNING));
+
                                      return cli.run("subscribe", "41", "--subscriber", "cto");
                                  }),
                          new Row("64 subscribe a short SHA, refused before any call (F3)",
@@ -188,36 +210,65 @@ class ExitCodeContractTest {
                                                               controller.write(SubscriberView.subscriberView("cto",
                                                                                                              List.of("ref:0cf5631"),
                                                                                                              7))))
-                                               .on("GET /jobs", Reply.json(200, "[]"));
+                                               .on("GET /jobs",
+                                                   Reply.json(200, "[]"));
+
                                      return cli.run("subscribe", "0cf5631", "--subscriber", "cto");
                                  }),
                          new Row("64 subscribe an unknown job (HTTP 404)",
                                  ExitCode.USAGE,
                                  Optional.empty(),
                                  (controller, cli) -> {
-                                     controller.on("PUT /subscribers/cto/selectors", Reply.json(404, "{\"error\":\"Not found: job 41\"}"));
+                                     controller.on("PUT /subscribers/cto/selectors",
+                                                   Reply.json(404, "{\"error\":\"Not found: job 41\"}"));
+
                                      return cli.run("subscribe", "41", "--subscriber", "cto");
                                  }),
                          new Row("0 known list (m2-design §4.4)",
                                  ExitCode.ACCEPTED,
                                  Optional.of("known 12 ACTIVE test=org.x.FooTest issue=1679 until=\"#1679 closes\" reason=\"flaky until #1679\" by=cto"),
                                  (controller, cli) -> {
-                                     controller.onJson("GET /known", (Object) new KnownDto[]{Fixtures.known(12, "org.x.FooTest", none())});
+                                     controller.onJson("GET /known",
+                                                       (Object) new KnownDto[]{Fixtures.known(12,
+                                                                                              "org.x.FooTest",
+                                                                                              none())});
+
                                      return cli.run("known", "list");
                                  }),
                          new Row("2 known add of a test with an active entry (HTTP 409)",
                                  ExitCode.REFUSED,
                                  Optional.empty(),
                                  (controller, cli) -> {
-                                     controller.on("POST /known", Reply.json(409, "{\"error\":\"An active known entry for org.x.FooTest already exists\"}"));
-                                     return cli.run("known", "add", "org.x.FooTest", "--issue", "1679", "--reason", "flaky", "--until", "#1679 closes");
+                                     controller.on("POST /known",
+                                                   Reply.json(409,
+                                                              "{\"error\":\"An active known entry for org.x.FooTest already exists\"}"));
+
+                                     return cli.run("known",
+                                                    "add",
+                                                    "org.x.FooTest",
+                                                    "--issue",
+                                                    "1679",
+                                                    "--reason",
+                                                    "flaky",
+                                                    "--until",
+                                                    "#1679 closes");
                                  }),
                          new Row("64 known add rejected (HTTP 400)",
                                  ExitCode.USAGE,
                                  Optional.empty(),
                                  (controller, cli) -> {
-                                     controller.on("POST /known", Reply.json(400, "{\"error\":\"Invalid testId: 'org.x.'\"}"));
-                                     return cli.run("known", "add", "org.x.", "--issue", "1679", "--reason", "flaky", "--until", "#1679 closes");
+                                     controller.on("POST /known",
+                                                   Reply.json(400, "{\"error\":\"Invalid testId: 'org.x.'\"}"));
+
+                                     return cli.run("known",
+                                                    "add",
+                                                    "org.x.",
+                                                    "--issue",
+                                                    "1679",
+                                                    "--reason",
+                                                    "flaky",
+                                                    "--until",
+                                                    "#1679 closes");
                                  }),
                          new Row("64 known expire of an unknown id (HTTP 404)",
                                  ExitCode.USAGE,
@@ -231,16 +282,22 @@ class ExitCodeContractTest {
                                  ExitCode.ACCEPTED,
                                  Optional.of(RerunAgainstControllerTest.ACCEPTED_LINE),
                                  (controller, cli) -> {
-                                     controller.onJson("POST /jobs/4711/rerun", Fixtures.submitted(4740, JobState.QUEUED, false))
-                                               .onJson("GET /jobs/4740", RerunAgainstControllerTest.rerunJob(4740, JobState.QUEUED));
+                                     controller.onJson("POST /jobs/4711/rerun",
+                                                       Fixtures.submitted(4740, JobState.QUEUED, false))
+                                               .onJson("GET /jobs/4740",
+                                                       RerunAgainstControllerTest.rerunJob(4740, JobState.QUEUED));
+
                                      return cli.run("rerun", "4711");
                                  }),
                          new Row("10 rerun deduplicated onto the first rerun",
                                  ExitCode.DEDUPLICATED,
                                  Optional.empty(),
                                  (controller, cli) -> {
-                                     controller.onJson("POST /jobs/4711/rerun", Fixtures.submitted(4740, JobState.RUNNING, true))
-                                               .onJson("GET /jobs/4740", RerunAgainstControllerTest.rerunJob(4740, JobState.RUNNING));
+                                     controller.onJson("POST /jobs/4711/rerun",
+                                                       Fixtures.submitted(4740, JobState.RUNNING, true))
+                                               .onJson("GET /jobs/4740",
+                                                       RerunAgainstControllerTest.rerunJob(4740, JobState.RUNNING));
+
                                      return cli.run("rerun", "4711");
                                  }),
                          new Row("2 rerun refused (REFUSED(rerun))",
@@ -252,6 +309,7 @@ class ExitCodeContractTest {
                                                               controller.write(Fixtures.refused("rerun",
                                                                                                 "all failing classes are KNOWN",
                                                                                                 some(4741L)))));
+
                                      return cli.run("rerun", "4711");
                                  }),
                          new Row("64 rerun of an unknown job (HTTP 404)",
@@ -266,16 +324,19 @@ class ExitCodeContractTest {
                                  ExitCode.ACCEPTED,
                                  Optional.of("submit 43 QUEUED sha=0cf5631 recipe=gate deduplicated=false"),
                                  (controller, cli) -> {
-                                     controller.onJson("POST /jobs", Fixtures.submitted(43, JobState.QUEUED, false))
-                                               .onJson("GET /jobs/43", Fixtures.job(43, JobState.QUEUED));
+                                     controller.onJson("POST /jobs",
+                                                       Fixtures.submitted(43, JobState.QUEUED, false))
+                                               .onJson("GET /jobs/43",
+                                                       Fixtures.job(43, JobState.QUEUED));
+
                                      return cli.run("submit", "gate", "--sha", Fixtures.SHA, "--fresh", "--prio", "5");
                                  }),
                          new Row("64 token file missing",
                                  ExitCode.USAGE,
                                  Optional.empty(),
                                  (controller, cli) -> {
-                                     Files.delete(cli.home()
-                                                     .resolve(".config/temper/token"));
+                                     Files.delete(cli.home().resolve(".config/temper/token"));
+
                                      return cli.run("result", "41");
                                  }),
                          new Row("64 controller rejects the request (HTTP 400)",
@@ -283,20 +344,22 @@ class ExitCodeContractTest {
                                  Optional.empty(),
                                  (controller, cli) -> {
                                      controller.on("GET /jobs/41/result", Reply.json(400, "{\"error\":\"bad job id\"}"));
+
                                      return cli.run("result", "41");
                                  }),
                          new Row("64 token file unreadable",
                                  ExitCode.USAGE,
                                  Optional.empty(),
                                  (controller, cli) -> {
-                                     unreadable(cli.home()
-                                                   .resolve(".config/temper/token"));
+                                     unreadable(cli.home().resolve(".config/temper/token"));
+
                                      return cli.run("result", "41");
                                  }),
                          new Row("69 controller unreachable",
                                  ExitCode.UNREACHABLE,
                                  Optional.empty(),
-                                 (controller, cli) -> cli.env("TEMPER_URL", "http://127.0.0.1:" + closedPort())
+                                 (controller, cli) -> cli.env("TEMPER_URL",
+                                                              "http://127.0.0.1:" + closedPort())
                                                          .run("result", "41")),
                          new Row("0 alarm-check, every condition clear",
                                  ExitCode.ALARM_CLEAR,
@@ -310,18 +373,24 @@ class ExitCodeContractTest {
                                  ExitCode.ALARM_UNDELIVERED,
                                  Optional.empty(),
                                  (controller, cli) -> {
-                                     Files.writeString(cli.home().resolve(".config/temper/alarm-token"), "ghp_token\n");
+                                     Files.writeString(cli.home().resolve(".config/temper/alarm-token"),
+                                                       "ghp_token\n");
+
                                      return alarmCheck(controller,
                                                        cli,
                                                        "UP",
-                                                       "repo = \"a/b\"\ngithub-api = \"http://127.0.0.1:" + closedPort() + "\"\n");
+                                                       "repo = \"a/b\"\ngithub-api = \"http://127.0.0.1:" + closedPort()
+                                                      + "\"\n");
                                  }),
                          new Row("77 read-only token on a write route (HTTP 403, D3)",
                                  ExitCode.UNAUTHORIZED,
                                  Optional.empty(),
                                  (controller, cli) -> {
-                                     controller.onJson("GET /jobs/41", Fixtures.job(41, JobState.RUNNING))
-                                               .on("POST /jobs/41/cancel", FakeController.Reply.json(403, FORBIDDEN));
+                                     controller.onJson("GET /jobs/41",
+                                                       Fixtures.job(41, JobState.RUNNING))
+                                               .on("POST /jobs/41/cancel",
+                                                   FakeController.Reply.json(403, FORBIDDEN));
+
                                      return cli.run("cancel", "41");
                                  }),
                          new Row("0 gate PASSED",
@@ -353,6 +422,7 @@ class ExitCodeContractTest {
                                  Optional.of("gate 0cf5631 RUNNING job=4720 judge=1a2b3c4 state=RUNNING previous=4711:FAILED"),
                                  (controller, cli) -> {
                                      controller.onJson("GET /gate/0cf5631", Fixtures.gateRunning(JobState.RUNNING));
+
                                      return cli.run("gate", "0cf5631", "--wait", "--timeout", "10s");
                                  }),
                          new Row("64 gate prefix of Gates at two SHAs (HTTP 400)",
@@ -361,20 +431,31 @@ class ExitCodeContractTest {
                                  (controller, cli) -> {
                                      controller.on("GET /gate/0cf5631",
                                                    Reply.json(400, "{\"error\":\"SHA prefix 0cf5631 matches a,b\"}"));
+
                                      return cli.run("gate", "0cf5631");
                                  }),
                          new Row("0 diff with nothing newly failing and no added failing test",
                                  ExitCode.PASSED,
                                  Optional.empty(),
-                                 diff(Fixtures.diffView(List.of(Fixtures.test("org.x.NewTest", "ok", KeyOutcome.PASSED)), List.of(), none()))),
+                                 diff(Fixtures.diffView(List.of(Fixtures.test("org.x.NewTest", "ok", KeyOutcome.PASSED)),
+                                                        List.of(),
+                                                        none()))),
                          new Row("1 diff with an added failing test, nothing newly failing (m2-design §3.1)",
                                  ExitCode.FAILED,
                                  Optional.empty(),
-                                 diff(Fixtures.diffView(List.of(Fixtures.test("org.x.FooTest", "newCase", KeyOutcome.FAILED)), List.of(), none()))),
+                                 diff(Fixtures.diffView(List.of(Fixtures.test("org.x.FooTest",
+                                                                              "newCase",
+                                                                              KeyOutcome.FAILED)),
+                                                        List.of(),
+                                                        none()))),
                          new Row("1 diff with a newly failing test",
                                  ExitCode.FAILED,
                                  Optional.empty(),
-                                 diff(Fixtures.diffView(List.of(), List.of(Fixtures.test("org.x.BarTest", "flips", KeyOutcome.FAILED)), none()))),
+                                 diff(Fixtures.diffView(List.of(),
+                                                        List.of(Fixtures.test("org.x.BarTest",
+                                                                              "flips",
+                                                                              KeyOutcome.FAILED)),
+                                                        none()))),
                          new Row("1 diff with an EMPTY B, every A test removed (R-M2-13)",
                                  ExitCode.FAILED,
                                  Optional.empty(),
@@ -398,28 +479,33 @@ class ExitCodeContractTest {
                          new Row("9 diff with a side not terminal",
                                  ExitCode.PENDING,
                                  Optional.of("diff 4690 4711 RUNNING not-terminal=b:QUEUED"),
-                                 diff(Fixtures.diffRefused(DiffObstacle.NOT_TERMINAL, DiffOutcome.Side.B, JobState.QUEUED))),
+                                 diff(Fixtures.diffRefused(DiffObstacle.NOT_TERMINAL,
+                                                           DiffOutcome.Side.B,
+                                                           JobState.QUEUED))),
                          new Row("64 diff of an unknown job (HTTP 404)",
                                  ExitCode.USAGE,
                                  Optional.empty(),
                                  (controller, cli) -> {
                                      controller.on("GET /diff", Reply.json(404, "{\"error\":\"Not found: job 4799\"}"));
+
                                      return cli.run("diff", "4690", "4799");
                                  }),
                          new Row("77 bad token (HTTP 401, Q-15)",
                                  ExitCode.UNAUTHORIZED,
                                  Optional.empty(),
                                  (controller, cli) -> {
-                                     Files.writeString(cli.home()
-                                                          .resolve(".config/temper/token"),
+                                     Files.writeString(cli.home().resolve(".config/temper/token"),
                                                        "wrong-token");
+
                                      return cli.run("result", "41");
                                  }),
                          new Row("0 task claim: the claim line; the token only in the lease file (m3-design §11.2)",
                                  ExitCode.ACCEPTED,
                                  Optional.of("task 42 CODE LEASED epoch=7 readPoint=0cf5631 deadline=2026-10-20T16:00:00Z"),
                                  (controller, cli) -> {
-                                     controller.on("POST /tasks/42/claim", Reply.json(200, controller.write(claimAnswer())));
+                                     controller.on("POST /tasks/42/claim",
+                                                   Reply.json(200, controller.write(claimAnswer())));
+
                                      return cli.run("task", "claim", "42");
                                  }),
                          new Row("2 task create refused (HTTP 422 base-unknown)",
@@ -427,14 +513,28 @@ class ExitCodeContractTest {
                                  Optional.empty(),
                                  (controller, cli) -> {
                                      controller.on("POST /tasks", Reply.json(422, "{\"error\":\"base-unknown\"}"));
-                                     return cli.run("task", "create", "--slug", "s", "--title", "T", "--repo", "a/b", "--base", "nope",
-                                                    "--branch", "agent/s", "--brief", "briefs/s.md");
+
+                                     return cli.run("task",
+                                                    "create",
+                                                    "--slug",
+                                                    "s",
+                                                    "--title",
+                                                    "T",
+                                                    "--repo",
+                                                    "a/b",
+                                                    "--base",
+                                                    "nope",
+                                                    "--branch",
+                                                    "agent/s",
+                                                    "--brief",
+                                                    "briefs/s.md");
                                  }),
                          new Row("8 task claim --stage with nothing ready (HTTP 204)",
                                  ExitCode.NONE,
                                  Optional.of("task - NONE nothing ready"),
                                  (controller, cli) -> {
                                      controller.on("POST /tasks/claim", Reply.json(204, ""));
+
                                      return cli.run("task", "claim", "--stage", "VERIFY");
                                  }),
                          new Row("9 task claim of a task not ready (HTTP 409)",
@@ -442,6 +542,7 @@ class ExitCodeContractTest {
                                  Optional.empty(),
                                  (controller, cli) -> {
                                      controller.on("POST /tasks/42/claim", Reply.json(409, "{\"error\":\"not-ready\"}"));
+
                                      return cli.run("task", "claim", "42");
                                  }),
                          new Row("9 task rule of a task not held (HTTP 409)",
@@ -449,6 +550,7 @@ class ExitCodeContractTest {
                                  Optional.empty(),
                                  (controller, cli) -> {
                                      controller.on("POST /tasks/42/rule", Reply.json(409, "{\"error\":\"not-held\"}"));
+
                                      return cli.run("task", "rule", "42", "--option", "a", "--text", "go");
                                  }),
                          new Row("12 task heartbeat with the lease lost (HTTP 409 lease-lost)",
@@ -456,7 +558,9 @@ class ExitCodeContractTest {
                                  Optional.empty(),
                                  (controller, cli) -> {
                                      leaseFile(cli, 42, 7);
-                                     controller.on("POST /tasks/42/heartbeat", Reply.json(409, "{\"error\":\"lease-lost\"}"));
+                                     controller.on("POST /tasks/42/heartbeat",
+                                                   Reply.json(409, "{\"error\":\"lease-lost\"}"));
+
                                      return cli.run("task", "heartbeat", "42");
                                  }),
                          new Row("12 submit --task with the lease lost (HTTP 409 lease-lost)",
@@ -465,6 +569,7 @@ class ExitCodeContractTest {
                                  (controller, cli) -> {
                                      leaseFile(cli, 42, 7);
                                      controller.on("POST /jobs", Reply.json(409, "{\"error\":\"lease-lost\"}"));
+
                                      return cli.run((MODULE_TEST_SHA + " --task 42").split(" "));
                                  }),
                          new Row("13 a judged CLI against a controller of another judged build (D-6)",
@@ -472,7 +577,9 @@ class ExitCodeContractTest {
                                  Optional.empty(),
                                  (controller, cli) -> {
                                      controller.temperVersion(Optional.of("0.1.0-SNAPSHOT+222222222222"))
-                                               .on("GET /refusals", Reply.json(200, "[]"));
+                                               .on("GET /refusals",
+                                                   Reply.json(200, "[]"));
+
                                      return cli.version("0.1.0-SNAPSHOT+111111111111")
                                                .run("refusal", "list");
                                  }),
@@ -481,8 +588,17 @@ class ExitCodeContractTest {
                                  Optional.empty(),
                                  (controller, cli) -> {
                                      controller.on("GET /fleet/events/after",
-                                                   FleetFixtures.reply(FleetFixtures.event(43, "pr-state", "a/b#1", false, "{}")));
-                                     return cli.run("events", "--until", "check-concluded", "--after", FleetFixtures.EPOCH + ":42");
+                                                   FleetFixtures.reply(FleetFixtures.event(43,
+                                                                                           "pr-state",
+                                                                                           "a/b#1",
+                                                                                           false,
+                                                                                           "{}")));
+
+                                     return cli.run("events",
+                                                    "--until",
+                                                    "check-concluded",
+                                                    "--after",
+                                                    FleetFixtures.EPOCH + ":42");
                                  }),
                          new Row("4 events --until with kiln:github stale",
                                  ExitCode.SOURCE_STALE,
@@ -493,13 +609,20 @@ class ExitCodeContractTest {
                                                                                                42,
                                                                                                FleetFixtures.staleSource("kiln:github"),
                                                                                                true)));
-                                     return cli.run("events", "--until", "check-concluded", "--after", FleetFixtures.EPOCH + ":42");
+
+                                     return cli.run("events",
+                                                    "--until",
+                                                    "check-concluded",
+                                                    "--after",
+                                                    FleetFixtures.EPOCH + ":42");
                                  }),
                          new Row("5 events --until --timeout reached",
                                  ExitCode.EVENTS_TIMEOUT,
                                  Optional.empty(),
                                  (controller, cli) -> {
-                                     controller.on("GET /fleet/events/after", FleetFixtures.reply(FleetFixtures.heartbeat(42)));
+                                     controller.on("GET /fleet/events/after",
+                                                   FleetFixtures.reply(FleetFixtures.heartbeat(42)));
+
                                      return cli.run("events",
                                                     "--until",
                                                     "check-concluded",
@@ -518,7 +641,12 @@ class ExitCodeContractTest {
                                                                                                FleetFixtures.FRESH,
                                                                                                false,
                                                                                                "loopback")));
-                                     return cli.run("events", "--until", "check-concluded", "--after", FleetFixtures.EPOCH + ":42");
+
+                                     return cli.run("events",
+                                                    "--until",
+                                                    "check-concluded",
+                                                    "--after",
+                                                    FleetFixtures.EPOCH + ":42");
                                  }),
                          new Row("7 events --until --after an epoch the controller no longer has (HTTP 409)",
                                  ExitCode.EPOCH_CHANGED,
@@ -527,8 +655,13 @@ class ExitCodeContractTest {
                                      controller.on("GET /fleet/events/after",
                                                    Reply.json(409,
                                                               "{\"error\":\"EPOCH_CHANGED\",\"epoch\":\"" + FleetFixtures.OTHER_EPOCH
-                                                              + "\"}"));
-                                     return cli.run("events", "--until", "check-concluded", "--after", FleetFixtures.EPOCH + ":42");
+                                                             + "\"}"));
+
+                                     return cli.run("events",
+                                                    "--until",
+                                                    "check-concluded",
+                                                    "--after",
+                                                    FleetFixtures.EPOCH + ":42");
                                  }),
                          new Row("3 merge whose gh pr merge failed after every check passed",
                                  ExitCode.MERGE_FAILED,
@@ -561,6 +694,8 @@ class ExitCodeContractTest {
                                  List.of(),
                                  List.of(),
                                  List.of(),
+                                 List.of(),
+                                 null,
                                  List.of());
     }
 
@@ -576,6 +711,7 @@ class ExitCodeContractTest {
     private static Scenario gate(GateView view) {
         return (controller, cli) -> {
             controller.onJson("GET /gate/0cf5631", view);
+
             return cli.run("gate", "0cf5631");
         };
     }
@@ -584,6 +720,7 @@ class ExitCodeContractTest {
     private static Scenario diff(DiffAnswer answer) {
         return (controller, cli) -> {
             controller.onJson("GET /diff", answer);
+
             return cli.run("diff", "4690", "4711");
         };
     }
@@ -592,6 +729,7 @@ class ExitCodeContractTest {
     private static Scenario diffBase(DiffAnswer answer) {
         return (controller, cli) -> {
             controller.onJson("GET /diff", answer);
+
             return cli.run("diff", "4711", "--base", "0cf5631");
         };
     }
@@ -601,26 +739,41 @@ class ExitCodeContractTest {
         return (controller, cli) -> {
             controller.onJson("GET /jobs/41",
                               Fixtures.job(41, JobState.RUNNING),
-                              Fixtures.job(41, JobState.valueOf(verdict)))
-                      .onJson("GET /jobs/41/result", Fixtures.result(41, verdict, none(), 0, 0, 0));
+                              Fixtures.job(41,
+                                           JobState.valueOf(verdict)))
+                      .onJson("GET /jobs/41/result",
+                              Fixtures.result(41,
+                                              verdict,
+                                              none(),
+                                              0,
+                                              0,
+                                              0));
+
             return cli.run("wait", "41");
         };
     }
 
     /// `alarm-check` against a fresh dump and one host in `hostState`, measuring HOME with a 1 GiB threshold.
     private static CliHarness.Run alarmCheck(FakeController controller, CliHarness cli, String hostState, String keys) throws IOException {
-        controller.onJson("GET /maintenance", Fixtures.maintenance(Fixtures.AT.minusSeconds(3600), true, some(Fixtures.AT.minusSeconds(3600))))
-                  .onJson("GET /hosts", Fixtures.hosts(hostState))
-                  .onJson("GET /fleet/alarms", Fixtures.noAlarms());
+        controller.onJson("GET /maintenance",
+                          Fixtures.maintenance(Fixtures.AT.minusSeconds(3600),
+                                               true,
+                                               some(Fixtures.AT.minusSeconds(3600))))
+                  .onJson("GET /hosts",
+                          Fixtures.hosts(hostState))
+                  .onJson("GET /fleet/alarms",
+                          Fixtures.noAlarms());
         Files.writeString(cli.home().resolve(".config/temper/config"),
-                          "[alarm]\n" + Fixtures.dumpDir(cli.home()) + "host = \"bigboy\"\nmin-free-gib = 1\npaths = [\"" + cli.home() + "\"]\n" + keys);
+                          "[alarm]\n" + Fixtures.dumpDir(cli.home())
+                         + "host = \"bigboy\"\nmin-free-gib = 1\npaths = [\"" + cli.home()
+                         + "\"]\n" + keys);
+
         return cli.run("alarm-check");
     }
 
     /// A valid `--matcher` file in HOME, written from the protocol DTO.
     static Path matcherFile(FakeController controller, CliHarness cli) throws IOException {
-        return Files.writeString(cli.home()
-                                    .resolve("matcher.json"),
+        return Files.writeString(cli.home().resolve("matcher.json"),
                                  controller.write(new RefusalMatcherDto.ItTestRequired("forge-tests")));
     }
 
@@ -633,29 +786,36 @@ class ExitCodeContractTest {
     @ParameterizedTest(name = "{0}")
     @MethodSource("rows")
     void exitCode_matchesSpecTable_forEveryRow(Row row) throws IOException {
-        var result = row.scenario()
-                        .run(controller, cli);
+        var result = row.scenario().run(controller, cli);
 
-        assertThat(result.exit()).as(result.err())
-                                 .isEqualTo(row.exit()
-                                               .code());
-        row.line()
-           .ifPresent(line -> assertThat(result.out()).containsExactly(line));
+        assertThat(result.exit()).as(result.err()).isEqualTo(row.exit().code());
+        row.line().ifPresent(line -> assertThat(result.out()).containsExactly(line));
     }
 
     /// Every exit code of spec §8.1, Q-15, M2 (`gate`'s NONE 8 and CONFLICT 11, m2-design §1.5) and M3 (the task group's
     /// LEASE_LOST 12, m3-design §11.2), D-6 (VERSION_SKEW 13) and `events --until` (3 to 7) has a row.
     @Test
     void table_coversEveryExitCode() {
-        var covered = rows().map(Row::exit)
-                            .collect(Collectors.toCollection(() -> EnumSet.noneOf(ExitCode.class)));
+        var covered = rows().map(Row::exit).collect(Collectors.toCollection(() -> EnumSet.noneOf(ExitCode.class)));
 
         assertThat(covered).isEqualTo(EnumSet.allOf(ExitCode.class));
-        assertThat(Arrays.stream(ExitCode.values())
-                         .map(ExitCode::code)
-                         .distinct()
-                         .sorted()
-                         .toList()).containsExactly(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 64, 69, 77);
+        assertThat(Arrays.stream(ExitCode.values()).map(ExitCode::code).distinct().sorted().toList()).containsExactly(0,
+                                                                                                                      1,
+                                                                                                                      2,
+                                                                                                                      3,
+                                                                                                                      4,
+                                                                                                                      5,
+                                                                                                                      6,
+                                                                                                                      7,
+                                                                                                                      8,
+                                                                                                                      9,
+                                                                                                                      10,
+                                                                                                                      11,
+                                                                                                                      12,
+                                                                                                                      13,
+                                                                                                                      64,
+                                                                                                                      69,
+                                                                                                                      77);
     }
 
     /// `--wait` polls while RUNNING and prints the first other answer, with its exit code; NONE and CONFLICT answer at
@@ -666,7 +826,6 @@ class ExitCodeContractTest {
                           Fixtures.gateRunning(JobState.QUEUED),
                           Fixtures.gateRunning(JobState.RUNNING),
                           Fixtures.gateVerdict(GateAnswer.FAILED, 1, List.of()));
-
         var result = cli.run("gate", "0cf5631", "--wait");
 
         assertThat(result.exit()).isEqualTo(1);
@@ -677,7 +836,6 @@ class ExitCodeContractTest {
     @Test
     void gateWait_none_answersAtOnce() {
         controller.onJson("GET /gate/0cf5631", Fixtures.gateNone(), Fixtures.gateRunning(JobState.QUEUED));
-
         var result = cli.run("gate", "0cf5631", "--wait");
 
         assertThat(result.exit()).isEqualTo(8);
@@ -689,7 +847,6 @@ class ExitCodeContractTest {
     @Test
     void gateWait_conflict_answersAtOnce() {
         controller.onJson("GET /gate/0cf5631", Fixtures.gateConflict(some(4720L)));
-
         var result = cli.run("gate", "0cf5631", "--wait");
 
         assertThat(result.exit()).isEqualTo(11);
@@ -709,7 +866,6 @@ class ExitCodeContractTest {
     @Test
     void gate_json_printsTheGateView_withTheAnswersExitCode() {
         controller.onJson("GET /gate/0cf5631", Fixtures.gateConflict(none()));
-
         var result = cli.run("gate", "0cf5631", "--json");
 
         assertThat(result.exit()).isEqualTo(11);
@@ -718,9 +874,15 @@ class ExitCodeContractTest {
 
     @Test
     void wait_printsVerdictLine_withCountsAndObservedFailures() {
-        controller.onJson("GET /jobs/41", Fixtures.job(41, JobState.FAILED))
-                  .onJson("GET /jobs/41/result", Fixtures.result(41, "FAILED", some("tests"), 1, 1, 2));
-
+        controller.onJson("GET /jobs/41",
+                          Fixtures.job(41, JobState.FAILED))
+                  .onJson("GET /jobs/41/result",
+                          Fixtures.result(41,
+                                          "FAILED",
+                                          some("tests"),
+                                          1,
+                                          1,
+                                          2));
         var result = cli.run("wait", "41");
 
         assertThat(result.exit()).isEqualTo(1);
@@ -736,8 +898,13 @@ class ExitCodeContractTest {
                           Fixtures.job(41, JobState.RUNNING),
                           Fixtures.job(41, JobState.RUNNING),
                           Fixtures.job(41, JobState.PASSED))
-                  .onJson("GET /jobs/41/result", Fixtures.result(41, "PASSED", none(), 0, 0, 0));
-
+                  .onJson("GET /jobs/41/result",
+                          Fixtures.result(41,
+                                          "PASSED",
+                                          none(),
+                                          0,
+                                          0,
+                                          0));
         var result = cli.run("wait", "41");
 
         assertThat(result.exit()).isZero();
@@ -751,16 +918,15 @@ class ExitCodeContractTest {
     @Test
     void waitTimeout_neverPausesPastTheDeadline() {
         controller.onJson("GET /jobs/41", Fixtures.job(41, JobState.RUNNING));
-
         cli.run("wait", "41", "--timeout", "10s");
-
-        assertThat(cli.time.pauses()).containsExactly(Duration.ofSeconds(2), Duration.ofSeconds(4), Duration.ofSeconds(4));
+        assertThat(cli.time.pauses()).containsExactly(Duration.ofSeconds(2),
+                                                      Duration.ofSeconds(4),
+                                                      Duration.ofSeconds(4));
     }
 
     @Test
     void result_printsVerdictLine_whenTerminal() {
         controller.onJson("GET /jobs/41/result", Fixtures.result(41, "PASSED", none(), 0, 0, 0));
-
         var result = cli.run("result", "41");
 
         assertThat(result.exit()).isZero();
@@ -769,10 +935,15 @@ class ExitCodeContractTest {
 
     @Test
     void wait_printsManifestCountsAndStoredEvidence_whenTheJobHasAManifest() {
-        controller.onJson("GET /jobs/41", Fixtures.job(41, JobState.FAILED))
+        controller.onJson("GET /jobs/41",
+                          Fixtures.job(41, JobState.FAILED))
                   .onJson("GET /jobs/41/result",
-                          Fixtures.manifestResult(41, "FAILED", some("missing-classes"), 2, 1, Fixtures.STORED));
-
+                          Fixtures.manifestResult(41,
+                                                  "FAILED",
+                                                  some("missing-classes"),
+                                                  2,
+                                                  1,
+                                                  Fixtures.STORED));
         var result = cli.run("wait", "41");
 
         assertThat(result.exit()).isEqualTo(1);
@@ -783,7 +954,6 @@ class ExitCodeContractTest {
     void result_printsManifestCountsAndEvidence_evenWhenZero() {
         controller.onJson("GET /jobs/41/result",
                           Fixtures.manifestResult(41, "PASSED", none(), 0, 0, ResultRecordDto.EvidenceDto.NOT_STORED));
-
         var result = cli.run("result", "41");
 
         assertThat(result.exit()).isZero();
@@ -793,20 +963,18 @@ class ExitCodeContractTest {
     /// T1/T2 submit a Gate (m1-design §8.1): the request carries the gate recipe, the SHA, `fresh` and the priority.
     @Test
     void submit_gate_sendsGateRecipe() {
-        controller.onJson("POST /jobs", Fixtures.submitted(43, JobState.QUEUED, false))
-                  .onJson("GET /jobs/43", Fixtures.job(43, JobState.QUEUED));
-
+        controller.onJson("POST /jobs",
+                          Fixtures.submitted(43, JobState.QUEUED, false))
+                  .onJson("GET /jobs/43",
+                          Fixtures.job(43, JobState.QUEUED));
         var result = cli.run("submit", "gate", "--sha", Fixtures.SHA, "--fresh", "--prio", "5");
         var sent = TemperJson.mapper()
-                             .readString(controller.received()
-                                                   .getFirst()
-                                                   .body(),
+                             .readString(controller.received().getFirst().body(),
                                          SubmitRequest.class)
                              .fold(cause -> fail(cause.message()),
                                    request -> request);
 
-        assertThat(result.exit()).as(result.err())
-                                 .isZero();
+        assertThat(result.exit()).as(result.err()).isZero();
         assertThat(sent.recipe()).isEqualTo(new RecipeDto.Gate());
         assertThat(sent.source()).isEqualTo(new SourceDto.Pushed(none(), some(Fixtures.SHA)));
         assertThat(sent.fresh()).isEqualTo(some(true));
@@ -816,9 +984,10 @@ class ExitCodeContractTest {
     /// D3: the controller's 403 to the read token is its own failure, not an unexpected status (which would be 69).
     @Test
     void cancel_withReadOnlyToken_exits77_andSaysForbidden() {
-        controller.onJson("GET /jobs/41", Fixtures.job(41, JobState.RUNNING))
-                  .on("POST /jobs/41/cancel", FakeController.Reply.json(403, FORBIDDEN));
-
+        controller.onJson("GET /jobs/41",
+                          Fixtures.job(41, JobState.RUNNING))
+                  .on("POST /jobs/41/cancel",
+                      FakeController.Reply.json(403, FORBIDDEN));
         var result = cli.run("cancel", "41");
 
         assertThat(result.exit()).isEqualTo(77);
@@ -827,9 +996,10 @@ class ExitCodeContractTest {
 
     @Test
     void cancel_exitsZero_whenAccepted() {
-        controller.onJson("GET /jobs/41", Fixtures.job(41, JobState.RUNNING))
-                  .onJson("POST /jobs/41/cancel", CancelResponse.cancelResponse(JobState.CANCELLING));
-
+        controller.onJson("GET /jobs/41",
+                          Fixtures.job(41, JobState.RUNNING))
+                  .onJson("POST /jobs/41/cancel",
+                          CancelResponse.cancelResponse(JobState.CANCELLING));
         var result = cli.run("cancel", "41");
 
         assertThat(result.exit()).isZero();
@@ -839,28 +1009,25 @@ class ExitCodeContractTest {
     @Test
     void cancel_printsVerdictAndExitsWithItsCode_whenAlreadyTerminal_withoutCancelling() {
         controller.onJson("GET /jobs/41", Fixtures.job(41, JobState.FAILED));
-
         var result = cli.run("cancel", "41");
 
         assertThat(result.exit()).isEqualTo(1);
         assertThat(result.out()).containsExactly("cancel 41 FAILED");
-        assertThat(controller.received()).extracting(FakeController.Received::method)
-                                         .containsExactly("GET");
+        assertThat(controller.received()).extracting(FakeController.Received::method).containsExactly("GET");
     }
 
     @Test
     void cancel_ofAnAlreadyCancelledJob_exitsSix() {
         controller.onJson("GET /jobs/41", Fixtures.job(41, JobState.CANCELLED));
-
-        assertThat(cli.run("cancel", "41")
-                      .exit()).isEqualTo(6);
+        assertThat(cli.run("cancel", "41").exit()).isEqualTo(6);
     }
 
     @Test
     void cancel_ofAJobThatFinishedMeanwhile_exitsWithItsCode() {
-        controller.onJson("GET /jobs/41", Fixtures.job(41, JobState.RUNNING))
-                  .onJson("POST /jobs/41/cancel", CancelResponse.cancelResponse(JobState.PASSED));
-
+        controller.onJson("GET /jobs/41",
+                          Fixtures.job(41, JobState.RUNNING))
+                  .onJson("POST /jobs/41/cancel",
+                          CancelResponse.cancelResponse(JobState.PASSED));
         var result = cli.run("cancel", "41");
 
         assertThat(result.exit()).isZero();
@@ -869,18 +1036,17 @@ class ExitCodeContractTest {
 
     @Test
     void cancel_ignoredByController_exits69() {
-        controller.onJson("GET /jobs/41", Fixtures.job(41, JobState.QUEUED))
-                  .onJson("POST /jobs/41/cancel", CancelResponse.cancelResponse(JobState.QUEUED));
-
-        assertThat(cli.run("cancel", "41")
-                      .exit()).isEqualTo(69);
+        controller.onJson("GET /jobs/41",
+                          Fixtures.job(41, JobState.QUEUED))
+                  .onJson("POST /jobs/41/cancel",
+                          CancelResponse.cancelResponse(JobState.QUEUED));
+        assertThat(cli.run("cancel", "41").exit()).isEqualTo(69);
     }
 
     /// R-13, amended: a job whose start was not recorded runs, so every line that shows its state says UNKNOWN.
     @Test
     void result_ofAnUnknownJob_printsUnknown_exitsPending() {
         controller.onJson("GET /jobs/41", Fixtures.job(41, JobState.UNKNOWN));
-
         var result = cli.run("result", "41");
 
         assertThat(result.exit()).isEqualTo(9);
@@ -890,7 +1056,6 @@ class ExitCodeContractTest {
     @Test
     void wait_timeoutOnAnUnknownJob_showsUnknown() {
         controller.onJson("GET /jobs/41", Fixtures.job(41, JobState.UNKNOWN));
-
         var result = cli.run("wait", "41", "--timeout", "10s");
 
         assertThat(result.exit()).isEqualTo(7);
@@ -899,9 +1064,10 @@ class ExitCodeContractTest {
 
     @Test
     void cancel_ofAnUnknownJob_exitsZero_whenAccepted() {
-        controller.onJson("GET /jobs/41", Fixtures.job(41, JobState.UNKNOWN))
-                  .onJson("POST /jobs/41/cancel", CancelResponse.cancelResponse(JobState.CANCELLING));
-
+        controller.onJson("GET /jobs/41",
+                          Fixtures.job(41, JobState.UNKNOWN))
+                  .onJson("POST /jobs/41/cancel",
+                          CancelResponse.cancelResponse(JobState.CANCELLING));
         var result = cli.run("cancel", "41");
 
         assertThat(result.exit()).isZero();
@@ -910,19 +1076,17 @@ class ExitCodeContractTest {
 
     @Test
     void cancel_answeredUnknown_isIgnored_exits69() {
-        controller.onJson("GET /jobs/41", Fixtures.job(41, JobState.UNKNOWN))
-                  .onJson("POST /jobs/41/cancel", CancelResponse.cancelResponse(JobState.UNKNOWN));
-
-        assertThat(cli.run("cancel", "41")
-                      .exit()).isEqualTo(69);
+        controller.onJson("GET /jobs/41",
+                          Fixtures.job(41, JobState.UNKNOWN))
+                  .onJson("POST /jobs/41/cancel",
+                          CancelResponse.cancelResponse(JobState.UNKNOWN));
+        assertThat(cli.run("cancel", "41").exit()).isEqualTo(69);
     }
 
     @Test
     void serviceUnavailable_outsideLog_isUnexpected69() {
         controller.on("GET /jobs/41/result", Reply.json(503, "{\"error\":\"busy\"}"));
-
-        assertThat(cli.run("result", "41")
-                      .exit()).isEqualTo(69);
+        assertThat(cli.run("result", "41").exit()).isEqualTo(69);
     }
 
     @Test
@@ -930,35 +1094,36 @@ class ExitCodeContractTest {
         controller.on("GET /jobs/41",
                       Reply.json(503, "{}"),
                       Reply.json(503, "{}"),
-                      Reply.json(200, controller.write(Fixtures.job(41, JobState.PASSED))))
-                  .onJson("GET /jobs/41/result", Fixtures.result(41, "PASSED", none(), 0, 0, 0));
-
-        assertThat(cli.run("wait", "41")
-                      .exit()).isZero();
+                      Reply.json(200,
+                                 controller.write(Fixtures.job(41, JobState.PASSED))))
+                  .onJson("GET /jobs/41/result",
+                          Fixtures.result(41,
+                                          "PASSED",
+                                          none(),
+                                          0,
+                                          0,
+                                          0));
+        assertThat(cli.run("wait", "41").exit()).isZero();
     }
 
     @Test
     void log_printsRawText_andPassesUnitAndTail() {
         controller.on("GET /jobs/41/log", Reply.text(200, "first line\nsecond line\n"));
-
         var result = cli.run("log", "41", "--unit", "build", "--tail", "50");
 
         assertThat(result.exit()).isZero();
         assertThat(result.out()).containsExactly("first line", "second line");
-        assertThat(controller.received()
-                             .getLast()
-                             .target()).isEqualTo("/api/v1/jobs/41/log?tail=50&unit=build");
+        assertThat(controller.received().getLast().target()).isEqualTo("/api/v1/jobs/41/log?tail=50&unit=build");
     }
 
     @Test
     void submit_sendsBearerTokenAndOwner_andParsedRequest() {
-        controller.onJson("POST /jobs", Fixtures.submitted(41, JobState.QUEUED, false))
-                  .onJson("GET /jobs/41", Fixtures.job(41, JobState.QUEUED));
-
+        controller.onJson("POST /jobs",
+                          Fixtures.submitted(41, JobState.QUEUED, false))
+                  .onJson("GET /jobs/41",
+                          Fixtures.job(41, JobState.QUEUED));
         cli.run((MODULE_TEST_SHA + " --prio 5 --keep --unit-timeout PT90S").split(" "));
-
-        var submit = controller.received()
-                               .getFirst();
+        var submit = controller.received().getFirst();
 
         assertThat(submit.authorization()).isEqualTo("Bearer " + CliHarness.TOKEN);
         assertThat(submit.body()).contains("\"submittedBy\":\"tester\"",
@@ -976,16 +1141,15 @@ class ExitCodeContractTest {
 
         assertThat(result.exit()).isEqualTo(64);
         assertThat(result.err().lines()).singleElement()
-                                        .asString()
-                                        .startsWith("temper: Invalid submit request (")
-                                        .contains("sha");
+                  .asString()
+                  .startsWith("temper: Invalid submit request (")
+                  .contains("sha");
         assertThat(controller.received()).isEmpty();
     }
 
     @Test
     void submit_withoutOwner_isUsageError() {
         cli.env("TEMPER_OWNER", "");
-
         var result = cli.run("submit", "mvn", "--ref", "main", "--", "verify");
 
         assertThat(result.exit()).isEqualTo(64);
@@ -996,9 +1160,10 @@ class ExitCodeContractTest {
     /// controller answers (its read side derives it past the start bound), never QUEUED.
     @Test
     void submit_deduplicatedOntoAnUnknownJob_printsUnknown() {
-        controller.onJson("POST /jobs", Fixtures.submitted(41, JobState.UNKNOWN, true))
-                  .onJson("GET /jobs/41", Fixtures.job(41, JobState.UNKNOWN));
-
+        controller.onJson("POST /jobs",
+                          Fixtures.submitted(41, JobState.UNKNOWN, true))
+                  .onJson("GET /jobs/41",
+                          Fixtures.job(41, JobState.UNKNOWN));
         var result = cli.run("submit", "mvn", "--ref", "main", "--", "verify");
 
         assertThat(result.exit()).isEqualTo(10);
@@ -1007,9 +1172,10 @@ class ExitCodeContractTest {
 
     @Test
     void submit_printsUnknownSha_whenReadBackFails() {
-        controller.onJson("POST /jobs", Fixtures.submitted(41, JobState.QUEUED, false))
-                  .on("GET /jobs/41", Reply.json(500, "{}"));
-
+        controller.onJson("POST /jobs",
+                          Fixtures.submitted(41, JobState.QUEUED, false))
+                  .on("GET /jobs/41",
+                      Reply.json(500, "{}"));
         var result = cli.run("submit", "mvn", "--ref", "main", "--", "verify");
 
         assertThat(result.exit()).isZero();
@@ -1027,7 +1193,6 @@ class ExitCodeContractTest {
     @Test
     void unauthorized_isReportedOnStderr() {
         controller.on("GET /jobs/41/result", Reply.json(401, "{\"error\":\"unauthorized\"}"));
-
         var result = cli.run("result", "41");
 
         assertThat(result.exit()).isEqualTo(77);
@@ -1038,7 +1203,6 @@ class ExitCodeContractTest {
     @Test
     void rejected_isReportedOnStderr_withTheControllersReason() {
         controller.on("GET /jobs/41/result", Reply.json(400, "{\"error\":\"bad job id\"}"));
-
         var result = cli.run("result", "41");
 
         assertThat(result.exit()).isEqualTo(64);
@@ -1047,17 +1211,15 @@ class ExitCodeContractTest {
 
     @Test
     void unreadableTokenFile_isReportedOnOneStderrLine() throws IOException {
-        var token = cli.home()
-                       .resolve(".config/temper/token");
+        var token = cli.home().resolve(".config/temper/token");
 
         unreadable(token);
-
         var result = cli.run("result", "41");
 
         assertThat(result.exit()).isEqualTo(64);
         assertThat(result.err().lines()).singleElement()
-                                        .asString()
-                                        .startsWith("temper: Cannot read " + token + " (java.nio.file.AccessDeniedException");
+                  .asString()
+                  .startsWith("temper: Cannot read " + token + " (java.nio.file.AccessDeniedException");
         assertThat(controller.received()).isEmpty();
     }
 
@@ -1066,16 +1228,14 @@ class ExitCodeContractTest {
     @Test
     void unreachable_isReportedOnOneStderrLine() throws IOException {
         var port = closedPort();
-
-        var result = cli.env("TEMPER_URL", "http://127.0.0.1:" + port)
-                        .run("result", "41");
+        var result = cli.env("TEMPER_URL", "http://127.0.0.1:" + port).run("result", "41");
 
         assertThat(result.exit()).isEqualTo(69);
         assertThat(result.err().lines()).singleElement()
-                                        .asString()
-                                        .startsWith("temper: Controller unreachable at http://127.0.0.1:" + port + "/api/v1 (")
-                                        .contains("ConnectException")
-                                        .endsWith(")");
+                  .asString()
+                  .startsWith("temper: Controller unreachable at http://127.0.0.1:" + port + "/api/v1 (")
+                  .contains("ConnectException")
+                  .endsWith(")");
     }
 
     /// A failure that escaped every translation is a bug: exit 5 (ERROR), also as the first member of a
@@ -1086,8 +1246,7 @@ class ExitCodeContractTest {
 
         assertThat(CliError.exitCodeOf(unknown)).isEqualTo(ExitCode.ERROR);
         assertThat(ExitCode.ERROR.code()).isEqualTo(5);
-        assertThat(CliError.exitCodeOf(Causes.composite(unknown.result(),
-                                                        CliError.General.UNAUTHORIZED.result()))).isEqualTo(ExitCode.ERROR);
+        assertThat(CliError.exitCodeOf(Causes.composite(unknown.result(), CliError.General.UNAUTHORIZED.result()))).isEqualTo(ExitCode.ERROR);
     }
 
     static int closedPort() throws IOException {
@@ -1109,9 +1268,15 @@ class ExitCodeContractTest {
         origin.push(b0, "refs/heads/main").push(p1, "refs/pull/7/head");
         gh.exit = GhMerge.GhExit.ghExit(1, "refused by GitHub");
         controller.verdictToken(T2Fixtures.VERDICT_TOKEN)
-                  .onJson("POST /fleet/go/" + T2Fixtures.GO_ID + "/consume", T2Fixtures.consumed(p1, b0, report))
-                  .on("POST /fleet/go/" + T2Fixtures.GO_ID + "/outcome", Reply.json(200, "{}"));
+                  .onJson("POST /fleet/go/" + T2Fixtures.GO_ID + "/consume",
+                          T2Fixtures.consumed(p1, b0, report))
+                  .on("POST /fleet/go/" + T2Fixtures.GO_ID + "/outcome",
+                      Reply.json(200, "{}"));
+
         return cli.ports(T2Fixtures.ports(origin, gh))
-                  .run("merge", T2Fixtures.GO_ID, "--token-file", token.toString());
+                  .run("merge",
+                       T2Fixtures.GO_ID,
+                       "--token-file",
+                       token.toString());
     }
 }

@@ -13,9 +13,12 @@ import org.pragmatica.temper.domain.model.Sha;
 import org.pragmatica.temper.domain.task.Stage;
 import org.pragmatica.temper.domain.task.TaskError;
 import org.pragmatica.temper.domain.task.TaskId;
+import org.pragmatica.temper.store.api.Checkpoint;
 import org.pragmatica.temper.store.api.ClaimGrant;
+import org.pragmatica.temper.store.api.ClaimedTask;
 import org.pragmatica.temper.store.api.StoreError;
 import org.pragmatica.temper.store.api.TaskDetail;
+import org.pragmatica.temper.store.api.TaskReport;
 import org.pragmatica.temper.store.api.TaskRow;
 import org.pragmatica.temper.store.api.TaskStore;
 
@@ -46,10 +49,37 @@ public interface ClaimTask {
         }
     }
 
-    /// The claimed task, its context, the token (only here) and where its repository clones from.
-    record Claimed(TaskRow row, TaskDetail detail, String token, String cloneUrl) {
+    /// The warning of a claim whose predecessor's last SELF-REPORTED tree was not clean (files changed or commits
+    /// unpushed, as of that heartbeat): the successor inspects the tree before it writes.
+    String DIRTY_PREDECESSOR = "dirty-predecessor";
+
+    /// The claimed task, its context, the token (only here), where its repository clones from, the lane's latest
+    /// checkpoint and the warnings of the claim.
+    record Claimed(TaskRow row,
+                   TaskDetail detail,
+                   String token,
+                   String cloneUrl,
+                   Option<Checkpoint> checkpoint,
+                   List<String> warnings) {
+        public Claimed {
+            warnings = List.copyOf(warnings);
+        }
+
         public static Claimed claimed(TaskRow row, TaskDetail detail, String token, String cloneUrl) {
-            return new Claimed(row, detail, token, cloneUrl);
+            return new Claimed(row, detail, token, cloneUrl, none(), List.of());
+        }
+
+        public static Claimed claimed(ClaimedTask granted, String token, String cloneUrl) {
+            return new Claimed(granted.row(),
+                               granted.detail(),
+                               token,
+                               cloneUrl,
+                               granted.checkpoint(),
+                               granted.predecessor()
+                                      .reported()
+                                      .filter(TaskReport.Reported::isDirty)
+                                      .map(_ -> List.of(DIRTY_PREDECESSOR))
+                                      .or(List.of()));
         }
 
         /// Never prints the token.
@@ -202,8 +232,7 @@ public interface ClaimTask {
                                                  tip,
                                                  candidate.passedOver()),
                            steps.clock().get())
-                    .map(claimed -> Claimed.claimed(claimed.row(),
-                                                    claimed.detail(),
+                    .map(claimed -> Claimed.claimed(claimed,
                                                     minted.token(),
                                                     steps.cloneUrl()));
     }
