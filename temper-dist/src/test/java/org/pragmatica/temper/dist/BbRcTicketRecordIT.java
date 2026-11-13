@@ -295,6 +295,63 @@ class BbRcTicketRecordIT {
         assertThat(mode(co.resolve(".bb/rc"))).isEqualTo("r--r--r--");
     }
 
+    /// CTO 2026-11-13: lanes deleted `.bb/rc` to "reset" a checkout. bb-build then refused with "a build appears to be running", which
+    /// told them nothing. Once the build's ticket is in done/ (its started= equals `.bb/start`) and no waiting/running ticket names the
+    /// checkout, the refusal names the hand deletion, the ticket and what to do instead; a live ticket or no ticket at all keeps the
+    /// running message. Probes: drop the done/ lookup -> red; drop the live-ticket check -> the running-ticket half red; drop the
+    /// state=finished check -> the orphaned/cancelled half red.
+    @Test
+    void aDeletedRc_ofAFinishedTicket_isRefusedAsAHandDeletion_whileALiveTicketStillReadsAsRunning() throws Exception {
+        var co = checkout("rct-g");
+        var id = "1100-" + BbFixtures.RUN;
+
+        ticket("waiting", id, co, 5, 0);
+        var waiter = waiter(id, "exit 0", Map.of(), dir.resolve("go-none"));
+
+        assertThat(waiter.waitFor(30, TimeUnit.SECONDS)).as("waiter exits").isTrue();
+        assertThat(field("done", id, "state")).isEqualTo("finished");
+        Files.delete(co.resolve(".bb/rc"));
+        var rerun = tool("bb-build", Map.of("BB_MAX_REACTORS", "0", "BB_DEDUP", "0"), co.toString(), "-B", "again");
+
+        assertThat(rerun.rc()).as(rerun.stdout() + rerun.stderr()).isEqualTo(3);
+        assertThat(rerun.stderr()).contains(".bb/rc in " + co + " was deleted by hand after ticket " + id + " finished")
+                  .contains("never rm it")
+                  .contains("bb-wait " + id)
+                  .contains("rerun bb-build in a fresh checkout")
+                  .doesNotContain("appears to be running");
+        assertThat(co.resolve(".bb/queued")).doesNotExist();
+        // the same state while a ticket naming this checkout is running: a build may really be running, so the old message stays
+        var live = "1200-" + BbFixtures.RUN;
+
+        ticket("running", live, co, 5, 0);
+        var running = tool("bb-build", Map.of("BB_MAX_REACTORS", "0", "BB_DEDUP", "0"), co.toString(), "-B", "again");
+
+        assertThat(running.rc()).as(running.stdout() + running.stderr()).isEqualTo(3);
+        assertThat(running.stderr()).contains("a build appears to be running in " + co)
+                  .doesNotContain("deleted by hand");
+        // and with no ticket for this .bb/start (e.g. a BB_QUEUE=0 build): the running message, never a guessed deletion
+        Files.delete(queue.resolve("running").resolve(live));
+        Files.writeString(co.resolve(".bb/start"), "1\n");
+        var ticketless = tool("bb-build", Map.of("BB_MAX_REACTORS", "0", "BB_DEDUP", "0"), co.toString(), "-B", "again");
+
+        assertThat(ticketless.rc()).as(ticketless.stdout() + ticketless.stderr()).isEqualTo(3);
+        assertThat(ticketless.stderr()).contains("a build appears to be running in " + co)
+                  .doesNotContain("deleted by hand");
+        // v50a: an orphaned (reaped) or cancelled run carries started= too, but its killed build may never have written .bb/rc, so its
+        // done/ ticket is not evidence of a hand deletion; only state=finished with a numeric rc= is
+        for (var state : List.of("orphaned", "cancelled")) {
+            var gone = ticket("done", state + "-" + BbFixtures.RUN, co, 5, 0);
+
+            Files.writeString(gone, "started=1\nstate=" + state + "\n", java.nio.file.StandardOpenOption.APPEND);
+            var killed = tool("bb-build", Map.of("BB_MAX_REACTORS", "0", "BB_DEDUP", "0"), co.toString(), "-B", "again");
+
+            assertThat(killed.rc()).as(state + ": " + killed.stdout() + killed.stderr()).isEqualTo(3);
+            assertThat(killed.stderr()).as(state).contains("a build appears to be running in " + co)
+                      .doesNotContain("deleted by hand");
+            Files.delete(gone);
+        }
+    }
+
     /// A running ticket whose waiter is gone, whose checkout holds a plain `.bb/rc` (`fileRc`) written for the ticket's own run.
     private Path runningWithDeadWaiter(String name, String id, String fileRc) throws Exception {
         var co = checkout(name);
