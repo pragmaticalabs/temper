@@ -671,6 +671,78 @@ any gap over 15 min in the controller's heartbeat log (`bigboy silent <from>..<t
 notified too (`bigboy config: …`, exit 2). The token reaches curl on stdin, never its command line. The install and uninstall commands
 are in the script's header.
 
+### 3.15 `task` lane verbs (the lane runbook)
+
+A lane is a temper task: its state outlives the agent working on it. The agent holds the task's lease; a successor
+takes over with `task claim <id>` on the same id and gets the previous holder's state back in that one call. The lease
+token goes to a file (`~/.config/temper/leases/<id>-<epoch>`, 0600) and is never printed. A stopped agent that keeps
+running is fenced: every later lease call, heartbeat or checkpoint answers `409 lease-lost` (exit 12).
+
+```
+temper task claim <id>                                       # prints the claim line, WARNING lines, the checkpoint
+temper task hb <id> --tree DIR                               # heartbeat + the tree report the CLI measures itself
+temper task checkpoint <id> --pushed-sha SHA [--checklist-file F] [--read-map-file F] [--note S]
+temper task release <id> --reason handoff                    # hand the lane over
+temper task observe <id> --ctx-k N --turns N                 # PARENT only, full token
+temper task list | temper task show <id>                     # hb-age, STALE, head, dirty, unpushed, ctxK, turns
+```
+
+**Runbook for a lane agent.**
+
+1. `task claim <id>`. Read what it printed before touching anything: a `WARNING dirty-predecessor` line means the
+   previous holder's last report was dirty or had unpushed commits, so inspect the tree first. The `checkpoint` lines are
+   the previous holder's state: `checkpoint seq=… pushedSha=… note=…`, one `checkpoint item done|todo "…"` per checklist
+   entry, one `checkpoint read "<path>" lines="…"` per file range to read first. With `--json` the same come as
+   `checkpoint` and `warnings` (both left out when empty).
+2. Work. After every finished item run `task hb <id> --tree <your tree>`.
+3. After every push run `task checkpoint <id> --pushed-sha <the sha you pushed>`, with the checklist and read map in
+   JSON files: `[{"item":"wire the route","done":true}]` and `[{"path":"a/B.java","lines":"10-40"}]`. The body is at most
+   16 KB; the sha must be the task branch's tip or an ancestor of it at the controller's mirror, so push first.
+4. To end the lane's run (budget reached, or told to stop): `checkpoint` once more, then `task release <id> --reason handoff`.
+   The successor runs `task claim <id>`.
+
+**What `hb` reports, and why the agent cannot misstate it.** `hb` has no option that takes a count. It runs git in
+`--tree` and sends `head` (`HEAD`), `dirty` (the number of `git status --porcelain` entries, untracked included; a
+directory of new files is one entry) and `unpushed` (commits ahead of the branch's upstream). With no upstream (a new
+branch never pushed with `-u`, a detached HEAD) `unpushed` is the commits of `HEAD` that no remote-tracking ref
+contains, so a branch pushed without `-u` reads 0 and one never pushed reads as every commit the remotes lack. A tree
+with no remote at all reads its whole history: over-reporting, never under-reporting. The CLI does not fetch; "the
+remote" is the tree's remote-tracking refs as of its last push or fetch. A path that is not a git tree, or has no
+commit, exits 64 and sends nothing. Every `hb` carries the report. The numbers are what the CLI measured at the time of
+that heartbeat; the controller cannot observe a tree, so they say nothing about what happened since.
+
+**Reading `task list` / `show`.** A leased task adds `hb-age=<s>s` (seconds since the last claim or heartbeat),
+`STALE` (hb-age strictly over `[fleet] laneStaleMin`), then `head=… dirty=N unpushed=N` from the last report, then
+`ctxK=… turns=…` once a parent observed it. A report sent under an earlier lease epoch than the task's current one is
+marked `dirty=N(prev) unpushed=N(prev)`: a claim restarts the heartbeat clock but keeps the predecessor's report until
+the new holder's first `hb`, so `(prev)` means the numbers are the previous holder's, not the current one's.
+
+**Only a claim or a heartbeat resets the stale clock.** A lane that only submits linked jobs or posts evidence extends
+its lease but still shows `STALE` after `laneStaleMin`. Run `hb` as part of the loop.
+
+**`observe` is the parent's, not the agent's.** `task observe <id> --ctx-k N --turns N` records the lane agent's context
+size (thousands of tokens) and turns, measured by the parent from the agent's transcript (turns as distinct message
+ids). It is sent with the full token, never a lease token, so the agent holding the lease cannot write the number its
+own stop rule is judged by; a lease token gets 401/403. The CLI sends the `Temper-Version` header with it like every
+write (a hand-made `curl` without it logs a PREDATES warning per call).
+
+**Exit codes of the lane verbs.**
+
+| Exit | Meaning |
+|---|---|
+| 0 | done; `checkpoint` answers `201` (every accepted checkpoint is a new version, so `201`, never `200`) |
+| 2 | any other `422` of a task route |
+| 12 | `409 lease-lost`: the epoch is gone (the lease file is deleted); stop, nothing you send is accepted again |
+| 14 | `checkpoint`: body over 16 KB (`422 checkpoint-too-large`); shrink the note or the lists |
+| 15 | `checkpoint`: `pushedSha` is not the task branch's tip or an ancestor of it (`422 pushed-sha-not-on-branch`); push, then retry |
+| 16 | `checkpoint`: the controller's mirror could not answer (`503`); nothing was stored; retry later |
+| 64 | usage: a short or malformed sha, an unreadable or invalid checklist or read-map file, negative counts, `hb` with no or an unusable `--tree`, no lease file; also an unknown task (404) |
+| 69 | controller unreachable or an answer outside the route's contract |
+| 77 | token rejected (401) or not permitted (403) |
+
+**Deploy.** The CLI jar must be built from the commit the controller runs. `task list`/`show` carry fields an older CLI
+cannot parse, and an older CLI exits 13 on version skew; reinstall the jar with the controller.
+
 ## 4. Reading `result --json`
 
 The object is the immutable result record (`temper-protocol/…/protocol/api/ResultRecordDto.java`). Absent optional
