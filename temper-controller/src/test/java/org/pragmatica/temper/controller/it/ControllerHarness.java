@@ -656,6 +656,10 @@ final class ControllerHarness implements AutoCloseable {
             reply = get("/tasks/" + id);
         } while (TRIAGED.matcher(reply.body()).find() && System.nanoTime() < deadline && pause());
 
+        if (TRIAGED.matcher(reply.body()).find()) {
+            throw new AssertionError("task " + id + " still TRIAGED after 10 s of sweeps: " + reply.body());
+        }
+
         return reply;
     }
 
