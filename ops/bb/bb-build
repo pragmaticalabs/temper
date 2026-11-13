@@ -109,7 +109,18 @@ case "$(basename "$CO")" in "$BB_OWNER"-*) ;; *) echo "refusing: $CO is not owne
 [ $# -gt 0 ] || set -- clean install
 case "${BB_REQUIRE_DOCKER:-1}" in 0|1) ;; *) echo "refusing: BB_REQUIRE_DOCKER must be 0 or 1 (or unset)" >&2; exit 2;; esac
 B=$CO/.bb; mkdir -p "$B"
-[ -f "$B/rc" ] || [ ! -f "$B/start" ] || { echo "refusing: a build appears to be running in $CO (.bb/start without .bb/rc)" >&2; exit 3; }
+if [ ! -f "$B/rc" ] && [ -f "$B/start" ]; then
+  # .bb/start without .bb/rc: a build still running, or a finished build whose .bb/rc a lane deleted (CTO 2026-11-13: three verifier
+  # lanes rm'd it to "reset" a checkout). Name the second case: no waiting/running ticket for this checkout and a done/ ticket whose
+  # started= is this .bb/start. Anything else (e.g. a BB_QUEUE=0 build, which has no ticket) keeps the running message.
+  S=$(cat "$B/start"); LIVE=""; FIN=""
+  for f in "$Q"/waiting/* "$Q"/running/*; do [ -f "$f" ] && [ "$(field "$f" co)" = "$CO" ] && LIVE=${f##*/}; done
+  if [ -z "$LIVE" ]; then
+    for f in "$Q"/done/*; do [ -f "$f" ] && [ "$(field "$f" co)" = "$CO" ] && [ "$(field "$f" started)" = "$S" ] && { FIN=${f##*/}; break; }; done
+  fi
+  [ -z "$FIN" ] || { echo "refusing: .bb/rc in $CO was deleted by hand after ticket $FIN finished; never rm it (its verdict is the ticket record: bb-wait $FIN); rerun bb-build in a fresh checkout (a rerun in a checkout whose .bb/rc is intact clears it itself)" >&2; exit 3; }
+  echo "refusing: a build appears to be running in $CO (.bb/start without .bb/rc)" >&2; exit 3
+fi
 # Host-killing test guard (2026-09-27, #1553): StreamPublishReshuffleTest leaks sockets without bound and
 # exhausted this host's ephemeral ports twice. Unless this checkout's copy carries the #1553 @Disabled, refuse
 # any invocation that names it or that selects Heavy forge tests without explicitly excluding it.
