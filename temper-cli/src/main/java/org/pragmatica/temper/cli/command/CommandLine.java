@@ -199,7 +199,14 @@ public sealed interface CommandLine {
                                 "--host",
                                 "--done",
                                 "--as",
-                                "--body-file");
+                                "--body-file",
+                                "--tree",
+                                "--pushed-sha",
+                                "--checklist-file",
+                                "--read-map-file",
+                                "--note",
+                                "--ctx-k",
+                                "--turns");
 
     /// Options that may be given more than once; their values join, comma-separated.
     Set<String> REPEATED = Set.of("--match");

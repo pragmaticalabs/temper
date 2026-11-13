@@ -319,7 +319,7 @@ class TaskLaneVerbsTest {
 
     @Test
     void list_ofATaskWithoutLaneState_isUnchanged() {
-        controller.on("GET /tasks/42", Reply.json(200, view("")));
+        controller.on("GET /tasks/42", Reply.json(200, view(",\"stale\":false")));
         assertThat(cli.run("task", "show", "42").out().getFirst()).endsWith(" epoch=7 holder=wp3a");
     }
 }
