@@ -133,6 +133,40 @@ class TaskHbIT {
     }
 
     @Test
+    void hb_branchCutFromOriginMainAndPushedWithoutDashU_readsZero_thoughItsUpstreamIsOriginMain() throws Exception {
+        commit("a");
+        git(tree, "remote", "add", "origin", origin.toString());
+        git(tree, "push", "--quiet", "origin", "feat:main");
+        git(tree, "fetch", "--quiet", "origin");
+        git(tree, "checkout", "--quiet", "-b", "lane", "origin/main");
+        commit("b");
+        git(tree, "push", "--quiet", "origin", "lane");
+        assertThat(git(tree, "rev-parse", "--abbrev-ref", "@{upstream}")).isEqualTo("origin/main");
+        hb();
+        assertThat(lastBody()).contains("\"unpushed\":0");
+    }
+
+    @Test
+    void hb_localCommitPushedNowhere_countsOne_thoughOtherCommitsArePushed() throws Exception {
+        commit("a");
+        git(tree, "remote", "add", "origin", origin.toString());
+        git(tree, "push", "--quiet", "-u", "origin", "feat");
+        commit("b");
+        hb();
+        assertThat(lastBody()).contains("\"unpushed\":1");
+    }
+
+    @Test
+    void hb_detachedHeadOnAPushedCommit_readsZero() throws Exception {
+        commit("a");
+        git(tree, "remote", "add", "origin", origin.toString());
+        git(tree, "push", "--quiet", "origin", "feat");
+        git(tree, "checkout", "--quiet", "--detach", "HEAD");
+        hb();
+        assertThat(lastBody()).contains("\"unpushed\":0");
+    }
+
+    @Test
     void hb_noUpstreamAndNoRemote_countsTheWholeHistory() throws Exception {
         commit("a");
         commit("b");

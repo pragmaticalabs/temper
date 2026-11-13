@@ -703,9 +703,10 @@ temper task list | temper task show <id>                     # hb-age, STALE, he
 
 **What `hb` reports, and why the agent cannot misstate it.** `hb` has no option that takes a count. It runs git in
 `--tree` and sends `head` (`HEAD`), `dirty` (the number of `git status --porcelain` entries, untracked included; a
-directory of new files is one entry) and `unpushed` (commits ahead of the branch's upstream). With no upstream (a new
-branch never pushed with `-u`, a detached HEAD) `unpushed` is the commits of `HEAD` that no remote-tracking ref
-contains, so a branch pushed without `-u` reads 0 and one never pushed reads as every commit the remotes lack. A tree
+directory of new files is one entry) and `unpushed` (the commits of `HEAD` that no remote-tracking ref contains,
+whatever upstream the branch has: any remote ref preserves the work if the tree dies). A branch pushed anywhere reads 0
+(`hb` does not depend on `-u`; push with `git push -u origin <branch>` anyway, as good hygiene), and one never pushed
+reads as every commit the remotes lack. A tree
 with no remote at all reads its whole history: over-reporting, never under-reporting. The CLI does not fetch; "the
 remote" is the tree's remote-tracking refs as of its last push or fetch. A path that is not a git tree, or has no
 commit, exits 64 and sends nothing. Every `hb` carries the report. The numbers are what the CLI measured at the time of
@@ -740,8 +741,9 @@ write (a hand-made `curl` without it logs a PREDATES warning per call).
 | 69 | controller unreachable or an answer outside the route's contract |
 | 77 | token rejected (401) or not permitted (403) |
 
-**Deploy.** The CLI jar must be built from the commit the controller runs. `task list`/`show` carry fields an older CLI
-cannot parse, and an older CLI exits 13 on version skew; reinstall the jar with the controller.
+**Deploy.** The CLI and the controller must be the same build, in both directions: an older CLI against a new controller
+and a newer CLI against an older controller both exit 13 (VersionSkew) on every verb, `claim` included. So the CLI jar
+is reinstalled from the deployed commit at Deploy 21 together with the controller, not before.
 
 ## 4. Reading `result --json`
 

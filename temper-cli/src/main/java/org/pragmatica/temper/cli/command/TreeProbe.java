@@ -18,11 +18,13 @@ import org.pragmatica.temper.protocol.exec.ProcessRunner;
 /// cannot misreport it: `head` is `HEAD`; `dirty` the number of `git status --porcelain` entries (untracked ones
 /// included; a directory of new files is one entry); `unpushed` the commits of `HEAD` the remote lacks.
 ///
-/// `unpushed` is `@{upstream}..HEAD` when the branch has an upstream. With none (a new branch never pushed with `-u`, a
-/// detached HEAD) it is the commits of `HEAD` that no remote-tracking ref contains (`HEAD --not --remotes`): a branch
-/// pushed without `-u` reads 0 once the push has updated its remote-tracking ref, one never pushed reads as every commit
-/// the remotes lack. A tree with no remote at all reads its whole history: over-reporting, never under-reporting. The
-/// CLI does not fetch, so "the remote" is the remote-tracking refs as of the tree's last fetch or push.
+/// `unpushed` is always the commits of `HEAD` that no remote-tracking ref contains (`HEAD --not --remotes`), whatever
+/// upstream the branch is configured with. The report answers "would this work be lost if the tree died", and any remote
+/// ref preserves it: a branch cut from `origin/main` and pushed without `-u` keeps `origin/main` as its upstream, so an
+/// upstream-relative count would read ahead forever. A branch pushed anywhere reads 0, one never pushed reads as every
+/// commit the remotes lack, a detached HEAD on a pushed commit reads 0. A tree with no remote at all reads its whole
+/// history: over-reporting, never under-reporting. The CLI does not fetch, so "the remote" is the remote-tracking refs as
+/// of the tree's last fetch or push. Any git failure is the exit-64 refusal below, never zeros.
 ///
 /// A path that is not a git tree, or has no commit, is [CliError.BadSetting] (exit 64): nothing is sent.
 sealed interface TreeProbe {
@@ -46,17 +48,8 @@ sealed interface TreeProbe {
                                                                                 .count());
     }
 
-    /// The upstream's own count when there is one, else commits no remote-tracking ref has.
     private static Promise<Integer> unpushed(ProcessRunner runner, String tree) {
-        return run(runner, tree, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}").flatMap(upstream -> upstream.rc() == 0
-                                                                                                                         ? count(runner,
-                                                                                                                                 tree,
-                                                                                                                                 "@{upstream}..HEAD")
-                                                                                                                         : count(runner,
-                                                                                                                                 tree,
-                                                                                                                                 "HEAD",
-                                                                                                                                 "--not",
-                                                                                                                                 "--remotes"));
+        return count(runner, tree, "HEAD", "--not", "--remotes");
     }
 
     private static Promise<Integer> count(ProcessRunner runner, String tree, String... range) {
