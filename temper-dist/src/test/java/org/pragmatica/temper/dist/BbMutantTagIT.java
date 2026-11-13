@@ -105,7 +105,6 @@ class BbMutantTagIT {
             withEnv.put("BB_VIA", via);
         }
 
-        Files.deleteIfExists(co.resolve(".bb/rc").toAbsolutePath());
         var run = BbFixtures.run(List.of(dir.resolve("tools/bb-build").toString(),
                                          co.toString(),
                                          "-B",
@@ -124,6 +123,14 @@ class BbMutantTagIT {
         }
 
         assertThat(done).as("the ticket reached done/").exists();
+
+        var rc = co.resolve(".bb/rc");
+
+        for (var i = 0; i < 300 && !Files.exists(rc); i++) {
+            Thread.sleep(100);
+        }
+
+        assertThat(rc).as("the build wrote .bb/rc").exists();
 
         return new Built(matcher.group(1), Files.readString(done), run);
     }

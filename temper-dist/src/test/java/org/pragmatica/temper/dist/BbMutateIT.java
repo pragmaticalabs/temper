@@ -149,7 +149,7 @@ class BbMutateIT {
     /// (a batch joins them with '+', which the ticket field cannot hold, so '.'); bb-queue shows the label as [mutant <label>].
     @Test
     void everyBuild_carriesBbVia_withTheSpecBasenameAndTheMutantLabel() throws Exception {
-        batch(modules(null), mutation("mA", "A", "ATest", "MUT"), mutation("mC", "C", "CTest", "MUT"));
+        batch(modules(null), mutation("mA", "A", "ATest", "MUT"), mutation("mC", "C", "CTest", "fine"));
         assertThat(Files.readAllLines(home.resolve("via.log"))).containsExactly("bb-mutate:spec:control",
                                                                                 "bb-mutate:spec:mA.mC");
     }
@@ -158,7 +158,7 @@ class BbMutateIT {
     @Test
     void bbVia_isSanitizedAndBounded() throws Exception {
         specName = "my spec+v1.json";
-        batch(modules(null), mutation("m_A", "A", "ATest", "MUT"), mutation("x".repeat(80), "C", "CTest", "MUT"));
+        batch(modules(null), mutation("m_A", "A", "ATest", "MUT"), mutation("x".repeat(80), "C", "CTest", "fine"));
         var vias = Files.readAllLines(home.resolve("via.log"));
 
         assertThat(vias).hasSize(2);
