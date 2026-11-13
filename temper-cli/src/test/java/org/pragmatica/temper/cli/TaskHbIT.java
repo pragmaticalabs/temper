@@ -193,6 +193,25 @@ class TaskHbIT {
                                                                            .endsWith("/heartbeat"))).isEmpty();
     }
 
+    /// Only the `rev-list --count HEAD --not --remotes` step fails (a corrupt remote-tracking ref); rev-parse and status
+    /// still work. A git failure is refusal 64 with nothing sent, never a zero report.
+    /// Probe: `.recover(_ -> 0)` on the unpushed count -> this test red.
+    @Test
+    void hb_revListFailsAlone_is64_sendsNothing_andPrintsNoReport() throws Exception {
+        commit("a");
+        git(tree, "remote", "add", "origin", origin.toString());
+        git(tree, "push", "--quiet", "-u", "origin", "feat");
+        var bad = tree.resolve(".git/refs/remotes/origin/bad");
+
+        Files.writeString(bad, "1".repeat(40) + "\n");
+        var run = hb();
+
+        assertThat(run.exit()).isEqualTo(64);
+        assertThat(String.join("\n", run.out())).doesNotContain("HEARTBEAT").doesNotContain("unpushed=");
+        assertThat(controller.received().stream().filter(request -> request.target()
+                                                                           .endsWith("/heartbeat"))).isEmpty();
+    }
+
     /// The agent has no way to state the numbers, and a tree is not optional.
     @Test
     void hb_takesNoCountOption_andRequiresTheTree() throws Exception {
