@@ -65,7 +65,7 @@ class LaneStaleWiringIT {
         assertThat(created.status()).as(created.body()).isEqualTo(201);
         var id = JSON.readString(created.body(), TaskView.class).unwrap().id();
 
-        harness.store.tasks().sweep(NOW.get()).await(Pg.WAIT).unwrap();
+        harness.advanced(id, NOW::get);
         var claimReply = harness.callAs("POST", "/tasks/" + id + "/claim", "{\"worker\":\"w-1\"}", WORKER);
 
         assertThat(claimReply.status()).as(claimReply.body()).isEqualTo(200);
