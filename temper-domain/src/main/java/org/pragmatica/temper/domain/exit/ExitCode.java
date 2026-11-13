@@ -25,6 +25,11 @@ import org.pragmatica.temper.domain.verdict.Verdict;
 /// and the temper epoch changed under `--after` (7). An agent is woken by the exit and reads the code alone, so each
 /// says why the wait ended.
 ///
+/// `task checkpoint` has three of its own beyond `LEASE_LOST` (12): the body is over the controller's 16 KB cap
+/// (`CHECKPOINT_TOO_LARGE`, 14), the pushed sha is not the task branch's tip or an ancestor of it
+/// (`SHA_NOT_ON_BRANCH`, 15), and the controller's mirror could not answer (`MIRROR_UNAVAILABLE`, 16, HTTP 503; nothing
+/// was stored, retry). Each is a code of its own so a lane script acts on the cause: shrink, push first, or retry.
+///
 /// `temper merge` exits `MERGE_FAILED` (3) when `gh pr merge` itself failed after every temper
 /// check passed and `merging` was recorded: a code of its own, apart from a refusal (2), because the GO was spent on a
 /// merge call that GitHub refused.
@@ -44,6 +49,9 @@ public enum ExitCode {
     CONFLICT(11),
     LEASE_LOST(12),
     VERSION_SKEW(13),
+    CHECKPOINT_TOO_LARGE(14),
+    SHA_NOT_ON_BRANCH(15),
+    MIRROR_UNAVAILABLE(16),
     USAGE(64),
     UNREACHABLE(69),
     UNAUTHORIZED(77),

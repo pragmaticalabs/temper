@@ -292,6 +292,31 @@ public sealed interface CliError extends Cause {
         }
     }
 
+    /// `task checkpoint` refused with a code of its own (`422 checkpoint-too-large`, `422 pushed-sha-not-on-branch`,
+    /// `503` mirror unavailable): `exit` says which, so a lane script acts on the cause alone.
+    record CheckpointRefused(ExitCode exit, String error, String message) implements CliError {
+        public static CheckpointRefused tooLarge(String error) {
+            return refused(ExitCode.CHECKPOINT_TOO_LARGE, "checkpoint too large (cap 16 KB)", error);
+        }
+
+        public static CheckpointRefused notOnBranch(String error) {
+            return refused(ExitCode.SHA_NOT_ON_BRANCH, "pushed sha is not on the task branch; push it first", error);
+        }
+
+        public static CheckpointRefused mirrorUnavailable(String error) {
+            return refused(ExitCode.MIRROR_UNAVAILABLE, "controller mirror unavailable, nothing stored; retry", error);
+        }
+
+        private static CheckpointRefused refused(ExitCode exit, String what, String error) {
+            return new CheckpointRefused(exit, error, "Controller refused the checkpoint: " + what + " (" + error + ")");
+        }
+
+        @Override
+        public ExitCode exitCode() {
+            return exit;
+        }
+    }
+
     /// `task claim --checkout DIR`: the clone, the checkout or the stamp failed after the lease was granted.
     @SuppressWarnings("JBCT-CAUSE-04")
     record CheckoutFailed(String dir, Cause origin, String message) implements CliError, Cause.Wrapped {

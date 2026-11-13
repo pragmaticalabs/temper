@@ -187,6 +187,19 @@ public sealed interface CliCommand {
         /// `task heartbeat <id>`.
         record Heartbeat(long task) implements TaskCommand {}
 
+        /// `task hb <id> --tree DIR`: a heartbeat that always carries the tree the CLI measured in `tree`.
+        record Hb(long task, String tree) implements TaskCommand {}
+
+        /// `task checkpoint <id> --pushed-sha SHA [--checklist-file F] [--read-map-file F] [--note S]`.
+        record Checkpoint(long task,
+                          String pushedSha,
+                          Option<String> checklistFile,
+                          Option<String> readMapFile,
+                          Option<String> note) implements TaskCommand {}
+
+        /// `task observe <id> --ctx-k N --turns N`: the PARENT's measurement, sent with the full token.
+        record Observe(long task, int ctxK, int turns) implements TaskCommand {}
+
         /// `task wait <id> (--job J,… | --ci)`.
         record Wait(long task, List<Long> jobs, boolean ci) implements TaskCommand {}
 
