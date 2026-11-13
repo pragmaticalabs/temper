@@ -58,7 +58,9 @@ public sealed interface CommandLine {
           task list [--stage S] [--status ST] [--json]  |  task show <id> [--json]  |  task events <id> [--json]
           task next [--stage S] [--json]
           task claim (<id> | --stage S) [--worker NAME] [--checkout DIR] [--json]
-          task heartbeat <id>  |  task wait <id> (--job J,… | --ci)  |  task release <id> --reason R
+          task heartbeat <id>  |  task hb <id> --tree DIR  |  task wait <id> (--job J,… | --ci)  |  task release <id> --reason R
+          task checkpoint <id> --pushed-sha SHA [--checklist-file F] [--read-map-file F] [--note S]
+          task observe <id> --ctx-k N --turns N
           task park <id> <request.json> [--lease]
           task rule <id> --option X --text "…" [--know SHA] [--extra-rounds K]
           task close <id> --merged|--abandoned  |  task bounce <id> --item "…"
@@ -299,6 +301,14 @@ public sealed interface CommandLine {
                                                                          TaskCommandLine::claim)),
                                                Map.entry("task heartbeat",
                                                          Grammar.grammar(TaskCommandLine.ONE, TaskCommandLine::heartbeat)),
+                                               Map.entry("task hb",
+                                                         Grammar.grammar(TaskCommandLine.HB, TaskCommandLine::hb)),
+                                               Map.entry("task checkpoint",
+                                                         Grammar.grammar(TaskCommandLine.CHECKPOINT,
+                                                                         TaskCommandLine::checkpoint)),
+                                               Map.entry("task observe",
+                                                         Grammar.grammar(TaskCommandLine.OBSERVE,
+                                                                         TaskCommandLine::observe)),
                                                Map.entry("task wait",
                                                          Grammar.grammar(TaskCommandLine.WAIT, TaskCommandLine::waitOn)),
                                                Map.entry("task release",

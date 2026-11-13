@@ -10,6 +10,7 @@ import org.pragmatica.lang.Verify;
 import org.pragmatica.lang.parse.Number;
 import org.pragmatica.temper.cli.CliError;
 import org.pragmatica.temper.cli.command.Args.Shape;
+import org.pragmatica.temper.domain.model.Sha;
 
 import static org.pragmatica.lang.Result.success;
 
@@ -41,6 +42,14 @@ sealed interface TaskCommandLine {
     Shape CLAIM_HEAD = Shape.shape(Set.of("--stage", "--worker", "--checkout"), Set.of("--json"), 0, false);
 
     Shape ONE = Shape.shape(Set.of(), Set.of(), 1, false);
+    Shape HB = Shape.shape(Set.of("--tree"), Set.of(), 1, false);
+
+    Shape CHECKPOINT = Shape.shape(Set.of("--pushed-sha", "--checklist-file", "--read-map-file", "--note"),
+                                   Set.of(),
+                                   1,
+                                   false);
+
+    Shape OBSERVE = Shape.shape(Set.of("--ctx-k", "--turns"), Set.of(), 1, false);
     Shape WAIT = Shape.shape(Set.of("--job"), Set.of("--ci"), 1, false);
     Shape RELEASE = Shape.shape(Set.of("--reason"), Set.of(), 1, false);
     Shape PARK = Shape.shape(Set.of(), Set.of("--lease"), 2, false);
@@ -122,6 +131,38 @@ sealed interface TaskCommandLine {
 
     static Result<CliCommand> heartbeat(Args args) {
         return task(args).map(CliCommand.TaskCommand.Heartbeat::new);
+    }
+
+    static Result<CliCommand> hb(Args args) {
+        return Result.all(task(args), required(args, "--tree")).map(CliCommand.TaskCommand.Hb::new);
+    }
+
+    /// The sha must be a full 40-hex sha, judged here: a short or malformed one is 64 without a call.
+    static Result<CliCommand> checkpoint(Args args) {
+        return Result.all(task(args), pushedSha(args)).map((id, sha) -> new CliCommand.TaskCommand.Checkpoint(id,
+                                                                                                              sha,
+                                                                                                              args.optionValue("--checklist-file"),
+                                                                                                              args.optionValue("--read-map-file"),
+                                                                                                              args.optionValue("--note")));
+    }
+
+    static Result<CliCommand> observe(Args args) {
+        return Result.all(task(args), count(args, "--ctx-k"), count(args, "--turns")).map(CliCommand.TaskCommand.Observe::new);
+    }
+
+    private static Result<String> pushedSha(Args args) {
+        return required(args, "--pushed-sha").flatMap(raw -> Sha.sha(raw)
+                                                                .map(Sha::value)
+                                                                .mapError(cause -> CliError.BadSetting.FACTORY.apply("--pushed-sha",
+                                                                                                                     raw,
+                                                                                                                     cause)));
+    }
+
+    private static Result<Integer> count(Args args, String option) {
+        return required(args, option).flatMap(raw -> integer(raw, option))
+                       .flatMap(value -> Verify.ensure(value,
+                                                       Verify.Is::nonNegative,
+                                                       CliError.Usage.FACTORY.apply(option + " must not be negative")));
     }
 
     /// `--job J,…` or `--ci`, or both.

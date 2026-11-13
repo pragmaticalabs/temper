@@ -11,10 +11,12 @@ import org.pragmatica.lang.Promise;
 import org.pragmatica.lang.Result;
 import org.pragmatica.lang.Unit;
 import org.pragmatica.temper.cli.CliError;
+import org.pragmatica.temper.protocol.api.CheckpointDto;
 import org.pragmatica.temper.protocol.api.ClaimRequest;
 import org.pragmatica.temper.protocol.api.ClaimResponse;
 import org.pragmatica.temper.protocol.api.ErrorResponse;
 import org.pragmatica.temper.protocol.api.LeaseCall;
+import org.pragmatica.temper.protocol.api.ObserveCall;
 import org.pragmatica.temper.protocol.api.ParkCall;
 import org.pragmatica.temper.protocol.api.RefusedResponse;
 import org.pragmatica.temper.protocol.api.SubmitRequest;
@@ -47,6 +49,7 @@ public record TaskApi(HttpTransport http, JsonMapper json) {
     private static final int NOT_FOUND = 404;
     private static final int CONFLICT = 409;
     private static final int UNPROCESSABLE = 422;
+    private static final int UNAVAILABLE = 503;
 
     /// How a route's `409` reads.
     enum Conflict {
@@ -117,6 +120,39 @@ public record TaskApi(HttpTransport http, JsonMapper json) {
 
     public Promise<Unit> heartbeat(long task, long epoch, String lease) {
         return leaseCall(taskPath(task) + "/heartbeat", new LeaseCall.Heartbeat(epoch), lease);
+    }
+
+    /// A heartbeat that carries the tree the CLI measured (lane registry: `report` {head, dirty, unpushed}).
+    public Promise<Unit> heartbeat(long task, long epoch, LeaseCall.Tree report, String lease) {
+        return leaseCall(taskPath(task) + "/heartbeat", new LeaseCall.Heartbeat(epoch, some(report)), lease);
+    }
+
+    /// `POST tasks/{id}/checkpoint` under the lease: `201` is the stored version. `409` is the lease lost (12); `422`
+    /// `checkpoint-too-large` (14) and `pushed-sha-not-on-branch` (15), `503` mirror unavailable (16) have codes of their own.
+    public Promise<CheckpointDto> checkpoint(long task, LeaseCall.Checkpoint call, String lease) {
+        var path = taskPath(task) + "/checkpoint";
+
+        return json.writeAsString(call)
+                   .mapError(cause -> CliError.BadPayload.FACTORY.apply(path, cause))
+                   .async()
+                   .flatMap(text -> http.exchange(HttpCall.httpCall("POST",
+                                                                    path,
+                                                                    some(text)).withLease(lease)))
+                   .flatMap(reply -> checkpointed(path, reply).async());
+    }
+
+    /// `POST tasks/{id}/observe` with the FULL bearer token (never a lease token): the parent's measurement of the lane's
+    /// agent. `204` is recorded.
+    public Promise<Unit> observe(long task, ObserveCall call) {
+        var path = taskPath(task) + "/observe";
+
+        return json.writeAsString(call)
+                   .mapError(cause -> CliError.BadPayload.FACTORY.apply(path, cause))
+                   .async()
+                   .flatMap(text -> http.exchange(HttpCall.httpCall("POST",
+                                                                    path,
+                                                                    some(text))))
+                   .flatMap(reply -> observed(path, reply).async());
     }
 
     public Promise<Unit> waitOn(long task, long epoch, List<Long> jobs, boolean ci, String lease) {
@@ -197,6 +233,32 @@ public record TaskApi(HttpTransport http, JsonMapper json) {
         return reply.status() == NO_CONTENT
                ? success(none())
                : expected(path, reply, OK, ClaimResponse.class, Conflict.STATE).map(Option::some);
+    }
+
+    /// `201` only: every accepted checkpoint is a new version, so `200` is outside the contract.
+    private Result<CheckpointDto> checkpointed(String path, HttpReply reply) {
+        return switch (reply.status()) {
+            case CREATED -> decode(path, reply, CheckpointDto.class);
+            case UNPROCESSABLE -> checkpointRefusal(reply).result();
+            case UNAVAILABLE -> CliError.CheckpointRefused.mirrorUnavailable(errorText(reply)).result();
+            default -> failure(path, reply, Conflict.LEASE);
+        };
+    }
+
+    private Cause checkpointRefusal(HttpReply reply) {
+        var error = errorText(reply);
+
+        return error.contains("checkpoint-too-large")
+               ? CliError.CheckpointRefused.tooLarge(error)
+               : error.contains("pushed-sha-not-on-branch")
+                 ? CliError.CheckpointRefused.notOnBranch(error)
+                 : CliError.TaskRefused.FACTORY.apply(error);
+    }
+
+    private Result<Unit> observed(String path, HttpReply reply) {
+        return reply.status() == NO_CONTENT
+               ? unitResult()
+               : failure(path, reply, Conflict.STATE);
     }
 
     private Result<Unit> noContent(String path, HttpReply reply) {

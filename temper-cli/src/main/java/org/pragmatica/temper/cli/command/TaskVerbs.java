@@ -2,6 +2,7 @@ package org.pragmatica.temper.cli.command;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.List;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -19,7 +20,10 @@ import org.pragmatica.temper.cli.config.LeaseFiles;
 import org.pragmatica.temper.cli.transport.TaskApi;
 import org.pragmatica.temper.domain.exit.ExitCode;
 import org.pragmatica.temper.domain.task.ReadPointStamp;
+import org.pragmatica.temper.protocol.api.CheckpointDto;
 import org.pragmatica.temper.protocol.api.ClaimResponse;
+import org.pragmatica.temper.protocol.api.LeaseCall;
+import org.pragmatica.temper.protocol.api.ObserveCall;
 import org.pragmatica.temper.protocol.api.ParkCall;
 import org.pragmatica.temper.protocol.api.ParkRequestDto;
 import org.pragmatica.temper.protocol.api.TaskBriefDto;
@@ -62,6 +66,13 @@ public sealed interface TaskVerbs {
                                                             ExitCode.NONE);
             case CliCommand.TaskCommand.Claim claim -> claimed(api, json, claim, context, runner);
             case CliCommand.TaskCommand.Heartbeat heartbeat -> heartbeat(api, heartbeat, context);
+            case CliCommand.TaskCommand.Hb hb -> beat(api, hb, context, runner);
+            case CliCommand.TaskCommand.Checkpoint checkpoint -> checkpointed(api, json, checkpoint, context);
+            case CliCommand.TaskCommand.Observe observe -> api.observe(observe.task(),
+                                                                       new ObserveCall(observe.ctxK(), observe.turns())).map(_ -> Outcome.outcome(TaskLines.observed(observe.task(),
+                                                                                                                                                                     observe.ctxK(),
+                                                                                                                                                                     observe.turns()),
+                                                                                                                                                  ExitCode.ACCEPTED));
             case CliCommand.TaskCommand.Wait wait -> waited(api, wait, context);
             case CliCommand.TaskCommand.Release release -> released(api, release, context);
             case CliCommand.TaskCommand.Park park -> parked(api, json, park, context);
@@ -266,8 +277,10 @@ public sealed interface TaskVerbs {
     }
 
     private static String claimText(ClaimResponse granted, Option<Path> target, Option<ReadPointStamp> stamp) {
-        return Stream.concat(Stream.of(TaskLines.claimed(granted)),
-                             Option.all(stamp, target).map(TaskLines::stamp).stream())
+        return Stream.of(Stream.of(TaskLines.claimed(granted)),
+                         TaskLines.claimContext(granted).stream(),
+                         Option.all(stamp, target).map(TaskLines::stamp).stream())
+                     .flatMap(lines -> lines)
                      .collect(Collectors.joining("\n"));
     }
 
@@ -338,13 +351,93 @@ public sealed interface TaskVerbs {
     /// A lease call's answer. A call that ends the lease (`ends`: release, wait, park) deletes its lease file once it is
     /// accepted; a `409 lease-lost` deletes it too, so the file never outlives its lease.
     private static <T> Promise<Outcome> leaseVerb(Promise<T> call, LeaseFiles.Held held, String verb, boolean ends) {
+        return leaseLine(call,
+                         held,
+                         TaskLines.leaseVerb(held.task(), verb, held.epoch()),
+                         ends);
+    }
+
+    /// As [#leaseVerb], printing `line` once the call is accepted.
+    private static <T> Promise<Outcome> leaseLine(Promise<T> call, LeaseFiles.Held held, String line, boolean ends) {
         return call.withFailure(cause -> LeaseFiles.forgetIfLost(held, cause))
                    .flatMap(_ -> leaseAnswered(held,
-                                               Outcome.outcome(TaskLines.leaseVerb(held.task(),
-                                                                                   verb,
-                                                                                   held.epoch()),
-                                                               ExitCode.ACCEPTED),
+                                               Outcome.outcome(line, ExitCode.ACCEPTED),
                                                ends));
+    }
+
+    // ---- lane registry verbs -----------------------------------------------------------------------------------------
+    /// `hb`: the lease first (no lease file is 64), then the tree measured by git, then ONE heartbeat that always carries
+    /// the report; the agent states none of its numbers.
+    private static Promise<Outcome> beat(TaskApi api,
+                                         CliCommand.TaskCommand.Hb hb,
+                                         CliContext context,
+                                         ProcessRunner runner) {
+        return LeaseFiles.held(context,
+                               hb.task())
+                         .async()
+                         .flatMap(held -> TreeProbe.measure(runner,
+                                                            hb.tree())
+                                                   .flatMap(tree -> leaseLine(api.heartbeat(held.task(),
+                                                                                            held.epoch(),
+                                                                                            tree,
+                                                                                            held.token()),
+                                                                              held,
+                                                                              TaskLines.heartbeat(held.task(),
+                                                                                                  held.epoch(),
+                                                                                                  tree),
+                                                                              false)));
+    }
+
+    /// `checkpoint`: the files are read first (a bad one is 64 and sends nothing), then one POST under the lease; `201` is success.
+    private static Promise<Outcome> checkpointed(TaskApi api,
+                                                 JsonMapper json,
+                                                 CliCommand.TaskCommand.Checkpoint checkpoint,
+                                                 CliContext context) {
+        return entries(json,
+                       checkpoint.checklistFile(),
+                       CheckpointDto.Item[].class).async()
+                      .flatMap(checklist -> entries(json,
+                                                    checkpoint.readMapFile(),
+                                                    CheckpointDto.Entry[].class).async()
+                                                   .flatMap(readMap -> LeaseFiles.held(context,
+                                                                                       checkpoint.task())
+                                                                                 .async()
+                                                                                 .flatMap(held -> stored(api,
+                                                                                                         held,
+                                                                                                         checkpoint,
+                                                                                                         checklist,
+                                                                                                         readMap))));
+    }
+
+    private static Promise<Outcome> stored(TaskApi api,
+                                           LeaseFiles.Held held,
+                                           CliCommand.TaskCommand.Checkpoint checkpoint,
+                                           List<CheckpointDto.Item> checklist,
+                                           List<CheckpointDto.Entry> readMap) {
+        return api.checkpoint(held.task(),
+                              new LeaseCall.Checkpoint(held.epoch(),
+                                                       checkpoint.pushedSha(),
+                                                       checklist,
+                                                       readMap,
+                                                       checkpoint.note().or("")),
+                              held.token())
+                  .withFailure(cause -> LeaseFiles.forgetIfLost(held, cause))
+                  .map(done -> Outcome.outcome(TaskLines.checkpointed(held.task(),
+                                                                      done),
+                                               ExitCode.ACCEPTED));
+    }
+
+    /// A JSON array file as a list; no file is an empty list.
+    private static <T> Result<List<T>> entries(JsonMapper json, Option<String> file, Class<T[]> type) {
+        return file.map(name -> Result.lift(thrown -> CliError.Unreadable.FACTORY.apply(name,
+                                                                                        Causes.fromThrowable(thrown)),
+                                            () -> Files.readString(Path.of(name)))
+                                      .flatMap(text -> json.readString(text, type)
+                                                           .mapError(cause -> CliError.BadSetting.FACTORY.apply("checkpoint file",
+                                                                                                                name,
+                                                                                                                cause)))
+                                      .map(array -> List.copyOf(Arrays.asList(array))))
+                   .or(() -> Result.success(List.of()));
     }
 
     private static <T> Promise<T> leaseAnswered(LeaseFiles.Held held, T answer, boolean ends) {
