@@ -599,7 +599,7 @@ class BbQueueCancelIT {
 
         assertThat(run.rc()).as(run.stderr()).isZero();
         Thread.sleep(300);
-        assertThat(run.stdout()).contains("reaped 100-1: abandoned");
+        assertThat(run.stdout()).contains("reaped 100-" + RUN + ": abandoned");
         assertThat(live(waiter.pid())).as("its waiter was stopped by pid").isFalse();
         assertThat(field("done", "100-" + RUN, "state")).isEqualTo("abandoned");
         assertThat(root).as("reap must not recreate the vanished checkout").doesNotExist();
@@ -631,7 +631,7 @@ class BbQueueCancelIT {
         Thread.sleep(300);
         var freed = queue(ME, pattern, "reap");
 
-        assertThat(freed.stdout()).contains("reaped 100-1");
+        assertThat(freed.stdout()).contains("reaped 100-" + RUN);
         assertThat(queue.resolve("running").resolve("100-" + RUN)).doesNotExist();
     }
 }
