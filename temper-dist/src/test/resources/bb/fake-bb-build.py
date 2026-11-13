@@ -15,6 +15,7 @@ open(b + "/start", "w").write(str(int(time.time())) + "\n")
 fae = "-fae" in args
 mutated = [m["name"] for m in sc["modules"] if "MUT" in open(f"{co}/{m['name']}/src/f.txt").read()]
 open(home + "/builds.log", "a").write("[" + ",".join(mutated) + "] " + str(fae).lower() + "\n")
+open(home + "/via.log", "a").write(os.environ.get("BB_VIA", "<unset>") + "\n")
 bad, rc = set(), 0
 for m in sc["modules"]:
     n = m["name"]

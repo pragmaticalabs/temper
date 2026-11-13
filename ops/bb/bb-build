@@ -201,6 +201,7 @@ fi
 AG=$(ownerval BB_AGENT "$WORD_RE") && OWNER_FIELDS+="agent=$AG"$'\n'
 LN=$(ownerval BB_LANE "$WORD_RE") && OWNER_FIELDS+="lane=$LN"$'\n'
 PRN=$(ownerval BB_PR '^[1-9][0-9]{0,9}$') && OWNER_FIELDS+="pr=$PRN"$'\n'
+VIA=$(ownerval BB_VIA "$LABEL_RE") && OWNER_FIELDS+="via=$VIA"$'\n'   # who submitted: bb-mutate sets bb-mutate:<spec>:<mutant> (issue #46); additive
 OWNER_FIELDS+="output=$B/build.log"$'\n'
 [ "${BB_REQUIRE_DOCKER:-1}" = 1 ] || OWNER_FIELDS+="requireDocker=0"$'\n'
 [ -z "$DETACHED_READER" ] || OWNER_FIELDS+="detached_reader=$DETACHED_READER"$'\n'

@@ -299,6 +299,18 @@ def kill_job(co, ticket, label):
     return left
 
 
+SPEC_BASE = ""  # set by main: the spec file's basename, for the BB_VIA marker
+
+
+def via_marker(label):
+    """BB_VIA value for bb-build (issue #46): bb-mutate:<spec basename>:<label>, every part cut to [A-Za-z0-9._-] ('+' of a batch label
+    becomes '.') and the whole to 64 chars, the shape bb-build accepts (LABEL_RE); the label is the part bb-queue shows as [mutant <label>]."""
+    def clean(x): return re.sub(r"[^A-Za-z0-9._-]", ".", x)
+    spec = clean(os.path.splitext(SPEC_BASE)[0])[:20] or "spec"
+    head = "bb-mutate:" + spec + ":"
+    return head + (clean(label)[:64 - len(head)] or "m")
+
+
 def run_build(co, owner, build, timeout_s, label, bound=None, fae=False):
     """returns dict(kind=..., rc, cases, bad, secs, mvn_secs, detail). kind in OK|CALL-REFUSED|TIMEOUT|ABORT.
     bound (s) = per-mutant wall-clock bound from the job's own Maven start; TIMEOUT = bound hit (job killed),
@@ -311,7 +323,7 @@ def run_build(co, owner, build, timeout_s, label, bound=None, fae=False):
     t0 = time.time()
     os.utime(marker, ns=(time.time_ns(), time.time_ns()))
     marker_ns = os.stat(marker).st_mtime_ns
-    env = dict(os.environ, BB_OWNER=owner, BB_DEDUP="0")
+    env = dict(os.environ, BB_OWNER=owner, BB_DEDUP="0", BB_VIA=via_marker(label))
     env.pop("HCLOUD_TOKEN", None)
     args = mvn_args(build, fae)
     log(f"[{label}] bb-build {co} {' '.join(args)}")
@@ -377,7 +389,7 @@ def classify(res, m):
 
 # ---------------------------------------------------------------- main
 def main():
-    global LOG
+    global LOG, SPEC_BASE
     argv = sys.argv[1:]
     mode, timeout_min = "single", 75
     pos = []
@@ -392,6 +404,7 @@ def main():
     if len(pos) != 3:
         print(__doc__, file=sys.stderr); sys.exit(2)
     co, spec_p, out = (os.path.abspath(p) for p in pos)
+    SPEC_BASE = os.path.basename(spec_p)
     os.makedirs(out, exist_ok=True)
     LOG = open(os.path.join(out, "bb-mutate.log"), "a")
     log(f"start co={co} spec={spec_p} mode={mode} timeout={timeout_min}m")

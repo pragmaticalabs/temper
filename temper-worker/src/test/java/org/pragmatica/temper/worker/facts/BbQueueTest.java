@@ -53,6 +53,17 @@ class BbQueueTest {
         assertThat(ok(BbQueue.listedTickets(listing))).isEqualTo(BbQueue.Tickets.tickets(1, 1));
     }
 
+    /// bb-queue marks a bb-mutate ticket with a trailing ` [mutant <id>]` after the other row marks (issue #46). The row regexes only need
+    /// the first two columns, so the counts must not move; the mark is added to the verbatim running row of `new-tools.txt`.
+    @Test
+    void parse_countsTheSameTickets_whenARunningRowCarriesTheMutantMark() throws IOException {
+        var listing = fixture("new-tools.txt");
+        var marked = listing.replaceFirst("\\[port-group host-exclusive\\]", "$0 [mutant m1.m2]");
+
+        assertThat(marked).isNotEqualTo(listing).contains("[mutant m1.m2]");
+        assertThat(ok(BbQueue.listedTickets(marked))).isEqualTo(BbQueue.Tickets.tickets(1, 1));
+    }
+
     @Test
     void parse_countsZero_inRealIdleOutput() throws IOException {
         var idle = fixture("idle.txt");

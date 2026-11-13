@@ -1,0 +1,618 @@
+#!/usr/bin/env python3
+"""bb-mutate <checkout-dir> <spec.json> <out-dir> [--single|--batch] [--timeout MIN]
+
+Shared mutation-testing harness for bigboy. Runs ON bigboy, drives ~/tools/bb-build.
+Spec (data only):
+  {"build": {"pl": "integrations/utility", "tests": "ATest,BTest", "extra": ["-am"]},
+   "mutations": [{"id": "m1", "file": "rel/path.java", "kind": "lit"|"re", "old": "...", "new": "...",
+                  "expect": ["TestClass#method", "TestClass"], "zone": "optional"}]}
+Outcomes: RED SURVIVED APPLY-INVALID CALL-REFUSED TIMEOUT NO-XML COMPILE-ERROR (+ BUILD-FAIL: build failed,
+no test failure, no compile error; never RED, never SURVIVED) and NOT-RUN: the mutant's expected tests did not run
+(or the run was aborted); NOT-RUN is neither detected nor survived and is tallied apart.
+CREDIT (multi-module soundness): a mutant is credited RED/SURVIVED only if, in ITS OWN module (a module whose control
+reports held the expected test class), a surefire/failsafe XML newer than the build marker names each expected class and
+has testcases > 0. A red module fails the reactor, so modules downstream of it never run and leave stale or no XML:
+their mutants are NOT-RUN, never SURVIVED. A NOT-RUN batch-mate is re-run singly (like an ambiguous batch); if it is NOT-RUN
+even singly it stays NOT-RUN. Batch builds of 2+ mutants add -fae, so modules not downstream of a red one still run.
+Never deletes .bb/rc, never writes ~/.m2, stdin unused. Exit: 0 ok | 2 control failed / usage / refused | 3 tree not restored | 4 queue-wait timeout (--timeout) or run abort
+| 5 complete, but some mutant is still NOT-RUN after the singles pass (neither detected nor survived: the tally line names them).
+
+PER-MUTANT BOUND (T17): every mutant build gets a wall-clock bound measured from ITS OWN Maven start (.bb/start
+newer than the mutant marker), so queue wait is excluded. Default: 3x the control's Maven wall time (control
+.bb/end - .bb/start), floor 10 s (start/end have 1 s resolution). Override per spec with an absolute value: "build": {"mutantTimeoutSecs": 120}.
+On expiry the mutant is TIMEOUT, COUNTED AS DETECTED: the job's own process group (the setsid waiter whose ticket
+bb-build printed, hence maven and its forks) gets SIGTERM, then SIGKILL; java/maven processes with cwd inside the
+checkout that escaped the group are killed too; survivors abort the run (exit 4). .bb/rc is written as 124 (only if
+absent; maven's own rc never is 124) with .bb/end, so the next bb-build is accepted; `bb-queue reap` then releases
+the ticket. The tree is restored and the run continues. A batch that times out is re-run singly. --timeout MIN now
+bounds only queue wait (and the whole control build); a mutant that never starts within it aborts the run (exit 4).
+results.tsv / results.md are rewritten (atomically) after every mutant.
+"""
+import json, os, re, signal, subprocess, sys, time, shutil
+import xml.etree.ElementTree as ET
+
+HOME = os.path.expanduser("~")
+BB_BUILD = os.path.join(HOME, "tools", "bb-build")
+POLL = 5
+LIFECYCLE = {"clean", "validate", "compile", "test", "package", "verify", "install", "deploy", "integration-test"}
+LOG = None
+
+
+def log(msg):
+    line = time.strftime("%H:%M:%S ") + msg
+    if LOG:
+        LOG.write(line + "\n"); LOG.flush()
+
+
+def die(code, msg):
+    print("bb-mutate: " + msg, file=sys.stderr)
+    log("FATAL " + msg)
+    sys.exit(code)
+
+
+def git(co, *a):
+    return subprocess.run(["git", "-C", co] + list(a), stdin=subprocess.DEVNULL,
+                          capture_output=True, text=True)
+
+
+def porcelain(co):
+    return git(co, "status", "--porcelain", "--untracked-files=normal").stdout.strip()
+
+
+# ---------------------------------------------------------------- preflight
+def preflight(co):
+    if not os.path.isdir(os.path.join(co, ".git")):
+        die(2, f"{co} is not a git checkout")
+    mc = os.path.join(co, ".mvn", "maven.config")
+    try:
+        txt = open(mc).read()
+    except OSError:
+        die(2, "no .mvn/maven.config: not a bb-checkout")
+    if f"-Dmaven.repo.local={co}/.m2-local" not in txt:
+        die(2, "maven.config does not carry this checkout's own .m2-local: not a bb-checkout")
+    if os.path.basename(os.path.dirname(co)) != "co":
+        die(2, "checkout is not under .../work/co/")
+    if git(co, "symbolic-ref", "-q", "HEAD").returncode == 0:
+        die(2, "checkout is not at a detached pinned SHA")
+    sha = git(co, "rev-parse", "HEAD").stdout.strip()
+    pushed = git(co, "for-each-ref", "--contains", sha, "refs/remotes/").stdout.strip()
+    if not pushed:
+        die(2, f"HEAD {sha} is not contained in any remote-tracking ref: not a pushed SHA")
+    dirty = porcelain(co)
+    if dirty:
+        die(2, "tree is not clean:\n" + dirty)
+    return sha
+
+
+# ---------------------------------------------------------------- mutation apply
+def apply_text(m, text):
+    """returns (newtext, nmatches, err)"""
+    if m["kind"] == "lit":
+        n = text.count(m["old"]) if m["old"] else 0
+        if n != 1:
+            return None, n, None
+        return text.replace(m["old"], m["new"], 1), 1, None
+    try:
+        rx = re.compile(m["old"], re.M)
+    except re.error as e:
+        return None, 0, f"bad regex: {e}"
+    n = len(list(rx.finditer(text)))
+    if n != 1:
+        return None, n, None
+    return rx.sub(m["new"], text, count=1), 1, None
+
+
+def validate(co, m):
+    """None if valid else a reason string"""
+    if m.get("kind") not in ("lit", "re") or not all(k in m for k in ("id", "file", "old", "new")):
+        return "malformed mutation (need id,file,kind lit|re,old,new)"
+    p = os.path.join(co, m["file"])
+    if not os.path.isfile(p):
+        return f"file not found: {m['file']}"
+    text = open(p, encoding="utf-8").read()
+    new, n, err = apply_text(m, text)
+    if err:
+        return err
+    if n != 1:
+        return f"pattern matched {n} times (need exactly 1)"
+    if new == text:
+        return "mutation is a no-op"
+    return None
+
+
+def apply_all(co, ms):
+    """apply sequentially; returns error string or None. Records nothing; caller restores."""
+    for m in ms:
+        p = os.path.join(co, m["file"])
+        text = open(p, encoding="utf-8").read()
+        new, n, err = apply_text(m, text)
+        if new is None:
+            return f"{m['id']}: pattern matched {n} times at apply time {err or ''}"
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(new)
+    return None
+
+
+def restore(co, files):
+    if files:
+        git(co, "checkout", "--", *sorted(files))
+    d = porcelain(co)
+    if d:
+        die(3, "tree NOT clean after restore (aborting whole run):\n" + d)
+
+
+# ---------------------------------------------------------------- build + collect
+def mvn_args(build, fae=False):
+    a = []
+    if build.get("pl"):
+        a += ["-pl", build["pl"]]
+    extra = list(build.get("extra", []))
+    if not any(x in LIFECYCLE for x in extra):
+        a.append("test")
+    a += extra
+    if fae and "-fae" not in a:
+        a.append("-fae")
+    if build.get("tests"):
+        a += [f"-Dtest={build['tests']}", "-Dsurefire.failIfNoSpecifiedTests=false", "-DfailIfNoTests=false"]
+    return a
+
+
+def collect_xml(co, marker_ns):
+    files = []
+    for root, dirs, fs in os.walk(co):
+        if root == co:
+            dirs[:] = [d for d in dirs if d not in (".m2-local", ".git", ".bb")]
+        if root.endswith("surefire-reports") or root.endswith("failsafe-reports"):
+            for f in fs:
+                if f.endswith(".xml"):
+                    p = os.path.join(root, f)
+                    if os.stat(p).st_mtime_ns > marker_ns:
+                        files.append(p)
+    cases, bad, suites = [], [], []
+    for p in files:
+        try:
+            r = ET.parse(p).getroot()
+        except Exception as e:
+            bad.append(f"{p}: {e}")
+            continue
+        names, n = set(), 0
+        for ts in r.iter("testsuite"):
+            if ts.get("name"):
+                names.add(ts.get("name"))
+        for tc in r.iter("testcase"):
+            cn, nm = tc.get("classname", ""), tc.get("name", "")
+            failed = tc.find("failure") is not None or tc.find("error") is not None
+            cases.append((cn, nm, failed))
+            names.add(cn)
+            n += 1
+        # module = the directory holding target/{surefire,failsafe}-reports
+        suites.append(dict(moddir=os.path.dirname(os.path.dirname(os.path.dirname(p))), names=names, n=n))
+    return files, cases, bad, suites
+
+
+def class_in(cls, names):
+    return any(matches(cls, nm, "") for nm in names)
+
+
+def own_modules(ctl_suites, m):
+    """expected class -> module dirs whose control reports held it (the mutant's own modules)"""
+    return {e.split("#")[0]: {s["moddir"] for s in ctl_suites if s["n"] > 0 and class_in(e.split("#")[0], s["names"])}
+            for e in m["expect"]}
+
+
+def ran(res, own):
+    """None if every expected class has a fresh XML (collected newer than the marker) with testcases > 0 in one of its own
+    modules; else a reason string"""
+    for cls, mods in own.items():
+        if not any(s["n"] > 0 and s["moddir"] in mods and class_in(cls, s["names"]) for s in res.get("suites", [])):
+            return f"no fresh report with testcases>0 for {cls} in its own module(s) {sorted(os.path.basename(x) for x in mods)}"
+    return None
+
+
+def matches(expected, cn, nm):
+    cls, _, meth = expected.partition("#")
+    simple = cn.split(".")[-1]
+    outer = simple.split("$")[0]
+    if cls not in (cn, simple, outer, cn.split("$")[0]):
+        return False
+    if not meth:
+        return True
+    return nm == meth or nm.startswith(meth + "(") or nm.startswith(meth + "[")
+
+
+def kill_job(co, ticket, label):
+    """Stop THIS build only: the setsid waiter of `ticket` (printed by bb-build) is its own session/process-group
+    leader and maven + forks live in that group. Then confirm no java/maven process with cwd in `co` survives.
+    Returns list of surviving pids (empty = clean)."""
+    me = os.getuid()
+
+    def waiters():
+        r = subprocess.run(["pgrep", "-u", str(me), "-f", "--", f"bb-build __run {re.escape(ticket)}( |$)"],
+                           capture_output=True, text=True)
+        return [int(x) for x in r.stdout.split()]
+
+    def escapees():
+        out = []
+        for d in os.listdir("/proc"):
+            if not d.isdigit():
+                continue
+            try:
+                if os.stat(f"/proc/{d}").st_uid != me:
+                    continue
+                cwd = os.readlink(f"/proc/{d}/cwd")
+                if cwd != co and not cwd.startswith(co + "/"):
+                    continue
+                cmd = open(f"/proc/{d}/cmdline", "rb").read().replace(b"\0", b" ").decode(errors="replace")
+            except OSError:
+                continue
+            if re.search(r"java|classworlds", cmd):
+                out.append(int(d))
+        return out
+
+    groups, members = set(), []
+    for pid in waiters():
+        try:
+            if os.getpgid(pid) == pid and os.getsid(pid) == pid:
+                groups.add(pid)
+            else:
+                members.append(pid)
+        except OSError:
+            pass
+    for pid in members:  # e.g. the waiter's maven subshell shares its cmdline; fine only inside a leader's group
+        try:
+            if os.getpgid(pid) not in groups:
+                log(f"[{label}] KILL refused: ticket process {pid} is in no session-leader group of its own")
+        except OSError:
+            pass
+    log(f"[{label}] KILL ticket={ticket} waiter-groups={sorted(groups)} escapee-candidates={escapees()}")
+    for sig, name, secs in ((signal.SIGTERM, "SIGTERM", 15), (signal.SIGKILL, "SIGKILL", 10)):
+        for g in groups:
+            try:
+                os.killpg(g, sig)
+            except OSError:
+                pass
+        if name == "SIGKILL":
+            for pid in escapees():
+                log(f"[{label}] KILL escapee pid={pid} (java/maven, cwd in checkout)")
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
+        end = time.time() + secs
+        while time.time() < end and (waiters() or escapees()):
+            time.sleep(0.5)
+        if not waiters() and not escapees():
+            log(f"[{label}] KILL confirmed after {name}: no waiter, no java/maven with cwd in {co}")
+            break
+    left = waiters() + escapees()
+    B = os.path.join(co, ".bb")
+    now = str(int(time.time()))
+    if not os.path.exists(os.path.join(B, "rc")):
+        # killed jobs never write rc; bb-build refuses (rc 3) while start exists without rc. 124 = killed by bb-mutate.
+        if not os.path.exists(os.path.join(B, "end")):
+            open(os.path.join(B, "end"), "w").write(now + "\n")
+        open(os.path.join(B, "rc"), "w").write("124\n")
+        log(f"[{label}] wrote .bb/end and .bb/rc=124 (killed by bb-mutate)")
+    cp = subprocess.run([os.path.join(HOME, "tools", "bb-queue"), "reap"], stdin=subprocess.DEVNULL,
+                        capture_output=True, text=True)
+    log(f"[{label}] bb-queue reap: {(cp.stdout + cp.stderr).strip()[-200:]}")
+    return left
+
+
+def run_build(co, owner, build, timeout_s, label, bound=None, fae=False):
+    """returns dict(kind=..., rc, cases, bad, secs, mvn_secs, detail). kind in OK|CALL-REFUSED|TIMEOUT|ABORT.
+    bound (s) = per-mutant wall-clock bound from the job's own Maven start; TIMEOUT = bound hit (job killed),
+    ABORT = queue wait / overall --timeout expired (job killed). The control passes bound=None (kind TIMEOUT on --timeout)."""
+    B = os.path.join(co, ".bb")
+    os.makedirs(B, exist_ok=True)
+    marker = os.path.join(B, "mutate.marker")
+    with open(marker, "w") as f:
+        f.write(label)
+    t0 = time.time()
+    os.utime(marker, ns=(time.time_ns(), time.time_ns()))
+    marker_ns = os.stat(marker).st_mtime_ns
+    env = dict(os.environ, BB_OWNER=owner, BB_DEDUP="0")
+    env.pop("HCLOUD_TOKEN", None)
+    args = mvn_args(build, fae)
+    log(f"[{label}] bb-build {co} {' '.join(args)}")
+    cp = subprocess.run([BB_BUILD, co] + args, stdin=subprocess.DEVNULL, capture_output=True, text=True, env=env)
+    log(f"[{label}] bb-build exit={cp.returncode} {cp.stdout.strip()[-300:]} {cp.stderr.strip()[-300:]}")
+    if cp.returncode != 0:
+        return dict(kind="CALL-REFUSED", rc=None, cases=[], bad=[], files=[], secs=time.time() - t0,
+                    detail=f"bb-build exit {cp.returncode}: {(cp.stderr or cp.stdout).strip()[-200:]}")
+    m = re.search(r"ticket=(\S+)", cp.stdout)
+    ticket = m.group(1) if m else None
+    rcp = os.path.join(B, "rc")
+    stp = os.path.join(B, "start")
+    mvn_t0 = None  # epoch seconds of this build's own Maven start
+    while True:
+        try:
+            if os.stat(rcp).st_mtime_ns > marker_ns:
+                break
+        except OSError:
+            pass
+        if mvn_t0 is None:
+            try:
+                if os.stat(stp).st_mtime_ns > marker_ns:
+                    mvn_t0 = os.stat(stp).st_mtime
+            except OSError:
+                pass
+        if bound is not None and mvn_t0 is not None and time.time() - mvn_t0 > bound:
+            left = kill_job(co, ticket, label) if ticket else ["no-ticket"]
+            if left:
+                die(4, f"[{label}] could not stop the timed-out build; survivors {left}")
+            return dict(kind="TIMEOUT", rc=None, cases=[], bad=[], files=[], secs=time.time() - t0, mvn_secs=time.time() - mvn_t0,
+                        detail=f"exceeded {int(bound)}s from its own Maven start; job killed (counted detected)")
+        if (mvn_t0 is None or bound is None) and time.time() - t0 > timeout_s:
+            left = kill_job(co, ticket, label) if ticket else ["no-ticket"]
+            if left:
+                die(4, f"[{label}] could not stop the expired build; survivors {left}")
+            return dict(kind="ABORT" if bound is not None else "TIMEOUT", rc=None, cases=[], bad=[], files=[],
+                        secs=time.time() - t0, mvn_secs=None,
+                        detail=f"no fresh .bb/rc within {int(timeout_s)}s (queue wait / --timeout); job killed")
+        time.sleep(POLL)
+    rc = int(open(rcp).read().strip() or -1)
+    mvn_secs = None
+    try:
+        mvn_secs = int(open(os.path.join(B, "end")).read().strip()) - int(open(stp).read().strip())
+    except (OSError, ValueError):
+        pass
+    files, cases, bad, suites = collect_xml(co, marker_ns)
+    logtxt = ""
+    try:
+        logtxt = open(os.path.join(B, "build.log"), errors="replace").read()
+    except OSError:
+        pass
+    compile_err = bool(re.search(r"COMPILATION ERROR|Compilation failure|Failed to execute goal .*maven-compiler-plugin", logtxt))
+    return dict(kind="OK", rc=rc, cases=cases, bad=bad, files=files, suites=suites, secs=time.time() - t0, mvn_secs=mvn_secs, compile_err=compile_err,
+                detail="")
+
+
+def classify(res, m):
+    """outcome for mutation m given an OK build result (single or batch-credited)"""
+    fails = [f"{c}#{n}" for c, n, f in res["cases"] if f]
+    hit = [e for e in m["expect"] if any(matches(e, c, n) for c, n, f in res["cases"] if f)]
+    return fails, hit
+
+
+# ---------------------------------------------------------------- main
+def main():
+    global LOG
+    argv = sys.argv[1:]
+    mode, timeout_min = "single", 75
+    pos = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--single": mode = "single"
+        elif a == "--batch": mode = "batch"
+        elif a == "--timeout": i += 1; timeout_min = float(argv[i])
+        else: pos.append(a)
+        i += 1
+    if len(pos) != 3:
+        print(__doc__, file=sys.stderr); sys.exit(2)
+    co, spec_p, out = (os.path.abspath(p) for p in pos)
+    os.makedirs(out, exist_ok=True)
+    LOG = open(os.path.join(out, "bb-mutate.log"), "a")
+    log(f"start co={co} spec={spec_p} mode={mode} timeout={timeout_min}m")
+    spec = json.load(open(spec_p))
+    build, muts = spec["build"], spec["mutations"]
+    ids = [m.get("id") for m in muts]
+    if len(set(ids)) != len(ids):
+        die(2, "duplicate mutation ids")
+    for m in muts:
+        m.setdefault("expect", [])
+    sha = preflight(co)
+    owner = os.environ.get("BB_OWNER") or os.path.basename(co).split("-")[0]
+    timeout_s = timeout_min * 60
+    results = {}  # id -> dict(outcome, expected_failed, failures, cases, rc, secs, detail)
+
+    state = dict(verdict="RUNNING (control not finished)", ctl_n=0)
+
+    def flush():
+        write_results(out, sha, build, muts, results, state["verdict"], state["ctl_n"])
+
+    def rec(m, outcome, **kw):
+        results[m["id"]] = dict(outcome=outcome, expected_failed=kw.get("hit", []), failures=kw.get("fails", []),
+                                cases=kw.get("cases", ""), rc=kw.get("rc", ""), secs=int(kw.get("secs", 0)),
+                                detail=kw.get("detail", ""))
+        flush()  # incremental: a killed run keeps every finished mutant
+
+    # 1. validate against clean tree
+    valid = []
+    for m in muts:
+        why = validate(co, m)
+        if why:
+            rec(m, "APPLY-INVALID", detail=why); log(f"APPLY-INVALID {m.get('id')}: {why}")
+        else:
+            valid.append(m)
+
+    # 2. control
+    ctl = run_build(co, owner, build, timeout_s, "control")
+    ctl_n = len(ctl["cases"])
+    state["ctl_n"] = ctl_n
+    if ctl["kind"] != "OK":
+        write_results(out, sha, build, muts, results, f"CONTROL {ctl['kind']}: {ctl['detail']}", ctl_n)
+        die(2, f"control {ctl['kind']}: {ctl['detail']}")
+    cfails = [f"{c}#{n}" for c, n, f in ctl["cases"] if f]
+    if cfails or ctl["rc"] != 0 or not ctl["files"] or ctl_n == 0:
+        why = f"rc={ctl['rc']} testcases={ctl_n} xml={len(ctl['files'])} failures={cfails[:10]}"
+        write_results(out, sha, build, muts, results, "CONTROL FAILED: " + why, ctl_n)
+        die(2, "control failed: " + why)
+    if porcelain(co):
+        die(3, "tree dirty after control build:\n" + porcelain(co))
+    ctl_mvn = ctl.get("mvn_secs") or ctl["secs"]
+    bound = float(build["mutantTimeoutSecs"]) if build.get("mutantTimeoutSecs") else max(3 * ctl_mvn, 10)
+    state["verdict"] = f"RUNNING: control OK ({ctl_n} testcases); per-mutant bound {int(bound)}s"
+    flush()
+    log(f"control OK: {ctl_n} testcases; control maven {ctl_mvn}s; per-mutant bound {int(bound)}s")
+    # positive control for expectations: expected test must exist in the control run
+    runnable = []
+    for m in valid:
+        if not m["expect"]:
+            rec(m, "APPLY-INVALID", detail="no expected tests declared"); continue
+        missing = [e for e in m["expect"] if not any(matches(e, c, n) for c, n, f in ctl["cases"])]
+        if missing:
+            rec(m, "APPLY-INVALID", detail=f"expected test(s) absent from control run: {missing}")
+        else:
+            runnable.append(m)
+
+    # 3. plan batches
+    if mode == "single":
+        batches = [[m] for m in runnable]
+    else:
+        batches = plan_batches(runnable)
+
+    own = {m["id"]: own_modules(ctl["suites"], m) for m in runnable}
+
+    def run_group(group, label, fae=False):
+        files = {m["file"] for m in group}
+        err = apply_all(co, group)
+        try:
+            if err:
+                restore(co, files)
+                return None, err
+            changed = set(git(co, "diff", "--name-only").stdout.split())
+            if changed != files:
+                restore(co, files | changed)
+                return None, f"git diff touched {sorted(changed)} expected {sorted(files)}"
+            res = run_build(co, owner, build, timeout_s, label, bound, fae)
+        finally:
+            restore(co, files)
+        return res, None
+
+    for bi, group in enumerate(batches):
+        label = "+".join(m["id"] for m in group)
+        res, err = run_group(group, label, fae=len(group) > 1)
+        if err:
+            for m in group: rec(m, "APPLY-INVALID", detail=err)
+            continue
+        if res["kind"] == "ABORT":
+            for g in batches[bi:]:
+                for m in g: rec(m, "NOT-RUN", detail="aborted: queue-wait timeout on " + label)
+            state["verdict"] = "ABORTED after queue-wait timeout"; flush()
+            die(4, f"queue-wait timeout on {label}; aborting (job killed, tree restored)")
+        if res["kind"] == "CALL-REFUSED":
+            for m in group: rec(m, "CALL-REFUSED", secs=res["secs"], detail=res["detail"])
+            continue
+        fails, _ = classify(res, group[0])
+        singles_needed = False
+        if res["kind"] == "TIMEOUT":
+            if len(group) == 1:
+                rec(group[0], "TIMEOUT", secs=res["secs"], detail=res["detail"]); continue
+            singles_needed = True
+        elif len(group) > 1:
+            anyhit = any(classify(res, m)[1] for m in group)
+            if res["compile_err"] or len(fails) > 1 or (fails and not anyhit) or (not res["files"]) or \
+               (res["rc"] != 0 and not fails):
+                singles_needed = True
+        notrun = []
+        if not singles_needed and len(group) > 1 and res["kind"] == "OK":
+            notrun = [m for m in group if not res["compile_err"] and ran(res, own[m["id"]])]
+            if notrun:
+                log(f"batch {label}: NOT-RUN in batch (re-running singly): " + ",".join(m["id"] for m in notrun))
+
+        def single(m):
+            r2, e2 = run_group([m], m["id"])
+            if e2:
+                rec(m, "APPLY-INVALID", detail=e2); return
+            if r2["kind"] == "TIMEOUT":
+                rec(m, "TIMEOUT", secs=r2["secs"], detail=r2["detail"]); return
+            if r2["kind"] == "ABORT":
+                state["verdict"] = "ABORTED after queue-wait timeout"
+                for g in batches[bi:]:
+                    for m2 in g:
+                        if m2["id"] not in results: rec(m2, "NOT-RUN", detail="aborted: queue-wait timeout on " + m["id"])
+                die(4, f"queue-wait timeout on {m['id']}; aborting (job killed, tree restored)")
+            finish(m, r2, own[m["id"]], rec)
+
+        if singles_needed:
+            log(f"batch {label} ambiguous -> re-running singly")
+            for m in group:
+                single(m)
+        else:
+            for m in group:
+                if m in notrun:
+                    single(m)  # NOT-RUN in the batch: its own module did not run fresh tests; only a single run can credit it
+                else:
+                    finish(m, res, own[m["id"]], rec)
+
+    state["verdict"] = f"control OK ({ctl_n} testcases); per-mutant bound {int(bound)}s; complete"
+    if any(r["outcome"] == "TIMEOUT" for r in results.values()):
+        state["verdict"] += "  \nTIMEOUT = mutant exceeded the bound and was killed; counted as DETECTED"
+    if any(r["outcome"] == "NOT-RUN" for r in results.values()):
+        state["verdict"] += "  \nNOT-RUN = the mutant's expected tests did not run (or the run aborted); neither detected nor survived"
+    flush()
+    if porcelain(co):
+        die(3, "tree dirty at end")
+    counts = {}
+    for r in results.values(): counts[r["outcome"]] = counts.get(r["outcome"], 0) + 1
+    print(f"bb-mutate: sha={sha[:9]} control OK ({ctl_n} testcases); " +
+          " ".join(f"{k}={v}" for k, v in sorted(counts.items())) +
+          ("; TIMEOUT counted as detected" if counts.get("TIMEOUT") else "") + f"; tree clean; results={out}/results.md")
+    sys.exit(5 if counts.get("NOT-RUN") else 0)
+
+
+def finish(m, res, own, rec):
+    if res["kind"] == "CALL-REFUSED":
+        rec(m, "CALL-REFUSED", secs=res["secs"], detail=res["detail"]); return
+    fails, hit = classify(res, m)
+    common = dict(fails=fails, hit=hit, cases=len(res["cases"]), rc=res["rc"], secs=res["secs"])
+    why = ran(res, own)
+    if res["compile_err"]:
+        rec(m, "COMPILE-ERROR", detail="compiler error in build log (never RED)", **common)
+    elif not res["files"]:
+        rec(m, "NO-XML", detail=f"rc={res['rc']}; parse errors={res['bad'][:2]}", **common)
+    elif why:
+        rec(m, "NOT-RUN", detail=f"rc={res['rc']}; {why} (neither detected nor survived)", **common)
+    elif hit:
+        rec(m, "RED", **common)
+    elif res["rc"] != 0 and not fails:
+        rec(m, "BUILD-FAIL", detail=f"rc={res['rc']} with no failing testcase", **common)
+    elif fails:
+        rec(m, "SURVIVED", detail="failures none of which were expected: " + ",".join(fails[:5]), **common)
+    else:
+        rec(m, "SURVIVED", **common)
+
+
+def plan_batches(ms):
+    batches = []
+    for m in ms:
+        placed = False
+        for b in batches:
+            if compatible(b, m):
+                b.append(m); placed = True; break
+        if not placed:
+            batches.append([m])
+    return batches
+
+
+def compatible(batch, m):
+    for o in batch:
+        if o["file"] == m["file"] and o["old"] == m["old"]: return False
+        if m.get("zone") is not None and o.get("zone") == m.get("zone"): return False
+        if o.get("zone") is None and m.get("zone") is None and o["file"] == m["file"]: pass
+        for e in m["expect"]:
+            for f in o["expect"]:
+                if e.split("#")[0] == f.split("#")[0]: return False
+    return True
+
+
+def write_results(out, sha, build, muts, results, verdict, ctl_n):
+    cols = ["id", "outcome", "expected_failed", "all_failures", "testcases", "rc", "secs", "detail"]
+    with open(os.path.join(out, "results.tsv.tmp"), "w") as t, open(os.path.join(out, "results.md.tmp"), "w") as md:
+        t.write("\t".join(cols) + "\n")
+        md.write(f"# bb-mutate results\n\nSHA {sha}  \nbuild: `{json.dumps(build)}`  \n{verdict}\n\n")
+        md.write("| id | outcome | expected failed | all failures | testcases | rc | secs | detail |\n|---|---|---|---|---|---|---|---|\n")
+        for m in muts:
+            r = results.get(m["id"], dict(outcome="NOT-RUN", expected_failed=[], failures=[], cases="", rc="", secs=0, detail=""))
+            row = [m["id"], r["outcome"], ",".join(r["expected_failed"]), ",".join(r["failures"]),
+                   str(r["cases"]), str(r["rc"]), str(r["secs"]), r["detail"].replace("\t", " ").replace("\n", " ")]
+            t.write("\t".join(row) + "\n")
+            md.write("| " + " | ".join(c.replace("|", "\\|") for c in row) + " |\n")
+    for n in ("results.tsv", "results.md"):
+        os.replace(os.path.join(out, n + ".tmp"), os.path.join(out, n))
+
+
+if __name__ == "__main__":
+    main()

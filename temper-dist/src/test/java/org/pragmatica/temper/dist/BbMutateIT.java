@@ -145,7 +145,31 @@ class BbMutateIT {
         assertThat(builds()).containsExactly("[] false", "[A] false");
     }
 
+    /// Issue #46: every bb-build call carries BB_VIA=bb-mutate:<spec basename>:<label>, the label being `control` or the mutant id(s) of the run
+    /// (a batch joins them with '+', which the ticket field cannot hold, so '.'); bb-queue shows the label as [mutant <label>].
+    @Test
+    void everyBuild_carriesBbVia_withTheSpecBasenameAndTheMutantLabel() throws Exception {
+        batch(modules(null), mutation("mA", "A", "ATest", "MUT"), mutation("mC", "C", "CTest", "MUT"));
+        assertThat(Files.readAllLines(home.resolve("via.log"))).containsExactly("bb-mutate:spec:control",
+                                                                                "bb-mutate:spec:mA.mC");
+    }
+
+    /// A spec name or mutant id outside [A-Za-z0-9._-] is cut to it, and the whole value stays within the 64 bytes bb-build accepts.
+    @Test
+    void bbVia_isSanitizedAndBounded() throws Exception {
+        specName = "my spec+v1.json";
+        batch(modules(null), mutation("m_A", "A", "ATest", "MUT"), mutation("x".repeat(80), "C", "CTest", "MUT"));
+        var vias = Files.readAllLines(home.resolve("via.log"));
+
+        assertThat(vias).hasSize(2);
+        assertThat(vias.get(1)).startsWith("bb-mutate:my.spec.v1:m.A.xxx");
+        assertThat(vias).allMatch(v -> v.matches("^[A-Za-z0-9._:-]{1,64}$"));
+        assertThat(vias.get(1)).hasSize(64);
+    }
+
     // ---- harness
+    private String specName = "spec.json";
+
     private record Result(int rc, Map<String, String> outcomes, String stdout, String log, String md) {}
 
     private static String mutation(String id, String module, String test, String to) {
@@ -179,7 +203,7 @@ class BbMutateIT {
         var out = dir.resolve("out");
 
         Files.writeString(home.resolve("scenario.json"), scenario);
-        Files.writeString(dir.resolve("spec.json"), "{\"build\":{},\"mutations\":[" + String.join(",", mutations) + "]}");
+        Files.writeString(dir.resolve(specName), "{\"build\":{},\"mutations\":[" + String.join(",", mutations) + "]}");
         var env = new HashMap<String, String>();
 
         env.put("PATH", System.getenv("PATH"));
@@ -188,7 +212,7 @@ class BbMutateIT {
         var run = BbFixtures.run(List.of("python3",
                                          script.toString(),
                                          co.toString(),
-                                         dir.resolve("spec.json").toString(),
+                                         dir.resolve(specName).toString(),
                                          out.toString(),
                                          "--batch"),
                                  env,
