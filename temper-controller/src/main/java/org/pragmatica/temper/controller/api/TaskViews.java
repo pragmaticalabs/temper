@@ -87,6 +87,9 @@ sealed interface TaskViews {
 
     /// The clock is the report's `lastHbAt`: written by every claim and heartbeat, and for a task LEASED before V20 by V20's
     /// one-time backfill from `task_events`. Nothing else restarts it (a linked submit or evidence extends the TTL only).
+    /// A LEASED task with no report row has no `hbAge` and is not `stale`: V20's backfill leaves no leased task without a
+    /// row, and a row appears at the first claim or heartbeat. The lease's TTL is deliberately not used as a clock (per stage,
+    /// and restarted by every controller start, it would show a dead lane as fresh).
     private static Option<Long> hbAge(TaskRow row, TaskReport report, Instant now) {
         return row.state()
                   .status() == Status.LEASED
