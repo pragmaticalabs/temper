@@ -188,6 +188,9 @@ class BbInstallIT {
         assertThat(pin("BB_TICKETS_PRE31")).isEqualTo(BbFixtures.md5(prev("bb-tickets.pre31")));
         assertThat(pin("BB_BUILD_PRERC")).isEqualTo(BbFixtures.md5(prev("bb-build.prerc")));
         assertThat(pin("BB_QUEUE_PRERC")).isEqualTo(BbFixtures.md5(prev("bb-queue.prerc")));
+        assertThat(pin("BB_BUILD_PREVIA")).isEqualTo(BbFixtures.md5(prev("bb-build.previa")));
+        assertThat(pin("BB_QUEUE_PREVIA")).isEqualTo(BbFixtures.md5(prev("bb-queue.previa")));
+        assertThat(pin("BB_MUTATE_PREVIA")).isEqualTo(BbFixtures.md5(prev("bb-mutate.previa")));
         assertThat(pin("BB_LIB_PRERC")).isEqualTo(BbFixtures.md5(prev("bb-queue-lib.sh.prerc")));
         assertThat(pin("BB_WAIT_PRERC")).isEqualTo(BbFixtures.md5(prev("bb-wait.prerc")));
         assertThat(pin("BB_HOLD_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-hold")));
@@ -356,6 +359,7 @@ class BbInstallIT {
 
         assertThat(install("builder@h1").rc()).isZero();
         var names = List.of("bb-build", "bb-queue", "bb-queue-lib.sh", "bb-wait");
+
         for (var name : names) {
             Files.write(tools.resolve(name), prev(name + ".prerc"));
         }
@@ -364,11 +368,41 @@ class BbInstallIT {
 
         assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
         for (var name : names) {
-            var key = (name.equals("bb-queue-lib.sh") ? "BB_LIB" : name.toUpperCase().replace('-', '_')) + "_";
+            var key = (name.equals("bb-queue-lib.sh")
+                       ? "BB_LIB"
+                       : name.toUpperCase().replace('-', '_')) + "_";
 
-            assertThat(run.stdout()).contains("installed builder@h1 " + name + " before=" + pin(key + "PRERC") + " after=" + pin(key + "NEW"));
+            assertThat(run.stdout()).contains("installed builder@h1 " + name
+                                             + " before=" + pin(key + "PRERC")
+                                             + " after=" + pin(key + "NEW"));
             assertThat(tools.resolve(name)).hasBinaryContent(Files.readAllBytes(OPS_BB.resolve(name)));
             assertThat(tools.resolve(name + ".bak-" + pin(key + "PRERC"))).hasBinaryContent(prev(name + ".prerc"));
+        }
+    }
+
+    /// The bb-build, bb-queue and bb-mutate before issue #46 (BB_*_PREVIA: no via= field, no [mutant] mark, no BB_VIA) are accepted sources and are replaced, backed up under their md5.
+    @Test
+    void aHostRunningThePreViaTools_isUpdatedToTheOnesThatMarkMutantRuns() throws Exception {
+        var tools = host("h1");
+
+        assertThat(install("builder@h1").rc()).isZero();
+        var names = List.of("bb-build", "bb-queue", "bb-mutate");
+
+        for (var name : names) {
+            Files.write(tools.resolve(name), prev(name + ".previa"));
+        }
+
+        var run = install("builder@h1");
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        for (var name : names) {
+            var key = name.toUpperCase().replace('-', '_') + "_";
+
+            assertThat(run.stdout()).contains("installed builder@h1 " + name
+                                             + " before=" + pin(key + "PREVIA")
+                                             + " after=" + pin(key + "NEW"));
+            assertThat(tools.resolve(name)).hasBinaryContent(Files.readAllBytes(OPS_BB.resolve(name)));
+            assertThat(tools.resolve(name + ".bak-" + pin(key + "PREVIA"))).hasBinaryContent(prev(name + ".previa"));
         }
     }
 
@@ -471,6 +505,7 @@ class BbInstallIT {
                                                                  + "|a1100c916b866ad3716bc4095ddb1991|cae49573d06f632d3081f7d5be1e9b66|" + pin("BB_BUILD_LIVE")
                                                                  + "|" + pin("BB_BUILD_PRE31")
                                                                  + "|" + pin("BB_BUILD_PRERC")
+                                                                 + "|" + pin("BB_BUILD_PREVIA")
                                                                  + "|" + pin("BB_BUILD_NEW"));
         assertThat(listing(good)).isEqualTo(goodBefore);
         assertThat(listing(diverged)).isEqualTo(divergedBefore);
@@ -512,6 +547,7 @@ class BbInstallIT {
                            + "|a04b7be02f840d4f1e2bd19c54c52b3f|" + pin("BB_QUEUE_LIVE")
                            + "|" + pin("BB_QUEUE_PRE31")
                            + "|" + pin("BB_QUEUE_PRERC")
+                           + "|" + pin("BB_QUEUE_PREVIA")
                            + "|" + pin("BB_QUEUE_NEW"));
     }
 

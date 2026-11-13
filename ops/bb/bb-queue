@@ -32,6 +32,8 @@ num() { case "$1" in ''|*[!0-9]*) return 1;; esac; }
 snap() { T_SNAP=$(cat "$1" 2>/dev/null) && [ -n "$T_SNAP" ]; }
 fv() { printf '%s\n' "$T_SNAP" | sed -n "s/^$1=//p" | tail -1; }
 age() { num "$1" || { printf '?'; return; }; local s=$(( $(date +%s) - $1 )); printf '%dh%02dm' $((s / 3600)) $((s % 3600 / 60)); }
+# mutant_tag: " [mutant <id>]" for a ticket bb-mutate submitted (via=bb-mutate:<spec>:<id>, issue #46: a red run there is expected, not a retry loop), else nothing
+mutant_tag() { case "$1" in bb-mutate:*:?*) local m=${1#bb-mutate:}; printf ' [mutant %s]' "${m#*:}";; esac; }
 row() { printf '%-28s %-8s %4s %-13s %s  %s\n' "$@"; }
 
 # cancel_waiting <ticket file>: caller holds the lock and has checked the owner.
@@ -128,6 +130,7 @@ for f in "$Q"/running/*; do
   snap "$f" || continue; TRACKED=$((TRACKED + 1))
   s=""; waiter_alive "${f##*/}" || s=" [waiter gone]"; if [ "$(fv group)" = 1 ]; then if [ "$(fv iso)" = 1 ]; then s="$s [port-group slot $(fv group_slot)/$(pg_slots), isolated netns]"; else s="$s [port-group host-exclusive]"; fi; fi
   [ "$(fv requireDocker)" = 0 ] && s="$s [no-requireDocker]"
+  s="$s$(mutant_tag "$(fv via)")"
   [ -n "$(fv load_override)" ] && s="$s [granted by load override: $(fv load_override | cut -d' ' -f2-3)]"
   row "${f##*/}" "$(fv owner)" "$(prio "$(fv owner)" "$(fv sha)")" "$(age "$(fv started)")" "$(basename "$(fv co)")" "$(fv args)$s"
 done
@@ -155,5 +158,5 @@ for id in $(ls -t "$Q"/done/ 2>/dev/null | head -n "$N"); do
   f=$Q/done/$id; st=$(field "$f" started); en=$(field "$f" ended)
   w=-; num "$st" && num "$en" && w=$(( (en - st) / 60 ))m
   printf '%-10s %-6s ' "$(field "$f" state)" "$(field "$f" rc)"
-  row "$id" "$(field "$f" owner)" "$w" "$(age "$en") ago" "$(basename "$(field "$f" co)")" "$(field "$f" args)"
+  row "$id" "$(field "$f" owner)" "$w" "$(age "$en") ago" "$(basename "$(field "$f" co)")" "$(field "$f" args)$(mutant_tag "$(field "$f" via)")"
 done
