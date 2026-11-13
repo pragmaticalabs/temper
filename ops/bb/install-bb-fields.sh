@@ -2,7 +2,7 @@
 # install-bb-fields.sh -- installs the reviewed ops/bb/bb-build (ticket owner fields, T3), ops/bb/bb-tickets and, since
 # 2026-11-09 (orphan-ticket fix), ops/bb/bb-queue-lib.sh and ops/bb/bb-queue into ~/tools on bb hosts. Since 2026-11-11 (queue
 # tools: load gate, port groups) the set also holds bb-hold, bb-wait, bb-netns-run and bb-portgroup.py, which the new bb-build and
-# bb-queue call. The host's operator runs it, after the diff and md5s have been reviewed. Nothing in a build or a test ever runs it against a real host.
+# bb-queue call. Since the bb-mutate batch fix it also holds bb-mutate (the mutation-testing harness; nothing else calls it). The host's operator runs it, after the diff and md5s have been reviewed. Nothing in a build or a test ever runs it against a real host.
 #
 # Usage: install-bb-fields.sh user@address [user@address ...]     at least one target; there is no default host
 #   Each target matches ^[a-z_][a-z0-9_-]{0,31}@[A-Za-z0-9.:-]+$. The md5 precondition is PER HOST: a host whose files differ
@@ -10,13 +10,13 @@
 #   Ssh: ssh -i <key> -o BatchMode=yes -o ConnectTimeout=15 <target> <cmd>, <key> from the `key` line of the bb host config
 #   (~/.config/bb-temper/hosts or BB_TEMPER_HOSTS; ops/bb/hosts.example; none: exit 78). BB_INSTALL_SSH (tests only) replaces
 #   everything before <target>, and then no config is read.
-# Phase 0, local: the eight files of ops/bb (next to this script) named below must be the pinned reviewed files, else exit 65
+# Phase 0, local: the nine files of ops/bb (next to this script) named below must be the pinned reviewed files, else exit 65
 #   with no ssh made.
-# Phase 1, read-only, EVERY target first: installed bb-build is one of BB_BUILD_OLD|MID|PREV|LIVE|PRE31|NEW, bb-queue-lib.sh one of BB_LIB_OLD|PREV|NEW,
-#   bb-queue one of BB_QUEUE_OLD|PREV|LIVE|PRE31|NEW, bb-tickets is absent, BB_TICKETS_OLD|PRE31|NEW, bb-hold is absent, BB_HOLD_OLD (the 2026-11-09
-#   host snapshot) or BB_HOLD_NEW, bb-wait is absent or its NEW, bb-netns-run is absent, BB_NETNS_PREV or BB_NETNS_NEW, bb-portgroup.py is absent, BB_PORTGROUP_PREV or BB_PORTGROUP_NEW. Any mismatch prints `refused <target> <file> installed=<md5|absent>
+# Phase 1, read-only, EVERY target first: installed bb-build is one of BB_BUILD_OLD|MID|PREV|LIVE|PRE31|PRERC|NEW, bb-queue-lib.sh one of BB_LIB_OLD|PREV|PRERC|NEW,
+#   bb-queue one of BB_QUEUE_OLD|PREV|LIVE|PRE31|PRERC|NEW, bb-tickets is absent, BB_TICKETS_OLD|PRE31|NEW, bb-hold is absent, BB_HOLD_OLD (the 2026-11-09
+#   host snapshot) or BB_HOLD_NEW, bb-wait is absent, BB_WAIT_PRERC or its NEW, bb-netns-run is absent, BB_NETNS_PREV or BB_NETNS_NEW, bb-portgroup.py is absent, BB_PORTGROUP_PREV or BB_PORTGROUP_NEW, bb-mutate is absent, BB_MUTATE_OLD or BB_MUTATE_NEW. Any mismatch prints `refused <target> <file> installed=<md5|absent>
 #   expected=<pin>[|<pin>...]` (every accepted pin except `absent`, in the order above) for every mismatch on every target and exits 65 having written nothing anywhere; an unreachable target is 69.
-# Phase 2, per target and per file to change (bb-tickets, bb-hold, bb-wait, bb-netns-run, bb-portgroup.py, bb-queue-lib.sh, bb-queue,
+# Phase 2, per target and per file to change (bb-mutate, bb-tickets, bb-hold, bb-wait, bb-netns-run, bb-portgroup.py, bb-queue-lib.sh, bb-queue,
 #   then bb-build: the helpers and the lib before the tools that call or source them), one remote `bash -s` script: receive the file as
 #   ~/tools/<f>.new (base64 on stdin); its md5 must be the pinned one; re-check that the installed file is still what phase 1
 #   saw (closes the race with phase 1); chmod 0755; cp -p an existing file (not bb-tickets) to <f>.bak-<oldmd5> (an existing .bak of that name is
@@ -34,27 +34,33 @@ set -euo pipefail
 readonly BB_BUILD_OLD=999aa32577930aaf715ed4ce7c31fe02
 readonly BB_LIB_OLD=814400ff1d980be4b2da3e8e0ec62644
 readonly BB_LIB_PREV=621b2252c3da05e7dd1161d076908864   # the 2026-11-09 orphan-ticket version (cloudbb-3 holds it)
-readonly BB_LIB_NEW=d890115b62a8af7583a18a7eddd75bab
+readonly BB_LIB_PRERC=d890115b62a8af7583a18a7eddd75bab   # live on all four hosts from 2026-11-12: the ticket rc= is read from .bb/rc (replaced by the exit-status record)
+readonly BB_LIB_NEW=a8fb757b12597e167b9804f7d14327e0
 readonly BB_QUEUE_OLD=7efbfbecb9739fed35223cdc97eb185d
 readonly BB_QUEUE_PREV=a04b7be02f840d4f1e2bd19c54c52b3f
 readonly BB_QUEUE_LIVE=af86457ae18f4ca331e47137cd088bc7   # what the 2026-11-11 hosts run: its header says `group tickets running:`, which the worker cannot parse
 readonly BB_QUEUE_PRE31=45514cb5a7e737fc773929812bcdc5f7   # live on all four hosts since 2026-11-12: no [no-requireDocker] mark
-readonly BB_QUEUE_NEW=5691f8d57fc2d88e18d23ab33fc98b75
+readonly BB_QUEUE_PRERC=5691f8d57fc2d88e18d23ab33fc98b75   # live on all four hosts from 2026-11-12: the ticket rc= is read from .bb/rc (replaced by the exit-status record)
+readonly BB_QUEUE_NEW=617b0bff8c73753e4a8e8b57201192ab
 readonly BB_BUILD_MID=a1100c916b866ad3716bc4095ddb1991   # the T3 fields version, before the waiter's first-writer-wins guard
 readonly BB_BUILD_PREV=cae49573d06f632d3081f7d5be1e9b66
 readonly BB_BUILD_LIVE=015b2a2261a6789c5af215b3745a2b84   # what c3/c4/d1 run since 2026-11-11: no requireDocker flag
 readonly BB_BUILD_PRE31=6abf8a6e0ae685dd7dbf32372f317883   # live on all four hosts since 2026-11-12: requireDocker flag always on
-readonly BB_BUILD_NEW=50920a7137f237aaa512d84d117ad4f2
+readonly BB_BUILD_PRERC=50920a7137f237aaa512d84d117ad4f2   # live on all four hosts from 2026-11-12: the ticket rc= is read from .bb/rc (replaced by the exit-status record)
+readonly BB_BUILD_NEW=01e0bc34ea0effa8a8273a781f8ea52d
 readonly BB_TICKETS_OLD=472cd816644fe0ee0902b8da3d33de8e   # before the per-ticket progressAt (issue #10)
 readonly BB_TICKETS_PRE31=e1aeba98541ba781295001f956b08c8d   # live since 2026-11-12: drops a ticket key with a capital letter
 readonly BB_TICKETS_NEW=6174119f0cd567c5dc462d1e063c6214
 readonly BB_HOLD_OLD=0bc2401b6e94fd05b66e1df04387e2ac   # the 2026-11-09 host snapshot
 readonly BB_HOLD_NEW=3561bb8e22fc2f7f3e98dc795f31eecb
-readonly BB_WAIT_NEW=da248f0b4f9248f2bfed64330b3ca66e
+readonly BB_WAIT_PRERC=da248f0b4f9248f2bfed64330b3ca66e   # live on all four hosts from 2026-11-12: the ticket rc= is read from .bb/rc (replaced by the exit-status record)
+readonly BB_WAIT_NEW=d5b0ff8d43994a78cd188b4a41fcd995
 readonly BB_NETNS_PREV=9661165d4ef938ea43eec5b8d2d619d9   # 2026-11-11: no docker socket in the container; live on c3/c4/d1
 readonly BB_NETNS_NEW=bf05b7c51c2f7863ee685a195273e195
 readonly BB_PORTGROUP_PREV=a93ade2ff7dddcc75cee3d4169a08499   # the 2026-11-09 host snapshot, live on c4/d1 since 2026-11-11
 readonly BB_PORTGROUP_NEW=884caf3cf37b12cf5cf1d97e96f76a4c
+readonly BB_MUTATE_OLD=f9bfbd37c5feafe67995f6716e8fecb0   # the host snapshot, identical on all four hosts: batch credit unsound for multi-module specs
+readonly BB_MUTATE_NEW=2c341d44d428ba445db7ea03ee90af64
 readonly TARGET_RE='^[a-z_][a-z0-9_-]{0,31}@[A-Za-z0-9.:-]+$'
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -71,24 +77,27 @@ done
 
 # The files, in install order (helpers and the lib before the tools that call or source them), with what each may be on a host.
 # absent_ok: the file may be missing. bash 3.2 compatible: no associative arrays.
-FILES=(bb-tickets bb-hold bb-wait bb-netns-run bb-portgroup.py bb-queue-lib.sh bb-queue bb-build)
-PROBE_ORDER=(bb-build bb-queue-lib.sh bb-queue bb-tickets bb-hold bb-wait bb-netns-run bb-portgroup.py)   # refusal lines come in this order
+FILES=(bb-mutate bb-tickets bb-hold bb-wait bb-netns-run bb-portgroup.py bb-queue-lib.sh bb-queue bb-build)
+PROBE_ORDER=(bb-build bb-queue-lib.sh bb-queue bb-tickets bb-hold bb-wait bb-netns-run bb-portgroup.py bb-mutate)   # refusal lines come in this order
 new_of() {
   case $1 in
     bb-build) echo "$BB_BUILD_NEW" ;; bb-queue-lib.sh) echo "$BB_LIB_NEW" ;; bb-queue) echo "$BB_QUEUE_NEW" ;;
     bb-tickets) echo "$BB_TICKETS_NEW" ;; bb-hold) echo "$BB_HOLD_NEW" ;; bb-wait) echo "$BB_WAIT_NEW" ;;
     bb-netns-run) echo "$BB_NETNS_NEW" ;; bb-portgroup.py) echo "$BB_PORTGROUP_NEW" ;;
+    bb-mutate) echo "$BB_MUTATE_NEW" ;;
   esac
 }
 accepted_of() {  # the md5s a host may hold besides absent, in the order the refusal names them
   case $1 in
-    bb-build) echo "$BB_BUILD_OLD $BB_BUILD_MID $BB_BUILD_PREV $BB_BUILD_LIVE $BB_BUILD_PRE31 $BB_BUILD_NEW" ;;
-    bb-queue-lib.sh) echo "$BB_LIB_OLD $BB_LIB_PREV $BB_LIB_NEW" ;;
-    bb-queue) echo "$BB_QUEUE_OLD $BB_QUEUE_PREV $BB_QUEUE_LIVE $BB_QUEUE_PRE31 $BB_QUEUE_NEW" ;;
+    bb-build) echo "$BB_BUILD_OLD $BB_BUILD_MID $BB_BUILD_PREV $BB_BUILD_LIVE $BB_BUILD_PRE31 $BB_BUILD_PRERC $BB_BUILD_NEW" ;;
+    bb-queue-lib.sh) echo "$BB_LIB_OLD $BB_LIB_PREV $BB_LIB_PRERC $BB_LIB_NEW" ;;
+    bb-queue) echo "$BB_QUEUE_OLD $BB_QUEUE_PREV $BB_QUEUE_LIVE $BB_QUEUE_PRE31 $BB_QUEUE_PRERC $BB_QUEUE_NEW" ;;
     bb-hold) echo "$BB_HOLD_OLD $BB_HOLD_NEW" ;;
     bb-tickets) echo "$BB_TICKETS_OLD $BB_TICKETS_PRE31 $BB_TICKETS_NEW" ;;
     bb-portgroup.py) echo "$BB_PORTGROUP_PREV $BB_PORTGROUP_NEW" ;;
     bb-netns-run) echo "$BB_NETNS_PREV $BB_NETNS_NEW" ;;
+    bb-wait) echo "$BB_WAIT_PRERC $BB_WAIT_NEW" ;;
+    bb-mutate) echo "$BB_MUTATE_OLD $BB_MUTATE_NEW" ;;
     *) new_of "$1" ;;
   esac
 }
@@ -115,7 +124,7 @@ else
 fi
 
 # ---- phase 1: read-only, every target
-PROBE='for f in bb-build bb-queue-lib.sh bb-queue bb-tickets bb-hold bb-wait bb-netns-run bb-portgroup.py; do
+PROBE='for f in bb-build bb-queue-lib.sh bb-queue bb-tickets bb-hold bb-wait bb-netns-run bb-portgroup.py bb-mutate; do
   if [ -f "$HOME/tools/$f" ]; then printf "%s %s\n" "$f" "$(md5sum < "$HOME/tools/$f" | cut -d" " -f1)"; else printf "%s absent\n" "$f"; fi
 done'
 INST=()   # per target and file (FILES order): the installed md5 (or absent), as phase 1 saw it, at index target * ${#FILES[@]} + file

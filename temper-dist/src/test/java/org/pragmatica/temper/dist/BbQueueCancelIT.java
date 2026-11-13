@@ -362,9 +362,10 @@ class BbQueueCancelIT {
         assertThat(live(stubborn.pid())).isTrue();
     }
 
-    /// F2: the build wrote its own rc for THIS run (.bb/start == started) before the cancel: kept, nothing killed, recorded as too late.
+    /// F2 (vt42 finding 1): the build wrote .bb/rc for THIS run (.bb/start == started) before the cancel: nothing killed, recorded as too late,
+    /// but the file is a copy a lane can rewrite, so the ticket is ORPHANED with no rc (bb-wait exits 70), never `rc=<file>`.
     @Test
-    void cancelRunning_keepsTheRealRcOfABuildThatAlreadyFinished() throws Exception {
+    void cancelRunning_tooLate_isOrphanedWithNoRc_neverTheFilesValue() throws Exception {
         var co = checkout("co1");
         var id = "100-" + RUN;
 
@@ -379,12 +380,12 @@ class BbQueueCancelIT {
         var run = queue(ME, Map.of(), "cancel", "--running", id);
 
         assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
-        assertThat(run.stdout()).contains("too late").contains("rc=0");
+        assertThat(run.stdout()).contains("too late").doesNotContain("rc=");
         assertThat(Files.readString(b.resolve("rc")).strip()).isEqualTo("0");
         assertThat(b.resolve("end")).doesNotExist();
         assertThat(live(bystander.pid())).as("already finished: nothing is killed").isTrue();
-        assertThat(field("done", id, "rc")).isEqualTo("0");
-        assertThat(field("done", id, "state")).isEqualTo("finished");
+        assertThat(field("done", id, "rc")).as("the file's 0 is not a verdict").isEmpty();
+        assertThat(field("done", id, "state")).isEqualTo("orphaned");
         assertThat(field("done", id, "cancel")).startsWith("too-late");
         assertThat(queue.resolve("running").resolve(id)).doesNotExist();
     }
@@ -453,7 +454,7 @@ class BbQueueCancelIT {
         assertThat(waiter.waitFor(20, TimeUnit.SECONDS)).as("waiter exits").isTrue();
         assertThat(waiter.exitValue()).isZero();
         assertThat(field("done", id, "cancel")).as("the cancel's record survives").startsWith("too-late");
-        assertThat(field("done", id, "rc")).isEqualTo("0");
+        assertThat(field("done", id, "rc")).isEmpty();
         assertThat(Files.readAllLines(queue.resolve("done").resolve(id))).as("no second finished record appended")
                   .doesNotContain("ended=");
         assertThat(queue.resolve("running").resolve(id)).as("no ticket resurrected").doesNotExist();
@@ -480,7 +481,7 @@ class BbQueueCancelIT {
 
     /// The race: the build finishes and writes its rc while the kill grace runs (the process ignores TERM, so the grace lasts seconds).
     @Test
-    void cancelRunning_keepsTheRealRcWrittenInsideTheKillGrace() throws Exception {
+    void cancelRunning_rcWrittenInsideTheKillGrace_isOrphanedWithNoRc() throws Exception {
         var co = checkout("co1");
         var id = "100-" + RUN;
 
@@ -505,10 +506,11 @@ class BbQueueCancelIT {
 
         writer.join();
         assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
-        assertThat(run.stdout()).contains("too late").contains("rc=3");
+        assertThat(run.stdout()).contains("too late").doesNotContain("rc=");
         assertThat(Files.readString(b.resolve("rc")).strip()).isEqualTo("3");
         assertThat(b.resolve("end")).doesNotExist();
-        assertThat(field("done", id, "rc")).isEqualTo("3");
+        assertThat(field("done", id, "rc")).isEmpty();
+        assertThat(field("done", id, "state")).isEqualTo("orphaned");
         assertThat(field("done", id, "cancel")).startsWith("too-late");
         assertThat(field("done", id, "cancel")).as("the stubborn process was killed in the window")
                   .matches("too-late killed=\\d+.*");

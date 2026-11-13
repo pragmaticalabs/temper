@@ -9,10 +9,10 @@
 #   check it. The config is read only when a place needs it (no places, a host name, or user@address without BB_DRIFT_SSH).
 #   BB_DRIFT_SSH (tests only) replaces everything before <target> in the ssh call.
 # Every file in a host's ~/tools falls in exactly one class:
-#   repo-sourced    bb-build bb-tickets bb-queue-lib.sh bb-queue bb-hold bb-wait bb-netns-run bb-portgroup.py bb-checkout bb-probe-reap (ops/bb), kiln-scan kiln-ingest (ops/kiln): compared to the md5
+#   repo-sourced    bb-build bb-tickets bb-queue-lib.sh bb-queue bb-hold bb-wait bb-netns-run bb-portgroup.py bb-checkout bb-probe-reap bb-mutate (ops/bb), kiln-scan kiln-ingest (ops/kiln): compared to the md5
 #                   of the repo file; a mismatch or an absent file is `drift`. The ops/bb pins in install-bb-fields.sh are reused:
 #                   a repo file that is not at its pin is itself reported (place `repo`).
-#   no-repo-source  the host-only tools below (the 2026-11-09 snapshot minus bb-hold and bb-portgroup.py, vendored 2026-11-11; identical on all 3 hosts): at
+#   no-repo-source  the host-only tools below (the 2026-11-09 snapshot minus bb-hold and bb-portgroup.py, vendored 2026-11-11, and bb-mutate, imported with the batch fix; identical on all 3 hosts): at
 #                   the pin it prints `vendor ... to be vendored (PR next)` (informational, not drift); off the pin it is `drift`;
 #                   absent is fine. This class goes away when the vendoring PR lands.
 #   unlisted        any other file: `unlisted <place> <file> md5=<md5|dir>`, exit 1.
@@ -33,13 +33,12 @@ PROG=bb-drift
 readonly TARGET_RE='^[a-z_][a-z0-9_-]{0,31}@[A-Za-z0-9.:-]+$'
 HERE=$(cd "$(dirname "$0")" && pwd)
 KILN_SCAN=$HERE/../kiln/kiln-scan
-HOST_FILES=(bb-build bb-tickets bb-queue-lib.sh bb-queue bb-hold bb-wait bb-netns-run bb-portgroup.py kiln-scan kiln-ingest bb-checkout bb-probe-reap)
+HOST_FILES=(bb-build bb-tickets bb-queue-lib.sh bb-queue bb-hold bb-wait bb-netns-run bb-portgroup.py kiln-scan kiln-ingest bb-checkout bb-probe-reap bb-mutate)
 
 vendor_pin() {  # vendor_pin <file>: the pinned md5 of a host-only tool; fails for any other name
   case $1 in
     bb-build-direct) echo 50aa0b772fa7f916e2983be40e328b32 ;;
     bb-hold-test.sh) echo 0f774ba7a36f0734077704319393892e ;;
-    bb-mutate) echo f9bfbd37c5feafe67995f6716e8fecb0 ;;
     bb-report) echo 63b01be0cf9b6fab8c4f523118025a8c ;;
     bb-sockwatch) echo cdcd6dc4958b5c77493d76fcb31cabfe ;;
     *) return 1 ;;
@@ -48,7 +47,7 @@ vendor_pin() {  # vendor_pin <file>: the pinned md5 of a host-only tool; fails f
 
 is_backup() {  # is_backup <file>: <known>.bak* or <known>.pre-*, <known> a repo-sourced or pinned tool name
   local k
-  for k in "${HOST_FILES[@]}" bb-build-direct bb-hold-test.sh bb-mutate bb-report bb-sockwatch; do
+  for k in "${HOST_FILES[@]}" bb-build-direct bb-hold-test.sh bb-report bb-sockwatch; do
     case $1 in "$k".bak*|"$k".pre-*) return 0 ;; esac
   done
   return 1
@@ -137,7 +136,7 @@ drift=0; down=0
 # ---- the repo's own pins: a repo file off its pin is drift of the repo itself
 pin_of() { sed -n "s/^readonly $1=\([0-9a-f]\{32\}\)\$/\1/p" "$HERE/install-bb-fields.sh" | head -n 1; }
 for pair in bb-build:BB_BUILD_NEW bb-tickets:BB_TICKETS_NEW bb-queue-lib.sh:BB_LIB_NEW bb-queue:BB_QUEUE_NEW bb-hold:BB_HOLD_NEW \
-            bb-wait:BB_WAIT_NEW bb-netns-run:BB_NETNS_NEW bb-portgroup.py:BB_PORTGROUP_NEW; do
+            bb-wait:BB_WAIT_NEW bb-netns-run:BB_NETNS_NEW bb-portgroup.py:BB_PORTGROUP_NEW bb-mutate:BB_MUTATE_NEW; do
   f=${pair%%:*}; pin=$(pin_of "${pair##*:}"); have=$(md5_of "$HERE/$f")
   if [ "$pin" != "$have" ]; then echo "drift repo $f installed=$have expected=$pin"; drift=1; fi
 done

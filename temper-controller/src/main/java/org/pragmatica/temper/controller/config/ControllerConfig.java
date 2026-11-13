@@ -344,8 +344,11 @@ public record ControllerConfig(String version,
                         Option<Path> bbKnownHosts,
                         int queueWaitAlarmMin,
                         int portGroupStallAlarmMin,
-                        int portGroupHeldAgeAlarmMin) {
+                        int portGroupHeldAgeAlarmMin,
+                        int laneStaleMin) {
         public static final int DEFAULT_QUEUE_WAIT_ALARM_MIN = 60;
+        /// `laneStaleMin`: a LEASED task with no heartbeat for more than this many minutes shows `stale` (lane registry).
+        public static final int DEFAULT_LANE_STALE_MIN = 20;
         public static final int DEFAULT_PORTGROUP_STALL_ALARM_MIN = 30;
         public static final int DEFAULT_PORTGROUP_HELD_AGE_ALARM_MIN = 360;
         public static final int MAX_ALARM_MIN = 10080;
@@ -382,6 +385,26 @@ public record ControllerConfig(String version,
                                   int queueWaitAlarmMin,
                                   int portGroupStallAlarmMin,
                                   int portGroupHeldAgeAlarmMin) {
+            return fleet(kilnUrl,
+                         stateDir,
+                         bbHosts,
+                         bbScanKey,
+                         bbKnownHosts,
+                         queueWaitAlarmMin,
+                         portGroupStallAlarmMin,
+                         portGroupHeldAgeAlarmMin,
+                         DEFAULT_LANE_STALE_MIN);
+        }
+
+        public static Fleet fleet(Option<URI> kilnUrl,
+                                  Path stateDir,
+                                  List<BbHost> bbHosts,
+                                  Option<Path> bbScanKey,
+                                  Option<Path> bbKnownHosts,
+                                  int queueWaitAlarmMin,
+                                  int portGroupStallAlarmMin,
+                                  int portGroupHeldAgeAlarmMin,
+                                  int laneStaleMin) {
             return new Fleet(kilnUrl,
                              stateDir,
                              bbHosts,
@@ -389,7 +412,8 @@ public record ControllerConfig(String version,
                              bbKnownHosts,
                              queueWaitAlarmMin,
                              portGroupStallAlarmMin,
-                             portGroupHeldAgeAlarmMin);
+                             portGroupHeldAgeAlarmMin,
+                             laneStaleMin);
         }
 
         /// No kiln pull and no bb hosts; the state directory beside the evidence root.

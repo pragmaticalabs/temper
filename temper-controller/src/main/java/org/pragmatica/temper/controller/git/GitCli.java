@@ -110,6 +110,39 @@ public record GitCli(ProcessRunner runner, String origin, Path mirror, Serial se
                     .flatMap(this::tip);
     }
 
+    /// `merge-base --is-ancestor <sha> refs/heads/<branch>` after the fetch `branchTip` makes: exit 0 yes, 1 no. An object the
+    /// mirror lacks is "no" once `rev-parse --git-dir` confirms the mirror is healthy (as [#containedIfPresent]); any other
+    /// failure is a [GitError].
+    @Override
+    public Promise<Boolean> branchContains(Ref branch, Sha sha) {
+        return branchTip(branch).flatMap(tip -> tip.map(_ -> ancestorOf(branch, sha))
+                                                   .or(() -> Promise.success(false)));
+    }
+
+    private Promise<Boolean> ancestorOf(Ref branch, Sha sha) {
+        return git("cat-file", catFile(sha), QUICK).flatMap(catFile -> catFile.rc() == 0
+                                                                       ? isAncestor(branch, sha)
+                                                                       : healthyMirror().map(_ -> false));
+    }
+
+    private Promise<Boolean> isAncestor(Ref branch, Sha sha) {
+        return git("merge-base",
+                   List.of("git",
+                           "--git-dir",
+                           mirror.toString(),
+                           "merge-base",
+                           "--is-ancestor",
+                           sha.value(),
+                           BRANCHES + "/" + branch.value()),
+                   QUICK).flatMap(GitCli::ancestry);
+    }
+
+    private static Promise<Boolean> ancestry(Completed completed) {
+        return completed.rc() == 0 || completed.rc() == NO_MATCH
+               ? Promise.success(completed.rc() == 0)
+               : succeeded("merge-base", completed).map(_ -> false);
+    }
+
     private Promise<Option<Sha>> tip(Completed completed) {
         return completed.rc() == NO_MATCH
                ? Promise.success(none())
