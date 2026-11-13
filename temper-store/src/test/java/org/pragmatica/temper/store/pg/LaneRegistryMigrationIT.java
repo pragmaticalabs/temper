@@ -54,6 +54,7 @@ class LaneRegistryMigrationIT {
         var claimOnly = leasedTask("claim", 1);
         var extendedAfter = leasedTask("ext", 1);
         var noEvent = leasedTask("none", 1);
+        var olderEpochOnly = leasedTask("older", 2);
         var ready = readyTask("ready");
 
         event(heartbeated, "leased", 1, "2026-11-01 10:00:00+00");
@@ -64,6 +65,7 @@ class LaneRegistryMigrationIT {
         event(claimOnly, "leased", 1, "2026-11-01 09:00:00+00");
         event(extendedAfter, "leased", 1, "2026-11-01 09:00:00+00");
         event(extendedAfter, "lease-extended", 1, "2026-11-01 12:00:00+00");
+        event(olderEpochOnly, "heartbeat", 1, "2026-11-01 10:30:00+00");
         event(ready, "heartbeat", 0, "2026-11-01 08:00:00+00");
         migrateAll();
         assertThat(lastHb(heartbeated)).as("latest heartbeat of epoch 2, not the older epoch's, not job-linked")
@@ -72,6 +74,8 @@ class LaneRegistryMigrationIT {
         assertThat(lastHb(extendedAfter)).as("controller-start extension is not a heartbeat")
                   .isEqualTo("2026-11-01 09:00:00+00");
         assertThat(lastHb(noEvent)).as("no event, no row").isEqualTo("none");
+        assertThat(lastHb(olderEpochOnly)).as("only an older epoch's heartbeat: that holder is gone, no row")
+                  .isEqualTo("none");
         assertThat(lastHb(ready)).as("not leased, no row").isEqualTo("none");
     }
 
