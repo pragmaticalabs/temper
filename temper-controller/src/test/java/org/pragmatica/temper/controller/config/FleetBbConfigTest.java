@@ -106,10 +106,20 @@ class FleetBbConfigTest {
         logger.addAppender(appender);
         try {
             parse("kilnUrl = \"http://kiln:9\"\nstateDir = \"/var/lib/temper\"\nbbHosts = [\"oldbox\"]\n" + KEYS
-                 + "queueWaitAlarmMin = 60\nportGroupStallAlarmMin = 30\nportGroupHeldAgeAlarmMin = 360\n").unwrap();
+                 + "queueWaitAlarmMin = 60\nportGroupStallAlarmMin = 30\nportGroupHeldAgeAlarmMin = 360\nlaneStaleMin = 20\n").unwrap();
             assertThat(appender.list).isEmpty();
         } finally {
             logger.detachAppender(appender);
         }
+    }
+
+    /// `[fleet] laneStaleMin`: default 20, a whole number of minutes from 1; 0 or text refuses the start.
+    /// Mutation: make the loader ignore the key → the 45 case is red.
+    @Test
+    void laneStaleMin_defaultsTo20_isRead_andRefusesZeroOrText() {
+        assertThat(parse("").unwrap().fleet().laneStaleMin()).isEqualTo(20);
+        assertThat(parse("laneStaleMin = 45\n").unwrap().fleet().laneStaleMin()).isEqualTo(45);
+        assertThat(parse("laneStaleMin = 0\n").isFailure()).isTrue();
+        assertThat(parse("laneStaleMin = \"soon\"\n").isFailure()).isTrue();
     }
 }

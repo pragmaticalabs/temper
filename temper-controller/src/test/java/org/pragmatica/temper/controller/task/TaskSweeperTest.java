@@ -2,9 +2,9 @@ package org.pragmatica.temper.controller.task;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 
-import org.junit.jupiter.api.Test;
 import org.pragmatica.lang.Option;
 import org.pragmatica.lang.Promise;
 import org.pragmatica.lang.Unit;
@@ -23,9 +23,14 @@ import org.pragmatica.temper.store.api.TaskDetail;
 import org.pragmatica.temper.store.api.TaskEventRow;
 import org.pragmatica.temper.store.api.TaskQuery;
 import org.pragmatica.temper.store.api.TaskRow;
+import org.pragmatica.temper.store.api.Checkpoint;
+import org.pragmatica.temper.store.api.TaskReport;
 import org.pragmatica.temper.store.api.TaskStore;
 
+import org.junit.jupiter.api.Test;
+
 import static org.assertj.core.api.Assertions.assertThat;
+
 
 /// Verifier V2 [G]: at controller start the sweeper first restarts the TTL of leases the downtime let lapse, and only
 /// then sweeps, so an outage is never counted as an expiry.
@@ -41,12 +46,39 @@ class TaskSweeperTest {
         @Override
         public Promise<List<TaskId>> restarted(Instant start) {
             calls.add("restarted@" + start);
+
             return Promise.success(List.of(TaskId.taskId(42).unwrap()));
+        }
+
+        @Override
+        public Promise<TaskRow> heartbeat(Lease lease, Option<TaskReport.Tree> tree, Instant now) {
+            return Causes.cause("unused").promise();
+        }
+
+        @Override
+        public Promise<Checkpoint> checkpoint(Lease lease, Checkpoint.New checkpoint, Instant now) {
+            return Causes.cause("unused").promise();
+        }
+
+        @Override
+        public Promise<Option<Checkpoint>> latestCheckpoint(TaskId id) {
+            return Causes.cause("unused").promise();
+        }
+
+        @Override
+        public Promise<Map<TaskId, TaskReport>> reports(List<TaskId> ids) {
+            return Causes.cause("unused").promise();
+        }
+
+        @Override
+        public Promise<Unit> observe(TaskId id, int ctxK, int turns, Instant now) {
+            return Causes.cause("unused").promise();
         }
 
         @Override
         public Promise<SweepOutcome> sweep(Instant now) {
             calls.add("sweep@" + now);
+
             return Promise.success(SweepOutcome.sweepOutcome(0, 0, 0));
         }
 
@@ -111,7 +143,6 @@ class TaskSweeperTest {
         var store = new Recording();
 
         TaskSweeper.taskSweeper(store, () -> START).started().await().unwrap();
-
         assertThat(store.calls).containsExactly("restarted@" + START, "sweep@" + START);
     }
 }

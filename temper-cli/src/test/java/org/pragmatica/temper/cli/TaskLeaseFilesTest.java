@@ -7,16 +7,18 @@ import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Instant;
 import java.util.List;
 
+import org.pragmatica.temper.domain.state.JobState;
+import org.pragmatica.temper.protocol.api.ClaimResponse;
+
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
-import org.pragmatica.temper.domain.state.JobState;
-import org.pragmatica.temper.protocol.api.ClaimResponse;
 
-import static org.assertj.core.api.Assertions.assertThat;
 import static org.pragmatica.temper.cli.FakeController.Reply;
+import static org.assertj.core.api.Assertions.assertThat;
+
 
 /// Review #4: a lease file lives exactly as long as its lease. Release, wait and a park under the lease delete it; a
 /// `409 lease-lost` (to a lease call or `submit --task`) deletes it; a heartbeat keeps it; a new claim replaces the task's older files; and a maintainer park goes
@@ -24,14 +26,17 @@ import static org.pragmatica.temper.cli.FakeController.Reply;
 @Timeout(value = 30, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
 class TaskLeaseFilesTest {
     private static final String VIEW = "{\"id\":42,\"slug\":\"s\",\"title\":\"T\",\"issues\":[],\"brief\":{\"path\":\"b.md\"},\"repo\":\"a/b\","
-                                       + "\"baseRef\":\"main\",\"branch\":\"agent/s\",\"critical\":false,\"priority\":0,\"after\":[],"
-                                       + "\"stage\":\"NEEDS_RULING\",\"status\":\"HELD\",\"raisedFrom\":\"CODE\",\"round\":0,\"roundCap\":3,"
-                                       + "\"ciRounds\":0,\"visit\":1,\"visitExpiries\":0,\"visitFailures\":0,\"epoch\":8,\"waitJobs\":[],"
-                                       + "\"waitCi\":false,\"createdBy\":\"cto\",\"createdAt\":\"2026-10-20T10:00:00Z\"}";
+                                     + "\"baseRef\":\"main\",\"branch\":\"agent/s\",\"critical\":false,\"priority\":0,\"after\":[],"
+                                     + "\"stage\":\"NEEDS_RULING\",\"status\":\"HELD\",\"raisedFrom\":\"CODE\",\"round\":0,\"roundCap\":3,"
+                                     + "\"ciRounds\":0,\"visit\":1,\"visitExpiries\":0,\"visitFailures\":0,\"epoch\":8,\"waitJobs\":[],"
+                                     + "\"waitCi\":false,\"stale\":false,\"createdBy\":\"cto\",\"createdAt\":\"2026-10-20T10:00:00Z\"}";
+
     private static final String REQUEST = "{\"kind\":\"design\",\"question\":\"Q\",\"options\":[{\"id\":\"a\",\"text\":\"A\"},"
-                                          + "{\"id\":\"b\",\"text\":\"B\"}],\"recommendation\":{\"option\":\"a\",\"why\":\"w\"},"
-                                          + "\"blocked\":{\"tasks\":[],\"text\":\"none\"}}";
-    private static final String SUBMIT_UNDER_LEASE = "submit module-test --pl core --test Foo* --sha " + Fixtures.SHA + " --task 42";
+                                        + "{\"id\":\"b\",\"text\":\"B\"}],\"recommendation\":{\"option\":\"a\",\"why\":\"w\"},"
+                                        + "\"blocked\":{\"tasks\":[],\"text\":\"none\"}}";
+
+    private static final String SUBMIT_UNDER_LEASE = "submit module-test --pl core --test Foo* --sha " + Fixtures.SHA
+                                                   + " --task 42";
 
     @TempDir
     Path home;
@@ -55,11 +60,14 @@ class TaskLeaseFilesTest {
         var file = Files.writeString(dir.resolve("42-" + epoch), "lease-token-" + epoch + "\n");
 
         Files.setPosixFilePermissions(file, PosixFilePermissions.fromString("rw-------"));
+
         return file;
     }
 
     private String lastAuthorization() {
-        return controller.received().getLast().authorization();
+        return controller.received()
+                         .getLast()
+                         .authorization();
     }
 
     @Test
@@ -96,13 +104,17 @@ class TaskLeaseFilesTest {
     void submitUnderTheLease_keepsTheLeaseFile_butALostLeaseDeletesIt() throws IOException {
         var file = leaseFile(7);
 
-        controller.onJson("POST /jobs", Fixtures.submitted(41, JobState.QUEUED, false))
-                  .onJson("GET /jobs/41", Fixtures.job(41, JobState.QUEUED));
+        controller.onJson("POST /jobs",
+                          Fixtures.submitted(41, JobState.QUEUED, false))
+                  .onJson("GET /jobs/41",
+                          Fixtures.job(41, JobState.QUEUED));
         assertThat(cli.run(SUBMIT_UNDER_LEASE.split(" ")).exit()).isZero();
-        assertThat(controller.received().stream().filter(request -> request.target().endsWith("/jobs")).map(FakeController.Received::authorization))
-            .containsExactly("Lease lease-token-7");
+        assertThat(controller.received()
+                             .stream()
+                             .filter(request -> request.target()
+                                                       .endsWith("/jobs"))
+                             .map(FakeController.Received::authorization)).containsExactly("Lease lease-token-7");
         assertThat(file).exists();
-
         controller.on("POST /jobs", Reply.json(409, "{\"error\":\"lease-lost\"}"));
         assertThat(cli.run(SUBMIT_UNDER_LEASE.split(" ")).exit()).isEqualTo(12);
         assertThat(file).doesNotExist();
@@ -135,22 +147,48 @@ class TaskLeaseFilesTest {
     @Test
     void rule_sendsExtraRoundsAndKnow() {
         controller.on("POST /tasks/42/rule", Reply.json(200, VIEW));
-        assertThat(cli.run("task", "rule", "42", "--option", "retry", "--text", "go on", "--extra-rounds", "2", "--know", "f".repeat(40))
+        assertThat(cli.run("task",
+                           "rule",
+                           "42",
+                           "--option",
+                           "retry",
+                           "--text",
+                           "go on",
+                           "--extra-rounds",
+                           "2",
+                           "--know",
+                           "f".repeat(40))
                       .exit()).isZero();
         assertThat(controller.received().getLast().body()).contains("\"extraRounds\":2")
-                                                          .contains("\"option\":\"retry\"")
-                                                          .contains("\"text\":\"go on\"")
-                                                          .contains("\"know\":\"" + "f".repeat(40) + "\"");
+                  .contains("\"option\":\"retry\"")
+                  .contains("\"text\":\"go on\"")
+                  .contains("\"know\":\"" + "f".repeat(40) + "\"");
     }
 
     @Test
     void claim_replacesTheTasksOlderLeaseFiles() throws IOException {
         var older = leaseFile(3);
-        var claim = new ClaimResponse(42, "s", "CODE", 1, 7, "lease-token-42", "0cf563192a0cf563192a0cf563192a0cf563192a", 0,
-                                      Instant.parse("2026-10-20T10:30:00Z"), Instant.parse("2026-10-20T16:00:00Z"), "a/b",
-                                      "file:///nowhere", List.of(), List.of(), List.of(), List.of());
+        var claim = new ClaimResponse(42,
+                                      "s",
+                                      "CODE",
+                                      1,
+                                      7,
+                                      "lease-token-42",
+                                      "0cf563192a0cf563192a0cf563192a0cf563192a",
+                                      0,
+                                      Instant.parse("2026-10-20T10:30:00Z"),
+                                      Instant.parse("2026-10-20T16:00:00Z"),
+                                      "a/b",
+                                      "file:///nowhere",
+                                      List.of(),
+                                      List.of(),
+                                      List.of(),
+                                      List.of(),
+                                      null,
+                                      List.of());
 
-        controller.on("POST /tasks/42/claim", Reply.json(200, controller.write(claim)));
+        controller.on("POST /tasks/42/claim",
+                      Reply.json(200, controller.write(claim)));
         assertThat(cli.run("task", "claim", "42").exit()).isZero();
         assertThat(older).doesNotExist();
         assertThat(Files.readString(home.resolve(".config/temper/leases/42-7")).strip()).isEqualTo("lease-token-42");

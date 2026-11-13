@@ -738,7 +738,9 @@ through a gated batch (M3c), its tree check (§13.4).
 | GET | `tasks/{id}/evidence/{eid}` | read | the stored document and its checks |
 | GET | `tasks/next?stage=` | read | the head(s) in §8 order |
 | POST | `tasks/{id}/claim`, `tasks/claim?stage=S` | worker (R-M3-15) | 200 claim answer · 404 · 409 `not-ready` · 204 nothing ready |
-| POST | `tasks/{id}/heartbeat` | lease | 204 · 409 `lease-lost` |
+| POST | `tasks/{id}/heartbeat` | lease | 204 · 409 `lease-lost`; optional body `report: {head, dirty, unpushed}` is the agent's SELF-REPORT of its tree at that heartbeat (lane registry) |
+| POST | `tasks/{id}/checkpoint` | lease | 201 `CheckpointDto` (always a NEW version, next `seq`; a repeat of the same body is another version, never a 200) · 409 `lease-lost` · 422 `checkpoint-too-large` (body over 16 KB), `pushed-sha-not-on-branch` (not the task branch's tip or an ancestor in the controller's mirror); the latest is returned in the claim answer as `checkpoint` (lane registry) |
+| POST | `tasks/{id}/observe` | full | 204 · 404 · 400; `{ctxK, turns}` MEASURED by the parent from the agent's transcript; the lease token is refused (lane registry) |
 | POST | `tasks/{id}/evidence` | lease | 200 `{accepted, next, checks}` · 422 `{refused: [code…], checks}` · 409 |
 | POST | `tasks/{id}/wait` | lease | 204 · 422 (job not linked) · 409 |
 | POST | `tasks/{id}/release` | lease | 204 · 409 |

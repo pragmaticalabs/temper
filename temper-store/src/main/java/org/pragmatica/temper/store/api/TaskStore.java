@@ -2,6 +2,7 @@ package org.pragmatica.temper.store.api;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 
 import org.pragmatica.lang.Option;
 import org.pragmatica.lang.Promise;
@@ -43,6 +44,18 @@ public interface TaskStore {
     /// and no row updated is `TaskError.LEASE_LOST` (§6.4). A [Command.Wait]'s jobs must be linked to the task, else
     /// [StoreError.JobNotLinked]; a park stores its ruling request.
     Promise<TaskRow> leased(Lease lease, Command command, Instant now);
+    /// The lease-token heartbeat (T3) fenced as [#leased], and in the same transaction: `last_hb_at = now` and, when
+    /// the agent sent one, its tree report (`task_report`). A refused heartbeat stores nothing.
+    Promise<TaskRow> heartbeat(Lease lease, Option<TaskReport.Tree> tree, Instant now);
+    /// Stores a checkpoint under the lease's fence (`(id, LEASED, epoch, hash)`, the row held `FOR UPDATE` for the
+    /// transaction; no row is `LEASE_LOST`) as the task's next `seq`. It does not extend the TTL: a heartbeat does.
+    Promise<Checkpoint> checkpoint(Lease lease, Checkpoint.New checkpoint, Instant now);
+    /// The task's latest checkpoint, if any.
+    Promise<Option<Checkpoint>> latestCheckpoint(TaskId id);
+    /// The reports of `ids` (a task without a row is absent).
+    Promise<Map<TaskId, TaskReport>> reports(List<TaskId> ids);
+    /// Records the parent's measurement for a task of any state; an unknown task is [StoreError.TaskNotFound].
+    Promise<Unit> observe(TaskId id, int ctxK, int turns, Instant now);
     /// T4, T9, T9′, T13: stores `evidence` as accepted at the lease's epoch and applies its already-validated outcome,
     /// fenced as [#leased] (the seam WP-2's validation calls).
     Promise<TaskRow> evidence(Lease lease, NewEvidence evidence, EvidenceOutcome outcome, Instant now);
