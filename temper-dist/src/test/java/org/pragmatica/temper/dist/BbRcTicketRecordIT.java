@@ -35,6 +35,10 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 /// -> the bb-temper source=ticket tests red; drop bb-temper's mismatch exit -> the bb-temper mismatch tests red.
 class BbRcTicketRecordIT {
     private static final String ME = "rct";
+
+    /// CTO requirement (#45): what a lane is told on exit 71. Pinned at all three sites: bb-wait, bb-temper wait, bb-temper report.
+    private static final String ADVICE = "the ticket record is the verdict; re-run the build in a fresh checkout; never edit or restore .bb/rc";
+
     private static final Pattern RC_LINE = Pattern.compile("^rc=(\\d+) wall=-?\\d+s$", Pattern.MULTILINE);
 
     @TempDir
@@ -202,7 +206,7 @@ class BbRcTicketRecordIT {
     @Test
     void fileDeletedMidFinalize_ticketKeepsTheExitStatus_andBbWaitReportsTheMismatch() throws Exception {
         var co = checkout("rct-a");
-        var id = "100-1";
+        var id = "100-" + BbFixtures.RUN;
         var go = dir.resolve("go");
 
         ticket("waiting", id, co, 5, 0);
@@ -217,12 +221,13 @@ class BbRcTicketRecordIT {
 
         assertThat(wait.rc()).as(wait.stdout() + wait.stderr()).isEqualTo(71);
         assertThat(wait.stderr()).contains("RC-MISMATCH ticket=3 file=absent");
+        assertThat(wait.stderr()).contains(ADVICE);
     }
 
     @Test
     void fileRewrittenMidFinalize_ticketKeepsTheExitStatus_andBbWaitReportsTheMismatch() throws Exception {
         var co = checkout("rct-b");
-        var id = "100-2";
+        var id = "200-" + BbFixtures.RUN;
         var go = dir.resolve("go");
 
         ticket("waiting", id, co, 5, 0);
@@ -242,7 +247,7 @@ class BbRcTicketRecordIT {
     @Test
     void theConvenienceCopy_isReadOnly_andAnUntamperedRunWaitsCleanly() throws Exception {
         var co = checkout("rct-c");
-        var id = "100-3";
+        var id = "300-" + BbFixtures.RUN;
         var go = dir.resolve("go");
 
         ticket("waiting", id, co, 5, 0);
@@ -261,7 +266,7 @@ class BbRcTicketRecordIT {
     @Test
     void aReadOnlyRc_doesNotBreakTheNextBuildInTheSameCheckout() throws Exception {
         var co = checkout("rct-d");
-        var first = "100-4";
+        var first = "400-" + BbFixtures.RUN;
         var go = dir.resolve("go");
 
         ticket("waiting", first, co, 5, 0);
@@ -279,7 +284,7 @@ class BbRcTicketRecordIT {
         // and the next granted build launches over a leftover 444 file and finishes with a fresh 444 copy
         Files.writeString(co.resolve(".bb/rc"), "3\n");
         Files.setPosixFilePermissions(co.resolve(".bb/rc"), PosixFilePermissions.fromString("r--r--r--"));
-        var third = "100-5";
+        var third = "500-" + BbFixtures.RUN;
 
         ticket("waiting", third, co, 5, 0);
         var waiter = waiter(third, "exit 0", Map.of(), dir.resolve("go-none"));
@@ -306,7 +311,7 @@ class BbRcTicketRecordIT {
     /// vt42 finding 1, path 1: reap of a ticket whose waiter died must not take the rc from `.bb/rc`.
     @Test
     void reapOfATicketWhoseWaiterDied_isOrphanedWithNoRc_neverTheFilesValue() throws Exception {
-        var id = "100-6";
+        var id = "600-" + BbFixtures.RUN;
 
         runningWithDeadWaiter("rct-r1", id, "0");
         var reap = tool("bb-queue", Map.of(), "reap");
@@ -325,7 +330,7 @@ class BbRcTicketRecordIT {
     /// bb-build in that checkout is accepted (the file exists, so no "build appears to be running" refusal).
     @Test
     void bbMutateTimeoutSequence_killPlus124PlusReap_isOrphaned_waitIs70Not71_andTheNextBuildIsAccepted() throws Exception {
-        var id = "100-7";
+        var id = "700-" + BbFixtures.RUN;
         var co = runningWithDeadWaiter("rct-r2", id, "124");
         var reap = tool("bb-queue", Map.of(), "reap");
 
@@ -348,16 +353,16 @@ class BbRcTicketRecordIT {
     @Test
     void rcMismatch_neverFiresForAnOrphanedOrCancelledTicket() throws Exception {
         var co = checkout("rct-r3");
-        var t = ticket("done", "100-8", co, 5, 0);
+        var t = ticket("done", "800-" + BbFixtures.RUN, co, 5, 0);
 
         Files.writeString(t, Files.readString(t) + "started=7\nstate=orphaned\nended=9\n");
-        var u = ticket("done", "100-9", co, 5, 0);
+        var u = ticket("done", "900-" + BbFixtures.RUN, co, 5, 0);
 
         Files.writeString(u, Files.readString(u) + "started=7\nstate=cancelled\nended=9\n");
         Files.writeString(co.resolve(".bb/start"), "7\n");
         Files.writeString(co.resolve(".bb/rc"), "0\n");
-        var orphaned = tool("bb-wait", Map.of(), "100-8");
-        var cancelled = tool("bb-wait", Map.of(), "100-9");
+        var orphaned = tool("bb-wait", Map.of(), "800-" + BbFixtures.RUN);
+        var cancelled = tool("bb-wait", Map.of(), "900-" + BbFixtures.RUN);
 
         assertThat(orphaned.rc()).as(orphaned.stdout() + orphaned.stderr()).isEqualTo(70);
         assertThat(cancelled.rc()).as(cancelled.stdout() + cancelled.stderr()).isEqualTo(9);
@@ -372,7 +377,7 @@ class BbRcTicketRecordIT {
         Files.writeString(stale, "3\n");
         Files.setPosixFilePermissions(stale, PosixFilePermissions.fromString("r--r--r--"));
         // expired: cap 0 never grants, limit 5 s
-        var expired = "100-6";
+        var expired = "600-" + BbFixtures.RUN;
 
         ticket("waiting", expired, co, 0, 5);
         var waiter = waiter(expired, "exit 0", Map.of(), dir.resolve("go-none"));
@@ -385,7 +390,7 @@ class BbRcTicketRecordIT {
         Files.delete(stale);
         Files.writeString(stale, "3\n");
         Files.setPosixFilePermissions(stale, PosixFilePermissions.fromString("r--r--r--"));
-        var cancelled = "100-7";
+        var cancelled = "700-" + BbFixtures.RUN;
 
         ticket("waiting", cancelled, co, 5, 0);
         var cancel = tool("bb-queue", Map.of(), "cancel", cancelled);
@@ -399,7 +404,7 @@ class BbRcTicketRecordIT {
         Files.writeString(stale, "0\n");
         Files.setPosixFilePermissions(stale, PosixFilePermissions.fromString("r--r--r--"));
         Files.writeString(co.resolve(".bb/start"), "3\n");
-        var running = "100-8";
+        var running = "800-" + BbFixtures.RUN;
 
         Files.writeString(queue.resolve("running").resolve(running),
                           "id=" + running
@@ -500,6 +505,8 @@ class BbRcTicketRecordIT {
         assertThat(rewritten.rc()).isEqualTo(71);
         assertThat(rewritten.out()).startsWith("rc=3 wall=");
         assertThat(rewritten.err()).contains("RC-MISMATCH ticket=3 file=0");
+        assertThat(rewritten.err()).contains(ADVICE);
+        assertThat(absent.err()).contains(ADVICE);
     }
 
     @Test
@@ -557,6 +564,7 @@ class BbRcTicketRecordIT {
         assertThat(agree.out()).contains("source=ticket ticket=1000000000000000002-1").contains("rc=3");
         assertThat(disagree.rc()).as(disagree.err()).isEqualTo(71);
         assertThat(disagree.err()).contains("RC-MISMATCH ticket=3 file=0");
+        assertThat(disagree.err()).contains(ADVICE);
         assertThat(absent.rc()).isEqualTo(71);
         assertThat(absent.err()).contains("RC-MISMATCH ticket=3 file=absent");
     }

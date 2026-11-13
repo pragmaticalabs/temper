@@ -41,6 +41,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 /// [#waiterCompletion_afterATooLateCancel_neitherOverwritesTheDoneRecordNorRecreatesTheRunningTicket] red.
 class BbQueueCancelIT {
     private static final String ME = "orphtest";
+    private static final String RUN = BbFixtures.RUN;
 
     @TempDir
     Path dir;
@@ -196,7 +197,7 @@ class BbQueueCancelIT {
     void cancelRunning_killsExactlyTheWaiterTreeAndTheCheckoutProcesses_freesThePortGroup() throws Exception {
         var co = checkout("co1");
         var root = dir.resolve("co").resolve("co1");
-        var id = "100-1";
+        var id = "100-" + RUN;
 
         ticket("running", id, ME, co, 1);
         var waiter = waiter(id, dir);
@@ -218,7 +219,7 @@ class BbQueueCancelIT {
                             "604");
         var elsewhere = spawn(dir, "sleep", "605");
 
-        ticket("waiting", "200-2", ME, checkout("co2"), 1);
+        ticket("waiting", "200-" + RUN, ME, checkout("co2"), 1);
         assertThat(pick()).as("control: the port group is held while the ticket runs").isEmpty();
         var run = queue(ME, Map.of(), "cancel", "--running", id);
 
@@ -240,13 +241,13 @@ class BbQueueCancelIT {
 
         assertThat(killed).as("killed= lists the exact pids").isEqualTo(expected);
         assertThat(Files.readString(root.resolve(".bb").resolve("rc")).strip()).isEqualTo("9");
-        assertThat(pick()).as("the port group is free right after").isEqualTo("200-2");
+        assertThat(pick()).as("the port group is free right after").isEqualTo("200-" + RUN);
     }
 
     @Test
     void cancelRunning_ofAnotherOwnersTicket_isRefusedNamingTheOwner_andKillsNothing() throws Exception {
         var co = checkout("co1");
-        var id = "100-1";
+        var id = "100-" + RUN;
 
         ticket("running", id, "someoneelse", co, 1);
         var waiter = waiter(id, dir);
@@ -265,13 +266,13 @@ class BbQueueCancelIT {
 
     @Test
     void cancelRunning_ofAnUnknownOrWaitingId_isRefused() throws Exception {
-        ticket("waiting", "300-3", ME, checkout("co3"), 0);
+        ticket("waiting", "300-" + RUN, ME, checkout("co3"), 0);
         var unknown = queue(ME, Map.of(), "cancel", "--running", "nope");
-        var waiting = queue(ME, Map.of(), "cancel", "--running", "300-3");
+        var waiting = queue(ME, Map.of(), "cancel", "--running", "300-" + RUN);
 
         assertThat(List.of(unknown.rc(), waiting.rc())).containsOnly(3);
         assertThat(waiting.stderr()).contains("not running");
-        assertThat(queue.resolve("waiting").resolve("300-3")).exists();
+        assertThat(queue.resolve("waiting").resolve("300-" + RUN)).exists();
     }
 
     /// `kill` is shadowed by an exported function (bash imports it into the script): the pid in SURVIVOR ignores every signal, as a
@@ -279,7 +280,7 @@ class BbQueueCancelIT {
     @Test
     void cancelRunning_whenAProcessSurvives_leavesTheTicketRunningAndWritesNoRc() throws Exception {
         var co = checkout("co1");
-        var id = "100-1";
+        var id = "100-" + RUN;
 
         ticket("running", id, ME, co, 1);
         var stubborn = spawn(co, "sleep", "606");
@@ -303,7 +304,7 @@ class BbQueueCancelIT {
     @Test
     void cancelRunning_neverSignalsAPidWhoseIdentityChanged() throws Exception {
         var co = checkout("co1");
-        var id = "100-1";
+        var id = "100-" + RUN;
 
         ticket("running", id, ME, co, 1);
         var reused = spawn(co, "sleep", "608");
@@ -333,7 +334,7 @@ class BbQueueCancelIT {
     @Test
     void cancelRunning_withAnIdentityChangedPidAndAStillOursSurvivor_leavesTheTicketRunning() throws Exception {
         var co = checkout("co1");
-        var id = "100-1";
+        var id = "100-" + RUN;
 
         ticket("running", id, ME, co, 1);
         var reused = spawn(co, "sleep", "610");
@@ -362,7 +363,7 @@ class BbQueueCancelIT {
     @Test
     void cancelRunning_tooLate_isOrphanedWithNoRc_neverTheFilesValue() throws Exception {
         var co = checkout("co1");
-        var id = "100-1";
+        var id = "100-" + RUN;
 
         ticket("running", id, ME, co, 1);
         var b = bb("co1");
@@ -391,7 +392,7 @@ class BbQueueCancelIT {
     @Test
     void waiterCompletion_afterATooLateCancel_neitherOverwritesTheDoneRecordNorRecreatesTheRunningTicket() throws Exception {
         var co = checkout("co1");
-        var id = "100-1";
+        var id = "100-" + RUN;
         var b = bb("co1");
 
         BbFixtures.executable(tools.resolve("bb-build"),
@@ -460,7 +461,7 @@ class BbQueueCancelIT {
     @Test
     void cancelRunning_overwritesAStaleRcOfAnEarlierRun() throws Exception {
         var co = checkout("co1");
-        var id = "100-1";
+        var id = "100-" + RUN;
 
         ticket("running", id, ME, co, 1);
         var b = bb("co1");
@@ -478,7 +479,7 @@ class BbQueueCancelIT {
     @Test
     void cancelRunning_rcWrittenInsideTheKillGrace_isOrphanedWithNoRc() throws Exception {
         var co = checkout("co1");
-        var id = "100-1";
+        var id = "100-" + RUN;
 
         ticket("running", id, ME, co, 1);
         var b = bb("co1");
@@ -518,19 +519,19 @@ class BbQueueCancelIT {
         var co = checkout("co1");
         var root = dir.resolve("co").resolve("co1");
 
-        ticket("waiting", "100-1", ME, co, 0);
-        var waiting = waiter("100-1", dir);
+        ticket("waiting", "100-" + RUN, ME, co, 0);
+        var waiting = waiter("100-" + RUN, dir);
 
-        ticket("waiting", "101-1", ME, checkout("co9"), 0);
-        var other = waiter("101-1", dir);
+        ticket("waiting", "101-" + RUN, ME, checkout("co9"), 0);
+        var other = waiter("101-" + RUN, dir);
         var clean = queue(ME, Map.of(), "release", root.toString());
 
         assertThat(clean.rc()).as(clean.stderr()).isZero();
         Thread.sleep(300);
         assertThat(live(waiting.pid())).isFalse();
-        assertThat(field("done", "100-1", "state")).isEqualTo("cancelled");
+        assertThat(field("done", "100-" + RUN, "state")).isEqualTo("cancelled");
         assertThat(Files.readString(root.resolve(".bb").resolve("rc")).strip()).isEqualTo("9");
-        assertThat(queue.resolve("waiting").resolve("101-1")).as("another checkout's ticket is untouched").exists();
+        assertThat(queue.resolve("waiting").resolve("101-" + RUN)).as("another checkout's ticket is untouched").exists();
         assertThat(live(other.pid())).isTrue();
     }
 
@@ -539,33 +540,33 @@ class BbQueueCancelIT {
         var co = checkout("co1");
         var root = dir.resolve("co").resolve("co1");
 
-        ticket("running", "100-1", ME, co, 1);
-        var waiter = waiter("100-1", dir);
+        ticket("running", "100-" + RUN, ME, co, 1);
+        var waiter = waiter("100-" + RUN, dir);
 
-        ticket("waiting", "102-1", ME, co, 0);
+        ticket("waiting", "102-" + RUN, ME, co, 0);
         var refused = queue(ME, Map.of(), "release", root.toString());
 
         assertThat(refused.rc()).isEqualTo(3);
-        assertThat(refused.stderr()).contains("100-1").contains("--kill");
+        assertThat(refused.stderr()).contains("100-" + RUN).contains("--kill");
         assertThat(live(waiter.pid())).isTrue();
-        assertThat(queue.resolve("running").resolve("100-1")).exists();
-        assertThat(queue.resolve("waiting").resolve("102-1")).as("nothing is cancelled when the release is refused")
+        assertThat(queue.resolve("running").resolve("100-" + RUN)).exists();
+        assertThat(queue.resolve("waiting").resolve("102-" + RUN)).as("nothing is cancelled when the release is refused")
                   .exists();
         var killed = queue(ME, Map.of(), "release", root.toString(), "--kill");
 
         assertThat(killed.rc()).as(killed.stderr()).isZero();
         Thread.sleep(300);
         assertThat(live(waiter.pid())).isFalse();
-        assertThat(field("done", "100-1", "state")).isEqualTo("cancelled");
-        assertThat(field("done", "102-1", "state")).isEqualTo("cancelled");
+        assertThat(field("done", "100-" + RUN, "state")).isEqualTo("cancelled");
+        assertThat(field("done", "102-" + RUN, "state")).isEqualTo("cancelled");
     }
 
     @Test
     void release_ofAnotherOwnersTicket_isRefused() throws Exception {
         var co = checkout("co1");
 
-        ticket("waiting", "100-1", "someoneelse", co, 0);
-        var waiter = waiter("100-1", dir);
+        ticket("waiting", "100-" + RUN, "someoneelse", co, 0);
+        var waiter = waiter("100-" + RUN, dir);
         var run = queue(ME,
                         Map.of(),
                         "release",
@@ -581,12 +582,12 @@ class BbQueueCancelIT {
         var co = checkout("gone");
         var root = dir.resolve("co").resolve("gone");
 
-        ticket("waiting", "100-1", ME, co, 0);
-        var waiter = waiter("100-1", dir);
+        ticket("waiting", "100-" + RUN, ME, co, 0);
+        var waiter = waiter("100-" + RUN, dir);
         var keep = checkout("kept");
 
-        ticket("waiting", "101-1", ME, keep, 0);
-        var kept = waiter("101-1", dir);
+        ticket("waiting", "101-" + RUN, ME, keep, 0);
+        var kept = waiter("101-" + RUN, dir);
 
         BbFixtures.run(List.of("rm", "-rf", root.toString()),
                        Map.of(),
@@ -596,11 +597,11 @@ class BbQueueCancelIT {
 
         assertThat(run.rc()).as(run.stderr()).isZero();
         Thread.sleep(300);
-        assertThat(run.stdout()).contains("reaped 100-1: abandoned");
+        assertThat(run.stdout()).contains("reaped 100-" + RUN + ": abandoned");
         assertThat(live(waiter.pid())).as("its waiter was stopped by pid").isFalse();
-        assertThat(field("done", "100-1", "state")).isEqualTo("abandoned");
+        assertThat(field("done", "100-" + RUN, "state")).isEqualTo("abandoned");
         assertThat(root).as("reap must not recreate the vanished checkout").doesNotExist();
-        assertThat(queue.resolve("waiting").resolve("101-1")).as("a ticket whose checkout exists stays").exists();
+        assertThat(queue.resolve("waiting").resolve("101-" + RUN)).as("a ticket whose checkout exists stays").exists();
         assertThat(live(kept.pid())).isTrue();
     }
 
@@ -609,7 +610,7 @@ class BbQueueCancelIT {
     void reap_keepsARunningTicket_whileAForkSitsInASubmodule() throws Exception {
         var co = checkout("co1");
 
-        ticket("running", "100-1", ME, co, 1);
+        ticket("running", "100-" + RUN, ME, co, 1);
         Files.writeString(fake.resolve("classworlds.launcher.Launcher"), "#!/bin/bash\nsleep 607\n");
         var fork = spawn(co,
                          "bash",
@@ -620,7 +621,7 @@ class BbQueueCancelIT {
         var held = queue(ME, pattern, "reap");
 
         assertThat(held.rc()).isZero();
-        assertThat(queue.resolve("running").resolve("100-1")).as("waiter gone but a fork lives below the checkout")
+        assertThat(queue.resolve("running").resolve("100-" + RUN)).as("waiter gone but a fork lives below the checkout")
                   .exists();
         fork.descendants().forEach(ProcessHandle::destroyForcibly);
         fork.destroyForcibly();
@@ -628,7 +629,7 @@ class BbQueueCancelIT {
         Thread.sleep(300);
         var freed = queue(ME, pattern, "reap");
 
-        assertThat(freed.stdout()).contains("reaped 100-1");
-        assertThat(queue.resolve("running").resolve("100-1")).doesNotExist();
+        assertThat(freed.stdout()).contains("reaped 100-" + RUN);
+        assertThat(queue.resolve("running").resolve("100-" + RUN)).doesNotExist();
     }
 }
