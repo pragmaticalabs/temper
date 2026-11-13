@@ -43,8 +43,9 @@
 #                                       refuses the rm (exit 3, names the ticket and --kill) so a tree is never deleted under a
 #                                       live maven. --kill cancels the running ticket first (`bb-queue cancel --running`: its
 #                                       waiter tree and every process with its cwd in the checkout or below), then removes.
-# Exit: 0 ok; 2 usage; 3 refused; else the failing step's code. `wait` exits with maven's rc.
-# Exit: 0 ok; 2 usage; 3 refused; 78 host config missing or malformed; else the failing step's code. `wait` exits with maven's rc.
+# Exit: 0 ok; 2 usage; 3 refused; 70 (wait; report prints rc=unknown) the ticket has no numeric rc (orphaned: waiter died, reap, too-late cancel); 71
+#   RC-MISMATCH (wait, report): a finished ticket's rc and the checkout's .bb/rc disagree; 78 host config missing or malformed; else the failing step's code.
+#   `wait` exits with maven's rc (the ticket's), 7 for a deduped call. GUARANTEE: the verdict comes from mvn's exit status, never from the checkout; any later disagreement in the checkout is detected (RC-MISMATCH, exit 71); deliberate tampering with queue/done by the same uid stays possible.
 set -euo pipefail
 PROG=bb-temper
 : "${BB_OWNER:?set BB_OWNER=<agent name, [A-Za-z0-9]>}"
@@ -122,10 +123,11 @@ die() { echo "bb-temper: $2" >&2; exit "$1"; }
 DEDUPED_NOTE='if [ -f .bb/deduped ] && { [ ! -f .bb/build.log ] || [ .bb/deduped -nt .bb/build.log ]; }; then cat .bb/deduped; fi'
 # VERDICT SOURCE (2026-11-12, bbrc1). wait and report take the rc from the checkout's NEWEST queue ticket (highest id among
 # waiting/running/done whose co= is this checkout), not from .bb/rc: the ticket's rc= is the exit status bb-build's waiter got from
-# the build process. A newest ticket still waiting/running reports rc=running. No ticket for the checkout (built before the queue
-# kept one): .bb/rc is read and the output says `source=file`. When a finished ticket and the checkout's .bb/rc disagree, or the
-# file is gone, `RC-MISMATCH ticket=<rc> file=<rc|absent>` goes to stderr and the exit is 71 (wait and report). Guarantee: the
-# disagreement is detected and reported, not prevented; lanes run as the same uid, so deliberate edits to queue/done remain possible.
+# the build process. A newest ticket still waiting/running reports rc=running. An orphaned ticket (waiter died, reap, too-late cancel)
+# has no rc: `rc=unknown`, exit 70. No ticket for the checkout (built before the queue kept one): .bb/rc is read and the output says
+# `source=file`. When a FINISHED ticket and the checkout's .bb/rc disagree, or the file is gone, `RC-MISMATCH ticket=<rc> file=<rc|absent>:
+# the ticket record is the verdict; re-run the build in a fresh checkout; never edit or restore .bb/rc` goes to stderr and the exit is 71 (wait and report); never for orphaned/cancelled/expired/abandoned.
+# GUARANTEE: the verdict comes from mvn's exit status, never from the checkout; any later disagreement in the checkout is detected (RC-MISMATCH, exit 71); deliberate tampering with queue/done by the same uid stays possible.
 # Remote snippet (run in the checkout): TICKET_PROBE sets, TICKET_PRINT prints tk_id= tk_dir= tk_state= tk_rc= (empty until the ticket is done; cancelled/abandoned
 # 9 and expired 5, as bb-build writes to .bb/rc) fin=0|1 file_rc=<rc|absent>.
 read -r -d '' TICKET_PROBE <<'EOF_PROBE' || true
@@ -326,7 +328,7 @@ case $cmd in
       echo "source=ticket ticket=$(pv tk_id)"; rc=$(pv tk_rc)
       case $rc in ''|*[!0-9]*) echo "rc=unknown"; echo "bb-temper: ticket $(pv tk_id) is $(pv tk_state) with no numeric rc" >&2; exit 70;; esac
       echo "rc=$rc"
-      [ "$(pv file_rc)" = "$rc" ] || { echo "RC-MISMATCH ticket=$rc file=$(pv file_rc)" >&2; exit 71; }
+      [ "$(pv tk_state)" != finished ] || [ "$(pv file_rc)" = "$rc" ] || { echo "RC-MISMATCH ticket=$rc file=$(pv file_rc): the ticket record is the verdict; re-run the build in a fresh checkout; never edit or restore .bb/rc" >&2; exit 71; }
     else
       echo "source=file"; rc=$(pv file_rc); echo "rc=$rc"
     fi
@@ -341,7 +343,7 @@ echo "$src"
 for m in */; do for d in surefire failsafe; do f=$(find ${m}target/$d-reports -maxdepth 1 -name 'TEST-*.xml' -newer .bb/run.marker 2>/dev/null); [ -n "$f" ] || continue
   echo "${m%/} $d $(cat $f | grep -o '<testcase ' | wc -l) testcases, failures $(cat $f | grep -c '<failure') errors $(cat $f | grep -c '<error') skipped $(cat $f | grep -c '<skipped')"; done; done
 echo 'known on Linux: temper-worker 1 skip = JobGcTest#aDeleteFailingMidway (macOS uchg; ops/dev/known-skips)'
-if [ -n "$tk_id" ] && [ "$fin" = 1 ] && [ -n "$tk_rc" ] && [ "$file_rc" != "$tk_rc" ]; then echo "RC-MISMATCH ticket=$tk_rc file=$file_rc" >&2; exit 71; fi
+if [ -n "$tk_id" ] && [ "$fin" = 1 ] && [ "$tk_state" = finished ] && [ -n "$tk_rc" ] && [ "$file_rc" != "$tk_rc" ]; then echo "RC-MISMATCH ticket=$tk_rc file=$file_rc: the ticket record is the verdict; re-run the build in a fresh checkout; never edit or restore .bb/rc" >&2; exit 71; fi
 EOF_REPORT
     rsh_ro "cd ~/$CO || exit 1; d=\$($DEDUPED_NOTE); if [ -n \"\$d\" ]; then echo \"rc=\$d\"; echo 'bb-temper: NOT a run of this checkout (BB_DEDUP=0 for a fresh run)'; exit 7; fi
          $TICKET_PROBE

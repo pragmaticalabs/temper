@@ -41,14 +41,14 @@ cancel_waiting() {
   never_started "$(field "$T" co)" 9 "ticket $ID cancelled by $BB_OWNER"
   printf 'state=cancelled\nended=%s\n' "$(date +%s)" >> "$T"; to_done "$T"
 }
-# too_late <ticket file> <killed> [notours]: the build already wrote ITS OWN rc for this run (.bb/start equals the ticket's started): that result is
-# kept (no 9, no .bb/end), the ticket records it and moves to done. Returns 1 when there is no such rc.
+# too_late <ticket file> <killed> [notours]: the build already wrote ITS OWN rc for this run (.bb/start equals the ticket's started), so there may be a
+# result, but the waiter that holds the exit status is gone or about to be: the ticket becomes ORPHANED with no rc (bb-wait exits 70) and .bb/rc is
+# NOT read into it (2026-11-13, vt42 finding 1: a copy a lane can rewrite is not a verdict). Re-run for a verdict. Returns 1 when there is no such rc.
 too_late() {
-  local T=$1 ID=${1##*/} B rc; B=$(field "$1" co)/.bb
+  local T=$1 ID=${1##*/} B; B=$(field "$1" co)/.bb
   [ -f "$B/rc" ] && [ "$(cat "$B/start" 2>/dev/null)" = "$(field "$T" started)" ] || return 1
-  rc=$(cat "$B/rc")
-  printf 'rc=%s\nstate=finished\ncancel=too-late killed=%s notours=%s\nended=%s\n' "$rc" "$2" "${3:-}" "$(date +%s)" >> "$T"; to_done "$T"
-  echo "cancel of $ID was too late: the build had already finished with rc=$rc (killed: ${2:-nothing}); its result is kept"
+  printf 'state=orphaned\ncancel=too-late killed=%s notours=%s\nended=%s\n' "$2" "${3:-}" "$(date +%s)" >> "$T"; to_done "$T"
+  echo "cancel of $ID was too late: the build had already ended (killed: ${2:-nothing}); no verdict is recorded (orphaned, bb-wait exits 70); re-run the build"
 }
 # cancel_running <ticket file>: caller holds the lock and has checked the owner. Exit 5 leaves the ticket running.
 cancel_running() {

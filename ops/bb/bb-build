@@ -23,12 +23,11 @@
 # tests. BB_PG_ISOLATE=0 at enqueue = the old host-exclusive behaviour for that ticket (ticket has no iso=1).
 # LOAD GATE (2026-11-11): a ticket is also granted only while load5/cores < 1.2 (BB_LOAD_MAX); the oldest grantable ticket goes
 # regardless once it waited > 1200 s (BB_LOAD_STARVE_SECS) while < 2 reactors run (BB_LOAD_STARVE_REACTORS). See pick() in the lib.
-# VERDICT SOURCE (2026-11-12, bbrc1): the ticket's rc= is the exit status of the build subshell as returned by `wait` in the waiter,
-# never a read of .bb/rc. Guarantee, per operation: the recorded rc is the build process's exit status, taken by the waiter that
-# launched it; .bb/rc is a read-only (444) copy written before the ticket is finalized, replaced only by rm/rename (write_rc in
-# the lib), never by `>`. A disagreeing or missing copy is DETECTED and reported by bb-wait (exit 71) and bb-temper wait/report
-# (RC-MISMATCH on stderr), not prevented: lanes run as the same uid, so deliberate edits to queue/done/<id> remain possible, and a
-# ticket finalized by reap (its waiter died) has only the file to go on.
+# VERDICT SOURCE (2026-11-12, bbrc1; reap and too-late cancel fixed 2026-11-13): the ticket's rc= is the exit status of the build subshell
+# as returned by `wait` in the waiter, never a read of .bb/rc. A ticket whose waiter is gone (reap, or a cancel that finds the build
+# already ended) is finalized as orphaned with NO rc: bb-wait exits 70, and .bb/rc is not read into it. .bb/rc is a read-only (444) copy
+# written before the ticket is finalized, replaced only by rm/rename (write_rc in the lib), never by `>`.
+# GUARANTEE: the verdict comes from mvn's exit status, never from the checkout; any later disagreement in the checkout is detected (RC-MISMATCH, exit 71); deliberate tampering with queue/done by the same uid stays possible.
 # Every ticket reaching done/ appends one line to ~/work/bb-ticket-log.tsv. `bb-wait <ticket>` blocks until it finishes (exit = rc).
 # TICKET OWNER FIELDS (T3, 2026-11): the ticket gains optional key=value lines after group_reason= and before args= (readers
 # take the LAST line of a key, so every existing reader ignores them): session_pid, session_start (epoch s) and session_label

@@ -191,7 +191,7 @@ never_started() {
 }
 
 # reap (under lock): tickets whose waiter is gone, or (waiting) whose checkout directory is gone. Waiting -> abandoned (rc 9 written for the poller).
-# Running -> finished if maven wrote rc, else orphaned. A running ticket whose waiter died but whose maven still runs in
+# Running -> orphaned (no rc, whatever .bb/rc holds). A running ticket whose waiter died but whose maven still runs in
 # its checkout stays running (it still holds its reactor slot and, if group=1, the port group) until maven exits.
 reap() {
   local f id co p
@@ -210,11 +210,9 @@ reap() {
   for f in "$Q"/running/*; do
     [ -f "$f" ] || continue; id=${f##*/}; waiter_alive "$id" && continue
     co=$(field "$f" co); co_reactor_alive "$co" && continue
-    if [ -f "$co/.bb/rc" ] && [ "$(cat "$co/.bb/start" 2>/dev/null)" = "$(field "$f" started)" ]; then
-      printf 'state=finished\nrc=%s\nended=%s\n' "$(cat "$co/.bb/rc")" "$(cat "$co/.bb/end" 2>/dev/null)" >> "$f"
-    else
-      printf 'state=orphaned\nended=%s\n' "$(date +%s)" >> "$f"
-    fi
+    # No numeric rc here, ever: the ticket's rc= is the build's exit status taken by its waiter, and this waiter is dead. The checkout's
+    # .bb/rc is a copy a lane can rewrite, so it is not a verdict source (2026-11-13, vt42 finding 1); bb-wait exits 70 on orphaned.
+    printf 'state=orphaned\nended=%s\n' "$(date +%s)" >> "$f"
     to_done "$f"
   done
 }

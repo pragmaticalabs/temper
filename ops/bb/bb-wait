@@ -7,11 +7,11 @@
 # writes to .bb/rc for those); 70 orphaned or no numeric rc; 4 UNKNOWN ticket (in none of waiting/running/done); 2 usage;
 # 71 RC-MISMATCH (below).
 # VERDICT SOURCE (2026-11-12): the rc comes from the ticket record in done/<id>, which bb-build's waiter fills from the build
-# process's exit status, never from the checkout. The checkout's .bb/rc is a read-only copy; when a finished ticket's rc and that
-# file disagree, or the file is gone, bb-wait prints `RC-MISMATCH ticket=<rc> file=<rc|absent>` on stderr and exits 71 instead of
-# the rc. Compared only while .bb/start still equals the ticket's started= (a later build in the same checkout owns the file then).
-# Guarantee: disagreement in the checkout copy is detected and reported, not prevented. Lanes run as the same uid, so deliberate
-# edits to queue/done remain possible; a ticket finalized by reap (waiter died) takes its rc from that same file.
+# process's exit status, never from the checkout. The checkout's .bb/rc is a read-only copy; when a FINISHED ticket's numeric rc and that
+# file disagree, or the file is gone, bb-wait prints `RC-MISMATCH ticket=<rc> file=<rc|absent>: the ticket record is the verdict; re-run the build in a fresh checkout; never edit or restore .bb/rc` on stderr and exits 71 instead of
+# the rc. Compared only while .bb/start still equals the ticket's started= (a later build in the same checkout owns the file then), and never for
+# orphaned/cancelled/expired/abandoned tickets (a ticket finalized by reap or a too-late cancel is orphaned: no rc, exit 70).
+# GUARANTEE: the verdict comes from mvn's exit status, never from the checkout; any later disagreement in the checkout is detected (RC-MISMATCH, exit 71); deliberate tampering with queue/done by the same uid stays possible.
 # The log path is the ticket's .bb/build.log: a later build in the same checkout overwrites it.
 set -uo pipefail
 SELF=$(readlink -f "$0")
@@ -39,7 +39,7 @@ while :; do
         co=$(field "$f" co); sv=$(field "$f" started)
         if n "$rc" && [ -n "$sv" ] && [ "$(cat "$co/.bb/start" 2>/dev/null)" = "$sv" ]; then
           fr=$(cat "$co/.bb/rc" 2>/dev/null || echo absent)
-          [ "$fr" = "$rc" ] || { echo "RC-MISMATCH ticket=$rc file=$fr" >&2; exit 71; }
+          [ "$fr" = "$rc" ] || { echo "RC-MISMATCH ticket=$rc file=$fr: the ticket record is the verdict; re-run the build in a fresh checkout; never edit or restore .bb/rc" >&2; exit 71; }
         fi
         n "$rc" && exit "$rc"; exit 70;;
       cancelled|abandoned) exit 9;;
