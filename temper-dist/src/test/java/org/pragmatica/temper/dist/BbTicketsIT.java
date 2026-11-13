@@ -34,6 +34,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 /// `alive` -> [#waiter_isAliveOnlyForARunningWaiterProcess_andNullForDone] red; keep a value with a control byte ->
 /// [#values_withControlBytes_orOver4096Bytes_orNonAscii_areDropped_andNamed] red.
 class BbTicketsIT {
+    private static final String LIVE = "live-" + BbFixtures.RUN;
     private static final Path SCRIPT = BbFixtures.OPS_BB.resolve("bb-tickets");
     private static final long NOW = 2_000_000_000L;
     private static final Pattern TICKET = Pattern.compile("\"ticket\":\"([^\"]*)\"");
@@ -145,15 +146,15 @@ class BbTicketsIT {
 
     @Test
     void waiter_isAliveOnlyForARunningWaiterProcess_andNullForDone() throws Exception {
-        ticket("running", "live-1", "id=live-1\ncreated=1\n");
-        ticket("running", "live-12", "id=live-12\ncreated=2\n");
+        ticket("running", LIVE, "id=" + LIVE + "\ncreated=1\n");
+        ticket("running", LIVE + "2", "id=" + LIVE + "2\ncreated=2\n");
         ticket("waiting", "dead-1", "id=dead-1\ncreated=3\n");
         ticket("done", "fin-1", "id=fin-1\nended=" + (NOW - 5) + "\n");
-        waiterFor("live-1");
+        waiterFor(LIVE);
         var out = list();
 
-        assertThat(line(out, "live-1")).contains("\"waiter\":\"alive\"");
-        assertThat(line(out, "live-12")).as("an id that merely starts with a live id").contains("\"waiter\":\"gone\"");
+        assertThat(line(out, LIVE)).contains("\"waiter\":\"alive\"");
+        assertThat(line(out, LIVE + "2")).as("an id that merely starts with a live id").contains("\"waiter\":\"gone\"");
         assertThat(line(out, "dead-1")).contains("\"waiter\":\"gone\"");
         assertThat(line(out, "fin-1")).contains("\"waiter\":null");
     }

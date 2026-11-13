@@ -41,11 +41,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 /// [#waiterCompletion_afterATooLateCancel_neitherOverwritesTheDoneRecordNorRecreatesTheRunningTicket] red.
 class BbQueueCancelIT {
     private static final String ME = "orphtest";
-    /// Ticket ids carry this JVM's pid. The queue finds waiters with `pgrep -u $USER -f "bb-build __run <id>"`, which sees every process
-    /// of the uid on the host, not only this test's: two BbQueueCancelIT JVMs (concurrent builds as the same user) with the same ids
-    /// killed or reaped each other's waiters (fl43, #43: killed= missing the waiter tree; waiter never parked). Production ids are
-    /// unique (timestamp-pid), so only the test needs this.
-    private static final String RUN = Long.toString(ProcessHandle.current().pid());
+    private static final String RUN = BbFixtures.RUN;
 
     @TempDir
     Path dir;
