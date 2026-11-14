@@ -9,6 +9,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+import org.pragmatica.temper.testsupport.HermeticProcess;
+
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -292,7 +294,7 @@ class BbMemFloorIT {
 
     /// A stand-in reactor: a shell whose command line holds the marker, so `pgrep -fc $PAT` counts exactly it.
     private void reactor() throws Exception {
-        reactors.add(new ProcessBuilder("bash", "-c", "sleep 600; : " + marker).start());
+        reactors.add(HermeticProcess.builder("bash", "-c", "sleep 600; : " + marker).start());
         var deadline = System.currentTimeMillis() + 10_000;
 
         while (!count().equals(Integer.toString(reactors.size())) && System.currentTimeMillis() < deadline) {
