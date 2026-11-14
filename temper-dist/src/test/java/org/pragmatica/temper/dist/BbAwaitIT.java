@@ -390,6 +390,21 @@ class BbAwaitIT {
     }
 
     @Test
+    void anIntervalLongerThanTheDeadline_doesNotOverrunIt() throws Exception {
+        overrides.put("BB_AWAIT_INTERVAL", "10");
+        var t0 = System.nanoTime();
+        var wait = awaitInBackground("--file",
+                                     dir.resolve("never").toString(),
+                                     "--deadline",
+                                     "2s");
+        var rc = exit(wait, 15);
+        var seconds = (System.nanoTime() - t0) / 1_000_000_000.0;
+
+        assertThat(rc).isEqualTo(124);
+        assertThat(seconds).as("the last sleep is cut to the time left, not a full 10 s interval").isBetween(2.0, 3.5);
+    }
+
+    @Test
     void aNonPositiveInterval_fallsBackToFive_andDoesNotSpin() throws Exception {
         var shimDir = Files.createDirectories(dir.resolve("shim"));
         var log = dir.resolve("sleeps");
