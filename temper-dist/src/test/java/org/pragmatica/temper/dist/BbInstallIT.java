@@ -195,6 +195,7 @@ class BbInstallIT {
         assertThat(pin("BB_WAIT_PRERC")).isEqualTo(BbFixtures.md5(prev("bb-wait.prerc")));
         assertThat(pin("BB_HOLD_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-hold")));
         assertThat(pin("BB_WAIT_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-wait")));
+        assertThat(pin("BB_AWAIT_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-await")));
         assertThat(pin("BB_NETNS_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-netns-run")));
         assertThat(pin("BB_PORTGROUP_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-portgroup.py")));
         assertThat(pin("BB_MUTATE_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-mutate")));
@@ -213,6 +214,7 @@ class BbInstallIT {
     private static final List<String> NEW_FILES = List.of("bb-mutate",
                                                           "bb-hold",
                                                           "bb-wait",
+                                                          "bb-await",
                                                           "bb-netns-run",
                                                           "bb-portgroup.py");
 
@@ -229,6 +231,7 @@ class BbInstallIT {
                                                                     "installed builder@h1 bb-tickets before=absent after=" + pin("BB_TICKETS_NEW"),
                                                                     "installed builder@h1 bb-hold before=absent after=" + pin("BB_HOLD_NEW"),
                                                                     "installed builder@h1 bb-wait before=absent after=" + pin("BB_WAIT_NEW"),
+                                                                    "installed builder@h1 bb-await before=absent after=" + pin("BB_AWAIT_NEW"),
                                                                     "installed builder@h1 bb-netns-run before=absent after=" + pin("BB_NETNS_NEW"),
                                                                     "installed builder@h1 bb-portgroup.py before=absent after=" + pin("BB_PORTGROUP_NEW"),
                                                                     "installed builder@h1 bb-queue-lib.sh before=" + BbFixtures.BB_LIB_OLD
@@ -271,6 +274,7 @@ class BbInstallIT {
                                                                      "unchanged builder@h1 bb-tickets " + pin("BB_TICKETS_NEW"),
                                                                      "unchanged builder@h1 bb-hold " + pin("BB_HOLD_NEW"),
                                                                      "unchanged builder@h1 bb-wait " + pin("BB_WAIT_NEW"),
+                                                                     "unchanged builder@h1 bb-await " + pin("BB_AWAIT_NEW"),
                                                                      "unchanged builder@h1 bb-netns-run " + pin("BB_NETNS_NEW"),
                                                                      "unchanged builder@h1 bb-portgroup.py " + pin("BB_PORTGROUP_NEW"),
                                                                      "unchanged builder@h1 bb-queue-lib.sh " + pin("BB_LIB_NEW"),
@@ -463,6 +467,7 @@ class BbInstallIT {
                              "bb-tickets",
                              "bb-hold",
                              "bb-wait",
+                             "bb-await",
                              "bb-netns-run",
                              "bb-portgroup.py",
                              "bb-mutate")) {
@@ -595,6 +600,7 @@ class BbInstallIT {
                                 "bb-queue",
                                 "bb-hold",
                                 "bb-wait",
+                                "bb-await",
                                 "bb-netns-run",
                                 "bb-portgroup.py",
                                 "bb-mutate",
