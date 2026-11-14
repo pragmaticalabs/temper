@@ -341,12 +341,12 @@ class BbAwaitIT {
             assertThat(run.rc()).as(ok + ": " + run.stderr()).isZero();
         }
 
-        var zero = await("--file",
-                         dir.resolve("absent").toString(),
-                         "--deadline",
-                         "0s");
+        var zero = awaitInBackground("--file",
+                                     dir.resolve("absent").toString(),
+                                     "--deadline",
+                                     "0s");
 
-        assertThat(zero.rc()).as("a zero deadline ends at the first check").isEqualTo(124);
+        assertThat(exit(zero, 15)).as("a zero deadline ends at the first check").isEqualTo(124);
         for (var bad : List.of("90", "1d", "1.5h", "h", "9999999999s")) {
             assertThat(await("--file", present.toString(), "--deadline", bad).rc()).as(bad).isEqualTo(2);
         }
