@@ -57,7 +57,8 @@ readonly BB_HOLD_OLD=0bc2401b6e94fd05b66e1df04387e2ac   # the 2026-11-09 host sn
 readonly BB_HOLD_NEW=3561bb8e22fc2f7f3e98dc795f31eecb
 readonly BB_WAIT_PRERC=da248f0b4f9248f2bfed64330b3ca66e   # live on all four hosts from 2026-11-12: the ticket rc= is read from .bb/rc (replaced by the exit-status record)
 readonly BB_WAIT_NEW=d5b0ff8d43994a78cd188b4a41fcd995
-readonly BB_AWAIT_NEW=3b39f9bf2cbf8ec0e904104bd8061bf5   # issue #48: absent on every host before its first install
+# bb-await (issue #48): absent on every host before its first install. No trailing comment on a pin line: bb-drift reads it by pattern.
+readonly BB_AWAIT_NEW=3b39f9bf2cbf8ec0e904104bd8061bf5
 readonly BB_NETNS_PREV=9661165d4ef938ea43eec5b8d2d619d9   # 2026-11-11: no docker socket in the container; live on c3/c4/d1
 readonly BB_NETNS_NEW=bf05b7c51c2f7863ee685a195273e195
 readonly BB_PORTGROUP_PREV=a93ade2ff7dddcc75cee3d4169a08499   # the 2026-11-09 host snapshot, live on c4/d1 since 2026-11-11
