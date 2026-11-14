@@ -37,6 +37,7 @@ class BbDriftIT {
                                                            "bb-queue",
                                                            "bb-hold",
                                                            "bb-wait",
+                                                           "bb-await",
                                                            "bb-netns-run",
                                                            "bb-portgroup.py",
                                                            "kiln-scan",
@@ -45,10 +46,14 @@ class BbDriftIT {
                                                            "bb-probe-reap",
                                                            "bb-mutate");
 
-    private static final Map<String, String> VENDOR_PINS = Map.of("bb-build-direct", "50aa0b772fa7f916e2983be40e328b32",
-                                                                  "bb-hold-test.sh", "0f774ba7a36f0734077704319393892e",
-                                                                  "bb-report", "63b01be0cf9b6fab8c4f523118025a8c",
-                                                                  "bb-sockwatch", "cdcd6dc4958b5c77493d76fcb31cabfe");
+    private static final Map<String, String> VENDOR_PINS = Map.of("bb-build-direct",
+                                                                  "50aa0b772fa7f916e2983be40e328b32",
+                                                                  "bb-hold-test.sh",
+                                                                  "0f774ba7a36f0734077704319393892e",
+                                                                  "bb-report",
+                                                                  "63b01be0cf9b6fab8c4f523118025a8c",
+                                                                  "bb-sockwatch",
+                                                                  "cdcd6dc4958b5c77493d76fcb31cabfe");
 
     private static final String OLD_BB_CHECKOUT = "7098ea8dee142600771968559e15e4db";
 
@@ -164,8 +169,8 @@ class BbDriftIT {
 
         assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
         assertThat(run.stdout().lines().toList()).containsExactly("ok mac 2 files",
-                                                                  "ok builder@h1 13 files",
-                                                                  "ok builder@h2 13 files");
+                                                                  "ok builder@h1 14 files",
+                                                                  "ok builder@h2 14 files");
     }
 
     /// The comparison covers every file of every place: a planted mismatch in each one, alone, is reported and fails the run.
@@ -238,7 +243,7 @@ class BbDriftIT {
                                                                        "kiln-scan",
                                                                        "absent",
                                                                        expected("kiln-scan")),
-                                                                  "ok builder@h3 13 files");
+                                                                  "ok builder@h3 14 files");
     }
 
     /// A host still carrying the bb-tickets from before `progressAt` (the vendored `bb/bb-tickets.previous`, installer pin BB_TICKETS_OLD)
@@ -251,12 +256,16 @@ class BbDriftIT {
             assertThat(in).as("test resource bb/bb-tickets.previous").isNotNull();
             Files.write(h1.resolve("bb-tickets"), in.readAllBytes());
         }
+
         var previous = BbFixtures.md5(h1.resolve("bb-tickets"));
         var run = drift("builder@h1");
 
         assertThat(run.rc()).isEqualTo(1);
         assertThat(previous).isNotEqualTo(expected("bb-tickets"));
-        assertThat(run.stdout().lines().toList()).containsExactly(line("builder@h1", "bb-tickets", previous, expected("bb-tickets")));
+        assertThat(run.stdout().lines().toList()).containsExactly(line("builder@h1",
+                                                                       "bb-tickets",
+                                                                       previous,
+                                                                       expected("bb-tickets")));
     }
 
     @Test
@@ -316,7 +325,7 @@ class BbDriftIT {
                                                                        "bb-build",
                                                                        BbFixtures.md5(ops.resolve("bb-build")),
                                                                        pin("BB_BUILD_NEW")),
-                                                                       "ok builder@h1 13 files");
+                                                                  "ok builder@h1 14 files");
     }
 
     @Test
@@ -339,13 +348,15 @@ class BbDriftIT {
         var run = drift();
 
         assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
-        assertThat(run.stdout().lines().toList()).containsExactly("ok mac 2 files", "ok bigboy 13 files", "ok cloudbb-3 13 files",
-                                                                  "ok cloudbb-4 13 files");
-        assertThat(Files.readAllLines(log)).extracting(l -> l.split(" ")[0]).containsExactly(TestHosts.BIGBOY, TestHosts.C3, TestHosts.C4);
-
+        assertThat(run.stdout().lines().toList()).containsExactly("ok mac 2 files",
+                                                                  "ok bigboy 14 files",
+                                                                  "ok cloudbb-3 14 files",
+                                                                  "ok cloudbb-4 14 files");
+        assertThat(Files.readAllLines(log)).extracting(l -> l.split(" ") [0])
+                  .containsExactly(TestHosts.BIGBOY, TestHosts.C3, TestHosts.C4);
         var named = drift("cloudbb-d1");
 
-        assertThat(named.stdout().lines().toList()).containsExactly("ok cloudbb-d1 13 files");
+        assertThat(named.stdout().lines().toList()).containsExactly("ok cloudbb-d1 14 files");
         assertThat(Files.readAllLines(log)).last().asString().startsWith(TestHosts.D1 + " ");
     }
 
@@ -355,7 +366,6 @@ class BbDriftIT {
 
         assertThat(none.rc()).isEqualTo(78);
         assertThat(none.stderr()).contains("no host config");
-
         TestHosts.write(macHome);
         var unknown = drift("nowhere");
 
@@ -364,7 +374,8 @@ class BbDriftIT {
     }
 
     private void writeHosts(String text) throws IOException {
-        Files.writeString(Files.createDirectories(macHome.resolve(".config/bb-temper")).resolve("hosts"), text);
+        Files.writeString(Files.createDirectories(macHome.resolve(".config/bb-temper")).resolve("hosts"),
+                          text);
     }
 
     /// A hosts file saved with CRLF line ends parses exactly like the LF one.
@@ -378,15 +389,19 @@ class BbDriftIT {
         var run = drift();
 
         assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
-        assertThat(run.stdout().lines().toList()).containsExactly("ok mac 2 files", "ok bigboy 13 files", "ok cloudbb-3 13 files",
-                                                                  "ok cloudbb-4 13 files");
+        assertThat(run.stdout().lines().toList()).containsExactly("ok mac 2 files",
+                                                                  "ok bigboy 14 files",
+                                                                  "ok cloudbb-3 14 files",
+                                                                  "ok cloudbb-4 14 files");
     }
 
     /// Two `key` lines are malformed even when they name the same path: exit 78 naming the second line, before any ssh.
     @Test
     void aRepeatedKeyLine_isExit78_naming_theLine() throws Exception {
-        writeHosts("key ~/" + TestHosts.KEY + "\nkey ~/" + TestHosts.KEY + "\nhost bigboy " + TestHosts.BIGBOY + " - - auto\n");
-
+        writeHosts("key ~/" + TestHosts.KEY
+                  + "\nkey ~/" + TestHosts.KEY
+                  + "\nhost bigboy " + TestHosts.BIGBOY
+                  + " - - auto\n");
         var run = drift();
 
         assertThat(run.rc()).isEqualTo(78);
@@ -403,8 +418,10 @@ class BbDriftIT {
 
         assertThat(inDrift).contains("load_hosts()").isEqualTo(inTemper);
         var ipv4 = Pattern.compile("(?<![\\w.])\\d{1,3}(\\.\\d{1,3}){3}(?![\\w.])");
+
         for (var script : List.of(DRIFT, OPS_BB.resolve("bb-temper"), OPS_BB.resolve("install-bb-fields.sh"))) {
-            assertThat(ipv4.matcher(Files.readString(script)).results().map(m -> m.group()).toList()).as(script.toString()).isEmpty();
+            assertThat(ipv4.matcher(Files.readString(script)).results().map(m -> m.group()).toList()).as(script.toString())
+                      .isEmpty();
         }
     }
 
@@ -414,14 +431,24 @@ class BbDriftIT {
 
         assertThat(from).as("block start").isNotNegative();
         assertThat(to).as("block end").isGreaterThan(from);
+
         return script.substring(from, to);
     }
 
-    /// The four tools vendored on 2026-11-11 (bb-hold, bb-wait, bb-netns-run, bb-portgroup.py) are repo-sourced: held to their
+    /// The tools vendored on 2026-11-11 (bb-hold, bb-wait, bb-netns-run, bb-portgroup.py) and bb-await (#48) are repo-sourced: held to their
     /// install-bb-fields.sh pins, and never unlisted or "to be vendored".
     @Test
     void theVendoredQueueTools_areRepoSourced_atTheirPins() throws Exception {
-        var pins = Map.of("bb-hold", "BB_HOLD_NEW", "bb-wait", "BB_WAIT_NEW", "bb-netns-run", "BB_NETNS_NEW", "bb-portgroup.py", "BB_PORTGROUP_NEW");
+        var pins = Map.of("bb-hold",
+                          "BB_HOLD_NEW",
+                          "bb-wait",
+                          "BB_WAIT_NEW",
+                          "bb-await",
+                          "BB_AWAIT_NEW",
+                          "bb-netns-run",
+                          "BB_NETNS_NEW",
+                          "bb-portgroup.py",
+                          "BB_PORTGROUP_NEW");
 
         for (var e : pins.entrySet()) {
             assertThat(BbFixtures.md5(OPS_BB.resolve(e.getKey()))).as(e.getKey()).isEqualTo(pin(e.getValue()));
@@ -429,14 +456,18 @@ class BbDriftIT {
 
         var ops = repoCopy();
 
-        Files.writeString(ops.resolve("bb-wait"), Files.readString(ops.resolve("bb-wait")) + "# edited without a new pin\n");
+        Files.writeString(ops.resolve("bb-wait"),
+                          Files.readString(ops.resolve("bb-wait")) + "# edited without a new pin\n");
         var tools = host("h1");
 
         Files.copy(ops.resolve("bb-wait"), tools.resolve("bb-wait"), StandardCopyOption.REPLACE_EXISTING);
         var run = drift(ops.resolve("bb-drift"), "builder@h1");
 
-        assertThat(run.stdout().lines().toList()).containsExactly(line("repo", "bb-wait", BbFixtures.md5(ops.resolve("bb-wait")), pin("BB_WAIT_NEW")),
-                                                                  "ok builder@h1 13 files");
+        assertThat(run.stdout().lines().toList()).containsExactly(line("repo",
+                                                                       "bb-wait",
+                                                                       BbFixtures.md5(ops.resolve("bb-wait")),
+                                                                       pin("BB_WAIT_NEW")),
+                                                                  "ok builder@h1 14 files");
     }
 
     /// bb-mutate is repo-sourced (imported with the batch fix): a host at the repo file (= BB_MUTATE_NEW) is clean and never "to be vendored";
@@ -448,12 +479,12 @@ class BbDriftIT {
         var ok = drift("builder@h1");
 
         assertThat(ok.rc()).as(ok.stdout() + ok.stderr()).isZero();
-        assertThat(ok.stdout().lines().toList()).containsExactly("ok builder@h1 13 files");
-
+        assertThat(ok.stdout().lines().toList()).containsExactly("ok builder@h1 14 files");
         try (var in = BbDriftIT.class.getResourceAsStream("/bb/bb-mutate.prev")) {
             assertThat(in).as("test resource bb/bb-mutate.prev").isNotNull();
             Files.write(tools.resolve("bb-mutate"), in.readAllBytes());
         }
+
         var old = drift("builder@h1");
 
         assertThat(old.rc()).isEqualTo(1);
@@ -471,7 +502,8 @@ class BbDriftIT {
         assertThat(BbFixtures.md5(OPS_BB.resolve("bb-queue"))).isEqualTo(pin("BB_QUEUE_NEW"));
         var ops = repoCopy();
 
-        Files.writeString(ops.resolve("bb-queue"), Files.readString(ops.resolve("bb-queue")) + "# edited without a new pin\n");
+        Files.writeString(ops.resolve("bb-queue"),
+                          Files.readString(ops.resolve("bb-queue")) + "# edited without a new pin\n");
         var tools = host("h1");
 
         Files.copy(ops.resolve("bb-queue"), tools.resolve("bb-queue"), StandardCopyOption.REPLACE_EXISTING);
@@ -481,7 +513,7 @@ class BbDriftIT {
                                                                        "bb-queue",
                                                                        BbFixtures.md5(ops.resolve("bb-queue")),
                                                                        pin("BB_QUEUE_NEW")),
-                                                                  "ok builder@h1 13 files");
+                                                                  "ok builder@h1 14 files");
     }
 
     /// The host-only tools: the pin table is exactly the 4 names of the 2026-11-09 snapshot that are not vendored yet, at its md5s (bb-hold and
@@ -515,8 +547,8 @@ class BbDriftIT {
 
         assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
         assertThat(run.stdout().lines().toList()).containsExactly("vendor builder@h1 bb-report md5=" + md5Of("a bb-report\n")
-                                                                  + " to be vendored (PR next)",
-                                                                  "ok builder@h1 13 files");
+                                                                 + " to be vendored (PR next)",
+                                                                  "ok builder@h1 14 files");
     }
 
     /// bb-checkout (probes-aware) and bb-probe-reap are repo-sourced: a host carrying the repo files is clean, the OLD vendored
@@ -526,14 +558,14 @@ class BbDriftIT {
         var clean = drift_("h0");
 
         assertThat(clean.rc()).as(clean.stdout() + clean.stderr()).isZero();
-        assertThat(clean.stdout().lines().toList()).containsExactly("ok builder@h0 13 files");
-
+        assertThat(clean.stdout().lines().toList()).containsExactly("ok builder@h0 14 files");
         var tools = host("h1");
 
         try (var in = BbDriftIT.class.getResourceAsStream("/bb/bb-checkout.original")) {
             assertThat(in).as("test resource bb/bb-checkout.original").isNotNull();
             Files.write(tools.resolve("bb-checkout"), in.readAllBytes());
         }
+
         Files.delete(tools.resolve("bb-probe-reap"));
         var run = drift("builder@h1");
 
@@ -543,7 +575,10 @@ class BbDriftIT {
                                                                        "bb-checkout",
                                                                        OLD_BB_CHECKOUT,
                                                                        expected("bb-checkout")),
-                                                                  line("builder@h1", "bb-probe-reap", "absent", expected("bb-probe-reap")));
+                                                                  line("builder@h1",
+                                                                       "bb-probe-reap",
+                                                                       "absent",
+                                                                       expected("bb-probe-reap")));
     }
 
     /// Exactly the old vendored bb-checkout md5 is drift (not "to be vendored"): the pin is gone from the script.
@@ -601,8 +636,7 @@ class BbDriftIT {
         var clean = drift("builder@h1");
 
         assertThat(clean.rc()).as(clean.stdout() + clean.stderr()).isZero();
-        assertThat(clean.stdout().lines().toList()).containsExactly("ok builder@h1 13 files");
-
+        assertThat(clean.stdout().lines().toList()).containsExactly("ok builder@h1 14 files");
         Files.delete(tools.resolve("maven"));
         Files.writeString(tools.resolve("maven"), "not a directory\n");
         Files.createDirectories(tools.resolve("scratch"));
@@ -610,7 +644,7 @@ class BbDriftIT {
 
         assertThat(run.rc()).isEqualTo(1);
         assertThat(run.stdout().lines().toList()).containsExactlyInAnyOrder("unlisted builder@h1 maven md5=" + md5Of("not a directory\n"),
-                                                                             "unlisted builder@h1 scratch md5=dir");
+                                                                            "unlisted builder@h1 scratch md5=dir");
     }
 
     /// Ignored backups are anchored: only `<known tool>.bak*` / `<known tool>.pre-*` pass; any other name carrying the marker is unlisted.
@@ -624,7 +658,8 @@ class BbDriftIT {
             var run = drift(place);
 
             assertThat(run.rc()).as(name + ": " + run.stdout() + run.stderr()).isEqualTo(1);
-            assertThat(run.stdout().lines().toList()).as(name).containsExactly("unlisted " + place + " " + name + " md5=" + md5Of("x\n"));
+            assertThat(run.stdout().lines().toList()).as(name)
+                      .containsExactly("unlisted " + place + " " + name + " md5=" + md5Of("x\n"));
         }
     }
 
@@ -637,7 +672,7 @@ class BbDriftIT {
         var run = drift("builder@h1");
 
         assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
-        assertThat(run.stdout().lines().toList()).containsExactly("ok builder@h1 13 files");
+        assertThat(run.stdout().lines().toList()).containsExactly("ok builder@h1 14 files");
     }
 
     /// `maven` is accepted only when it resolves to an existing directory.
@@ -648,13 +683,13 @@ class BbDriftIT {
         Files.createDirectories(real.resolve("maven/bin"));
         var viaLink = host("h-link");
 
-        Files.createSymbolicLink(viaLink.resolve("maven"), Files.createDirectories(dir.resolve("apache-maven-x")));
-
+        Files.createSymbolicLink(viaLink.resolve("maven"),
+                                 Files.createDirectories(dir.resolve("apache-maven-x")));
         for (var place : List.of("builder@h-real", "builder@h-link")) {
             var run = drift(place);
 
             assertThat(run.rc()).as(place + ": " + run.stdout() + run.stderr()).isZero();
-            assertThat(run.stdout().lines().toList()).containsExactly("ok " + place + " 13 files");
+            assertThat(run.stdout().lines().toList()).containsExactly("ok " + place + " 14 files");
         }
     }
 
@@ -669,13 +704,19 @@ class BbDriftIT {
         var regular = host("h-regular");
 
         Files.writeString(regular.resolve("maven"), "file\n");
-        var expected = Map.of("builder@h-dangling", "other", "builder@h-devnull", "other", "builder@h-regular", md5Of("file\n"));
+        var expected = Map.of("builder@h-dangling",
+                              "other",
+                              "builder@h-devnull",
+                              "other",
+                              "builder@h-regular",
+                              md5Of("file\n"));
 
         for (var e : expected.entrySet()) {
             var run = drift(e.getKey());
 
             assertThat(run.rc()).as(e.getKey() + ": " + run.stdout() + run.stderr()).isEqualTo(1);
-            assertThat(run.stdout().lines().toList()).as(e.getKey()).containsExactly("unlisted " + e.getKey() + " maven md5=" + e.getValue());
+            assertThat(run.stdout().lines().toList()).as(e.getKey())
+                      .containsExactly("unlisted " + e.getKey() + " maven md5=" + e.getValue());
         }
     }
 
@@ -685,17 +726,20 @@ class BbDriftIT {
         Files.createDirectories(dir.resolve("copy/kiln"));
         try (var files = Files.list(OPS_BB)) {
             for (var f : files.toList()) {
-                Files.copy(f, ops.resolve(f.getFileName()));
+                Files.copy(f,
+                           ops.resolve(f.getFileName()));
             }
         }
 
         try (var files = Files.list(OPS_KILN)) {
             for (var f : files.toList()) {
-                Files.copy(f, dir.resolve("copy/kiln").resolve(f.getFileName()));
+                Files.copy(f,
+                           dir.resolve("copy/kiln").resolve(f.getFileName()));
             }
         }
 
-        BbFixtures.executable(ops.resolve("bb-drift"), Files.readString(ops.resolve("bb-drift")));
+        BbFixtures.executable(ops.resolve("bb-drift"),
+                              Files.readString(ops.resolve("bb-drift")));
 
         return ops;
     }
