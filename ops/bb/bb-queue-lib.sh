@@ -18,6 +18,13 @@ LOAD_MAX=${BB_LOAD_MAX:-1.2}
 LOAD_STARVE=${BB_LOAD_STARVE_SECS:-1200}
 LOAD_STARVE_REACTORS=${BB_LOAD_STARVE_REACTORS:-2}
 LOADAVG=${BB_TEST_LOADAVG:-/proc/loadavg}   # TEST ONLY: a file in /proc/loadavg format, read instead
+# MEMORY FLOOR (issue #53, CTO ruling 2026-11-14): a ticket is granted only while MemAvailable >= mem_floor_gb GiB, because memory
+# used outside the queue is invisible to the load gate (2026-11-13, cloudbb-4: hand-started TLC beside queued reactors, OOM kills).
+# The floor is the per-host file $MEMFLOOR (one positive integer, read at every pick), else BB_MEM_FLOOR_GB, else 8. Default 8 GB:
+# the largest single grant is one maven JVM (~2.4 GB) plus one surefire fork (~3.6 GB), about 6 GB, plus headroom; re-measure it
+# if the fork heap changes. The load gate's starvation override never bypasses this floor while any reactor runs (see pick).
+MEMFLOOR=${BB_TEST_MEM_FLOOR_FILE:-$HOME/work/mem-floor-gb}
+MEMINFO=${BB_TEST_MEMINFO:-/proc/meminfo}   # TEST ONLY: a file in /proc/meminfo format, read instead
 # TICKET LOG (2026-11-11): one TSV line per ticket when it reaches done/ (see ticket_log).
 TLOG=${BB_TEST_TICKET_LOG:-$HOME/work/bb-ticket-log.tsv}
 mkdir -p "$Q/waiting" "$Q/running" "$Q/done"
@@ -224,7 +231,7 @@ reap() {
 # (first time only); once any skipped ticket has been blocked for STARVE seconds, nothing behind it is granted, so the
 # host drains and it runs.
 pick() {
-  local r id f c bs now cand="" oldest="" ocr=0 cr; r=$(reactors); now=$(date +%s)
+  local r id f c bs now lh mh cand="" oldest="" ocr=0 cr; r=$(reactors); now=$(date +%s)
   for id in $(grantable); do
     f=$Q/waiting/$id; c=$(field "$f" cap); case "$c" in ''|*[!0-9]*) c=3;; esac
     cr=$(created_s "$f"); if [ -z "$oldest" ] || [ "$cr" -lt "$ocr" ]; then oldest=$id; ocr=$cr; fi
@@ -234,13 +241,20 @@ pick() {
     [ $((now - bs)) -ge "$STARVE" ] && return 0
   done
   [ -n "$cand" ] || return 0
-  [ -z "$(load_held)" ] && { echo "$cand"; return 0; }
-  # LOAD GATE held. Starvation bound: the OLDEST grantable ticket goes regardless of load once it has waited > LOAD_STARVE s, fewer
-  # than LOAD_STARVE_REACTORS reactors run, and its own cap allows a start; the override is recorded on the ticket (load_override=).
-  [ $((now - ocr)) -gt "$LOAD_STARVE" ] && [ "$r" -lt "$LOAD_STARVE_REACTORS" ] || return 0
+  lh=$(load_held); mh=$(mem_held)
+  [ -z "$lh" ] && [ -z "$mh" ] && { echo "$cand"; return 0; }
+  # A GATE is held. Starvation bound: the OLDEST grantable ticket goes once it has waited > LOAD_STARVE s and its own cap allows a
+  # start, provided every held gate may be overridden: the LOAD GATE while fewer than LOAD_STARVE_REACTORS reactors run, the MEMORY
+  # FLOOR only while NO reactor runs (granting into low memory beside a running reactor reproduces the OOM; with none running, an
+  # outside job must not wedge the queue). Each override is recorded on the ticket (load_override=, mem_override=).
+  [ $((now - ocr)) -gt "$LOAD_STARVE" ] || return 0
+  [ -z "$lh" ] || [ "$r" -lt "$LOAD_STARVE_REACTORS" ] || return 0
+  [ -z "$mh" ] || [ "$r" -eq 0 ] || return 0
   f=$Q/waiting/$oldest; c=$(field "$f" cap); case "$c" in ''|*[!0-9]*) c=3;; esac
   [ "$r" -lt "$c" ] || return 0
-  echo "load_override=$now waited=$((now - ocr))s reactors=$r $(load_held)" >> "$f"; echo "$oldest"
+  [ -z "$lh" ] || echo "load_override=$now waited=$((now - ocr))s reactors=$r $lh" >> "$f"
+  [ -z "$mh" ] || echo "mem_override=$now waited=$((now - ocr))s reactors=$r $(mem_available_gb) $mh" >> "$f"
+  echo "$oldest"
   return 0
 }
 # created_s <ticket>: enqueue time in epoch seconds (created= is nanoseconds); 0 if unreadable.
@@ -250,6 +264,21 @@ created_s() { local c; c=$(field "$1" created); case "$c" in ''|*[!0-9]*) echo 0
 load_held() {
   local cores; cores=$(nproc 2>/dev/null); case "$cores" in ''|*[!0-9]*|0) cores=1;; esac
   awk -v c="$cores" -v m="$LOAD_MAX" 'NR == 1 { if ($2 ~ /^[0-9]+(\.[0-9]+)?$/ && $2 / c >= m + 0) printf "held: load %.2f/core (ceiling %s; load5 %s, %d cores)\n", $2 / c, m, $2, c; exit }' "$LOADAVG" 2>/dev/null || true
+}
+# mem_floor_gb: the memory floor in GiB: the first line of $MEMFLOOR if it is a positive integer, else BB_MEM_FLOOR_GB if it is one, else 8.
+mem_floor_gb() {
+  local n; n=$(sed -n 's/^[[:space:]]*\([1-9][0-9]*\)[[:space:]]*$/\1/p' "$MEMFLOOR" 2>/dev/null | head -1)
+  [ -n "$n" ] || case "${BB_MEM_FLOOR_GB:-}" in ''|0*|*[!0-9]*) ;; *) n=$BB_MEM_FLOOR_GB;; esac
+  echo "${n:-8}"
+}
+# mem_available_gb: "MemAvailable=<x.x>GB" from $MEMINFO, or nothing when it is unreadable or malformed.
+mem_available_gb() {
+  awk '$1 == "MemAvailable:" { if ($2 ~ /^[0-9]+$/ && $3 == "kB") printf "MemAvailable=%.1fGB\n", $2 / 1048576; exit }' "$MEMINFO" 2>/dev/null || true
+}
+# mem_held: nothing when MemAvailable >= the floor, else the reason ("held: MemAvailable 5.1 GB < floor 8 GB"). An unreadable or
+# malformed meminfo (no MemAvailable line, a non-numeric value, a unit other than kB) never holds the queue.
+mem_held() {
+  awk -v fl="$(mem_floor_gb)" '$1 == "MemAvailable:" { if ($2 ~ /^[0-9]+$/ && $3 == "kB" && $2 / 1048576 < fl + 0) printf "held: MemAvailable %.1f GB < floor %d GB\n", $2 / 1048576, fl; exit }' "$MEMINFO" 2>/dev/null || true
 }
 
 # to_done <ticket file>: move a ticket that has just got its terminal state lines to done/, then log it. Caller holds the queue lock.
