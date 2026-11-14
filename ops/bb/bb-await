@@ -14,11 +14,14 @@
 #   --file <path>   wait until the path exists (any file type); prints `awaited file=<path> present`, exit 0.
 #   --gone <pid>    wait until process <pid> is gone (a numeric pid >= 1 only; `kill -0` fails and `ps -p` finds nothing, so a
 #                   process of another user still counts as alive); prints `awaited pid=<pid> gone`, exit 0. A zombie counts as alive.
-#   --deadline <d>  <digits><s|m|h>, default 6h. When it has passed: `bb-await: deadline <d> passed waiting for <what>` on stderr,
-#                   exit 124. The last sleep is cut to the time left; the deadline is measured with the 1 s resolution of SECONDS, so the wait ends within a second of it.
-# Poll interval: BB_AWAIT_INTERVAL seconds, default 5 (a number, fractions allowed; tests set it low).
+#   --deadline <d>  <digits><s|m|h>, at most 9 digits, default 6h. When it has passed: `bb-await: deadline <d> passed waiting for <what>` on
+#                   stderr, exit 124. Precision: the clock is $EPOCHREALTIME (microseconds, bash >= 5; whole seconds of $SECONDS on an older bash),
+#                   so 124 never comes before the deadline and comes after it by one poll's overhead; the last sleep is cut to the time left.
+#                   A --ticket wait for the queue lock is bounded by the deadline too (flock -w).
+# Poll interval: BB_AWAIT_INTERVAL seconds, default 5 (a positive number, fractions allowed; zero, negative or malformed -> 5; tests set it low).
+# Signals: TERM, INT and HUP kill the sleep in progress and exit 128+signal (143, 130, 129), so no sleep is left behind with ppid 1.
 # Exit: see above; 2 usage (unknown flag, none or several of --ticket/--file/--gone, missing or malformed value, a pid that is not
-# plain digits, a pattern); 124 deadline.
+# plain digits, a pattern); 124 deadline; 128+sig killed.
 set -uo pipefail
 usage() { echo "usage: bb-await --ticket <id> | --file <path> | --gone <pid> [--deadline <digits><s|m|h>]   (never a pattern)" >&2; exit 2; }
 
@@ -33,7 +36,7 @@ done
 [ -n "$MODE" ] && [ -n "$ARG" ] || usage
 [[ $DL =~ ^[0-9]+[smh]$ ]] || usage
 n=${DL%[smh]}; case $DL in *s) mult=1;; *m) mult=60;; *h) mult=3600;; esac
-# 10# keeps a leading zero from being read as octal; 10 digits at most keeps the arithmetic far from overflow
+# 10# keeps a leading zero from being read as octal; 9 digits at most keeps the arithmetic far from overflow
 [ ${#n} -le 9 ] || usage
 LIMIT=$((10#$n * mult))
 case $MODE in
@@ -41,7 +44,19 @@ case $MODE in
   gone)   [[ $ARG =~ ^[1-9][0-9]{0,9}$ ]] || usage; WHAT="pid $ARG to exit";;
   file)   WHAT="file $ARG";;
 esac
-IV=${BB_AWAIT_INTERVAL:-5}; [[ $IV =~ ^[0-9]+(\.[0-9]+)?$ ]] || IV=5
+IV=${BB_AWAIT_INTERVAL:-5}; [[ $IV =~ ^[0-9]+(\.[0-9]*)?$ ]] || IV=5
+# microseconds: whole part and up to 6 fraction digits; non-positive -> 5 s (a zero interval would busy-loop)
+ip=${IV%%.*}; fp=; case $IV in *.*) fp=${IV#*.};; esac; fp=${fp}000000
+IV_US=$((10#$ip * 1000000 + 10#${fp:0:6})); [ "$IV_US" -gt 0 ] || IV_US=5000000
+now_us() { if [ -n "${EPOCHREALTIME:-}" ]; then NOW=${EPOCHREALTIME//[.,]/}; else NOW=$((SECONDS * 1000000)); fi; }
+secs() { printf '%d.%06d' $(($1 / 1000000)) $(($1 % 1000000)); }
+# rem_us: REM = microseconds left to the deadline
+rem_us() { now_us; REM=$((LIMIT * 1000000 - (NOW - START))); }
+deadline_hit() { echo "bb-await: deadline $DL passed waiting for $WHAT" >&2; exit 124; }
+SP=
+on_sig() { [ -z "$SP" ] || kill "$SP" 2>/dev/null; exit $((128 + $1)); }
+trap 'on_sig 15' TERM; trap 'on_sig 2' INT; trap 'on_sig 1' HUP
+now_us; START=$NOW
 
 if [ "$MODE" = ticket ]; then
   SELF=$(readlink -f "$0")
@@ -59,7 +74,9 @@ check() {
 }
 ticket_check() {
   local where=none d f st rc cr s e wall wt rn log
-  flock 8; reap; for d in done waiting running; do [ -f "$Q/$d/$ARG" ] && { where=$d; break; }; done; flock -u 8
+  rem_us; [ "$REM" -gt 1000 ] || REM=1000
+  flock -w "$(secs "$REM")" 8 || deadline_hit
+  reap; for d in done waiting running; do [ -f "$Q/$d/$ARG" ] && { where=$d; break; }; done; flock -u 8
   [ "$where" != none ] || { echo "bb-await: unknown ticket $ARG (not in $Q/{waiting,running,done})" >&2; exit 4; }
   [ "$where" = done ] || return 0
   f=$Q/done/$ARG
@@ -79,11 +96,12 @@ ticket_check() {
   esac
 }
 
-START=$SECONDS
 while :; do
   check
-  rem=$((LIMIT - (SECONDS - START)))
-  [ "$rem" -gt 0 ] || { echo "bb-await: deadline $DL passed waiting for $WHAT" >&2; exit 124; }
-  # the last sleep is cut to the time left, so a long interval cannot overshoot the deadline by more than a second
-  if [ "${IV%%.*}" -ge "$rem" ]; then sleep "$rem"; else sleep "$IV"; fi
+  rem_us
+  [ "$REM" -gt 0 ] || deadline_hit
+  # the last sleep is cut to the time left, so a long interval cannot overshoot the deadline
+  t=$IV_US; [ "$REM" -ge "$t" ] || t=$REM
+  sleep "$(secs "$t")" & SP=$!
+  wait "$SP" 2>/dev/null; SP=
 done

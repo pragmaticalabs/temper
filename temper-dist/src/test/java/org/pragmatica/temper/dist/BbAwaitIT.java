@@ -38,6 +38,7 @@ class BbAwaitIT {
     private Path tools;
     private Path fake;
     private int outputs;
+    private final Map<String, String> overrides = new HashMap<>();
     private final List<Process> started = new ArrayList<>();
 
     @BeforeEach
@@ -78,6 +79,7 @@ class BbAwaitIT {
                 dir.resolve("none-modules").toString());
         env.put("BB_TEST_REACTOR_PATTERN", "[n]o-such-maven-reactor");
         env.put("BB_AWAIT_INTERVAL", "0.2");
+        env.putAll(overrides);
 
         return env;
     }
@@ -293,6 +295,147 @@ class BbAwaitIT {
 
         assertThat(exit(gone, 15)).isEqualTo(124);
         assertThat(Files.readString(gone.err())).contains("waiting for pid " + sleeper.pid());
+    }
+
+    // ---- the deadline binds everything (#48 verifier v54a)
+    @Test
+    void aHeldQueueLock_doesNotOverrunTheTicketDeadline() throws Exception {
+        var held = dir.resolve("held");
+        var holder = HermeticProcess.builder("bash",
+                                             "-c",
+                                             "exec 9> \"$1\"; flock 9; echo held; exec sleep 30",
+                                             "_",
+                                             queue.resolve(".lock").toString());
+
+        holder.redirectOutput(held.toFile()).redirectErrorStream(true);
+        started.add(holder.start());
+        for (var i = 0; i < 100 && (!Files.exists(held) || Files.readString(held).isEmpty()); i++) {
+            Thread.sleep(50);
+        }
+
+        assertThat(Files.readString(held)).as("the lock holder has the lock").contains("held");
+        var t0 = System.nanoTime();
+        var wait = awaitInBackground("--ticket", "1-1", "--deadline", "2s");
+        var rc = exit(wait, 8);
+        var seconds = (System.nanoTime() - t0) / 1_000_000_000.0;
+
+        assertThat(rc).as(Files.readString(wait.err())).isEqualTo(124);
+        assertThat(Files.readString(wait.err())).contains("deadline 2s passed waiting for ticket 1-1");
+        assertThat(seconds).isBetween(1.9, 4.5);
+    }
+
+    @Test
+    void aProcessOfAnotherUser_countsAsAlive() throws Exception {
+        assumeTrue(!"root".equals(System.getProperty("user.name")),
+                   "assumes the test user is not root, so pid 1 (root) is another user's process");
+        var wait = awaitInBackground("--gone", "1", "--deadline", "2s");
+
+        assertThat(exit(wait, 15)).as(Files.readString(wait.err())).isEqualTo(124);
+    }
+
+    @Test
+    void minutesAndHours_areNotReadAsSeconds() throws Exception {
+        for (var unit : List.of("1m", "1h")) {
+            var sleeper = HermeticProcess.builder("sleep", "600").start();
+
+            started.add(sleeper);
+            var wait = awaitInBackground("--gone",
+                                         Long.toString(sleeper.pid()),
+                                         "--deadline",
+                                         unit);
+
+            assertThat(wait.process().waitFor(3, TimeUnit.SECONDS)).as(unit + " is still waiting after 3 s").isFalse();
+            wait.process().destroyForcibly();
+            sleeper.destroyForcibly();
+        }
+    }
+
+    @Test
+    void killingTheWait_leavesNoSleepBehind() throws Exception {
+        overrides.put("BB_AWAIT_INTERVAL", "30");
+        var wait = awaitInBackground("--file",
+                                     dir.resolve("never").toString(),
+                                     "--deadline",
+                                     "60s");
+        ProcessHandle child = null;
+
+        for (var i = 0; i < 60 && child == null; i++) {
+            child = wait.process().children().findFirst().orElse(null);
+            Thread.sleep(50);
+        }
+
+        assertThat(child).as("bb-await's sleep").isNotNull();
+        wait.process().destroy();
+        assertThat(exit(wait, 5)).as("128 + TERM").isEqualTo(143);
+        for (var i = 0; i < 40 && running(child.pid()); i++) {
+            Thread.sleep(50);
+        }
+
+        assertThat(running(child.pid())).as("the sleep is gone").isFalse();
+    }
+
+    @Test
+    void theDeadline_neverEndsEarly() throws Exception {
+        overrides.put("BB_AWAIT_INTERVAL", "0.7");
+        var t0 = System.nanoTime();
+        var wait = awaitInBackground("--file",
+                                     dir.resolve("never").toString(),
+                                     "--deadline",
+                                     "2s");
+        var rc = exit(wait, 15);
+        var seconds = (System.nanoTime() - t0) / 1_000_000_000.0;
+
+        assertThat(rc).isEqualTo(124);
+        assertThat(seconds).as("not before the deadline, not a whole poll late").isBetween(2.0, 3.5);
+    }
+
+    @Test
+    void aNonPositiveInterval_fallsBackToFive_andDoesNotSpin() throws Exception {
+        var shimDir = Files.createDirectories(dir.resolve("shim"));
+        var log = dir.resolve("sleeps");
+        var real = Files.exists(Path.of("/usr/bin/sleep"))
+                   ? "/usr/bin/sleep"
+                   : "/bin/sleep";
+
+        BbFixtures.executable(shimDir.resolve("sleep"),
+                              "#!/bin/bash\necho \"$*\" >> " + log + "\nexec " + real + " \"$@\"\n");
+        overrides.put("PATH", shimDir + ":" + System.getenv("PATH"));
+        for (var interval : List.of("0", "0.0", "0.000000", "-1")) {
+            Files.deleteIfExists(log);
+            overrides.put("BB_AWAIT_INTERVAL", interval);
+            var run = await("--file",
+                            dir.resolve("never").toString(),
+                            "--deadline",
+                            "1s");
+
+            assertThat(run.rc()).as(interval + ": " + run.stderr()).isEqualTo(124);
+            assertThat(Files.readAllLines(log)).as("sleeps with interval " + interval).hasSizeLessThanOrEqualTo(2);
+        }
+    }
+
+    @Test
+    void aZombie_countsAsAlive() throws Exception {
+        var builder = HermeticProcess.builder("sh", "-c", "sleep 0.1 & echo $!; exec sleep 30");
+        var out = dir.resolve("zombie-pid");
+
+        builder.redirectOutput(out.toFile());
+        started.add(builder.start());
+        Thread.sleep(700);
+        var pid = Files.readString(out).trim();
+
+        assertThat(Files.readString(Path.of("/proc/" + pid + "/stat"))).as("the setup made a zombie").contains(") Z ");
+        var wait = awaitInBackground("--gone", pid, "--deadline", "1s");
+
+        assertThat(exit(wait, 15)).as(Files.readString(wait.err())).isEqualTo(124);
+    }
+
+    /// alive and not a zombie
+    private static boolean running(long pid) {
+        try {
+            return ! Files.readString(Path.of("/proc/" + pid + "/stat")).contains(") Z ");
+        } catch (IOException e) {
+            return false;
+        }
     }
 
     // ---- usage: never a pattern
