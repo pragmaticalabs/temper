@@ -224,11 +224,12 @@ class BbAwaitIT {
         waiterFor(id);
         awaitWaiter(id);
         var t0 = System.nanoTime();
-        var run = await("--ticket", id, "--deadline", "2s");
+        var wait = awaitInBackground("--ticket", id, "--deadline", "2s");
+        var rc = exit(wait, 15);
         var seconds = (System.nanoTime() - t0) / 1_000_000_000.0;
 
-        assertThat(run.rc()).as(run.stdout() + run.stderr()).isEqualTo(124);
-        assertThat(run.stderr()).contains("deadline 2s passed waiting for ticket " + id);
+        assertThat(rc).as(Files.readString(wait.err())).isEqualTo(124);
+        assertThat(Files.readString(wait.err())).contains("deadline 2s passed waiting for ticket " + id);
         assertThat(seconds).isLessThan(15.0);
     }
 
@@ -275,22 +276,23 @@ class BbAwaitIT {
     void aDeadline_endsTheWaitWithExit124_namingWhatWasAwaited() throws Exception {
         var never = dir.resolve("never-written");
         var t0 = System.nanoTime();
-        var run = await("--file", never.toString(), "--deadline", "2s");
+        var wait = awaitInBackground("--file", never.toString(), "--deadline", "2s");
+        var rc = exit(wait, 15);
         var seconds = (System.nanoTime() - t0) / 1_000_000_000.0;
 
-        assertThat(run.rc()).as(run.stdout() + run.stderr()).isEqualTo(124);
-        assertThat(run.stderr()).contains("deadline 2s passed waiting for file " + never);
+        assertThat(rc).as(Files.readString(wait.err())).isEqualTo(124);
+        assertThat(Files.readString(wait.err())).contains("deadline 2s passed waiting for file " + never);
         assertThat(seconds).as("within a second of the deadline, never an unbounded wait").isBetween(0.9, 8.0);
         var sleeper = HermeticProcess.builder("sleep", "600").start();
 
         started.add(sleeper);
-        var gone = await("--gone",
-                         Long.toString(sleeper.pid()),
-                         "--deadline",
-                         "1s");
+        var gone = awaitInBackground("--gone",
+                                     Long.toString(sleeper.pid()),
+                                     "--deadline",
+                                     "1s");
 
-        assertThat(gone.rc()).isEqualTo(124);
-        assertThat(gone.stderr()).contains("waiting for pid " + sleeper.pid());
+        assertThat(exit(gone, 15)).isEqualTo(124);
+        assertThat(Files.readString(gone.err())).contains("waiting for pid " + sleeper.pid());
     }
 
     // ---- usage: never a pattern
