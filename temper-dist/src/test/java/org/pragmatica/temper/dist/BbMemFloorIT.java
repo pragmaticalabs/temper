@@ -28,7 +28,9 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 ///
 /// Probes: drop mem_held from pick's gate -> [#belowTheFloor_holdsTheGrant_andAboveItGrants] red; let the memory override fire with a
 /// reactor running -> [#oneReactorBelowTheFloor_neverGrants_evenPastLoadStarve] red; make an unreadable meminfo hold ->
-/// [#anUnreadableOrMalformedMeminfo_neverHoldsTheQueue] red.
+/// [#anUnreadableOrMalformedMeminfo_neverHoldsTheQueue] red; write the override record whatever the caller ->
+/// [#theOverrideRecord_isWrittenOnceByTheOldestsOwnWaiter_andNotAtAll_ifTheTicketGoesTheNormalWay] red; drop the running/ check ->
+/// [#aRunningTicketWithNoLauncher_suchAsABbHold_blocksTheMemoryOverride] red.
 class BbMemFloorIT {
     private static final long GIB_KB = 1024L * 1024L;
 
@@ -107,11 +109,54 @@ class BbMemFloorIT {
         var old = ticket("old", 2000);
 
         memAvailableKb(5 * GIB_KB);
-        assertThat(pick()).isEqualTo(old);
+        assertThat(pick(old)).isEqualTo(old);
         assertThat(field(old, "mem_override")).matches("[0-9]+ waited=(19|20)[0-9]{2}s reactors=0 MemAvailable=5\\.0GB"
                                                       + " held: MemAvailable 5\\.0 GB < floor 8 GB");
         assertThat(field(old, "load_override")).as("load was fine, so no load override").isEmpty();
         assertThat(field(young, "mem_override")).isEmpty();
+    }
+
+    @Test
+    void aRunningTicketWithNoLauncher_suchAsABbHold_blocksTheMemoryOverride() throws Exception {
+        var old = ticket("old", 5000);
+        var running = Files.createDirectories(dir.resolve("q/running"));
+
+        Files.writeString(running.resolve("hold-" + BbFixtures.RUN), "kind=bb-hold\nowner=memfloor\n");
+        memAvailableKb(5 * GIB_KB);
+        assertThat(count()).as("a hold has no maven launcher").isEqualTo("0");
+        assertThat(pick(old)).isEmpty();
+        assertThat(field(old, "mem_override")).isEmpty();
+        Files.delete(running.resolve("hold-" + BbFixtures.RUN));
+        assertThat(pick(old)).as("nothing runs any more").isEqualTo(old);
+    }
+
+    @Test
+    void theOverrideRecord_isWrittenOnceByTheOldestsOwnWaiter_andNotAtAll_ifTheTicketGoesTheNormalWay() throws Exception {
+        var old = ticket("old", 2000);
+        var other = ticket("other", 100);
+
+        memAvailableKb(5 * GIB_KB);
+        loadIs("999.00");
+        for (var i = 0; i < 3; i++) {
+            assertThat(pick(other)).as("another waiter's poll names the oldest").isEqualTo(old);
+        }
+
+        assertThat(lines(old, "mem_override")).isZero();
+        assertThat(lines(old, "load_override")).isZero();
+        assertThat(pick(old)).isEqualTo(old);
+        assertThat(lines(old, "mem_override")).isEqualTo(1);
+        assertThat(lines(old, "load_override")).isEqualTo(1);
+        var late = ticket("late", 3000);
+
+        for (var i = 0; i < 2; i++) {
+            assertThat(pick(old)).isEqualTo(late);
+        }
+
+        memAvailableKb(64 * GIB_KB);
+        loadIs("0.00");
+        assertThat(pick(late)).as("both gates open: the normal path").isEqualTo(late);
+        assertThat(lines(late, "mem_override")).as("polled while held, granted after recovery").isZero();
+        assertThat(lines(late, "load_override")).isZero();
     }
 
     @Test
@@ -144,7 +189,7 @@ class BbMemFloorIT {
 
         memAvailableKb(5 * GIB_KB);
         loadIs("999.00");
-        assertThat(pick()).isEqualTo(id);
+        assertThat(pick(id)).isEqualTo(id);
         assertThat(field(id, "load_override")).contains("reactors=0 held: load");
         assertThat(field(id, "mem_override")).contains("reactors=0 MemAvailable=5.0GB");
     }
@@ -205,7 +250,7 @@ class BbMemFloorIT {
         assertThat(pick()).as("load held, not starved").isEmpty();
         var old = ticket("old", 2000);
 
-        assertThat(pick()).as("load held, starved, 0 reactors < 2").isEqualTo(old);
+        assertThat(pick(old)).as("load held, starved, 0 reactors < 2").isEqualTo(old);
         assertThat(field(old, "load_override")).matches("[0-9]+ waited=(19|20)[0-9]{2}s reactors=0 held: load .*");
         assertThat(field(old, "mem_override")).isEmpty();
         assertThat(field(fresh, "load_override")).isEmpty();
@@ -221,7 +266,12 @@ class BbMemFloorIT {
     }
 
     private String pick() throws Exception {
-        var run = lib("pick");
+        return pick("");
+    }
+
+    /// pick as the waiter of ticket `caller` calls it; only the oldest ticket's own call may write an override record.
+    private String pick(String caller) throws Exception {
+        var run = lib("pick " + caller);
 
         assertThat(run.rc()).as(run.stderr()).isZero();
 
@@ -280,6 +330,13 @@ class BbMemFloorIT {
                     .map(line -> line.substring(prefix.length()))
                     .reduce((first, second) -> second)
                     .orElse("");
+    }
+
+    private long lines(String id, String key) throws IOException {
+        return Files.readAllLines(dir.resolve("q/waiting").resolve(id))
+                    .stream()
+                    .filter(line -> line.startsWith(key + "="))
+                    .count();
     }
 
     private void memAvailableKb(long kb) throws IOException {

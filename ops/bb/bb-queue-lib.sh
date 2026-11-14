@@ -224,14 +224,15 @@ reap() {
   done
 }
 
-# pick (under lock, after reap): the ONE waiting ticket to grant now, or nothing. BACKFILL (2026-09-29): walk the
+# pick [<caller id>] (under lock, after reap; caller defaults to the global $ID of bb-build/bb-hold): the ONE waiting ticket to
+# grant now, or nothing. BACKFILL (2026-09-29): walk the
 # grantable order (priority desc, FIFO; port-group tickets already filtered while the group is held) and grant the
 # first ticket whose OWN cap is satisfied, so a head that cannot start (e.g. BB_MAX_REACTORS=1 waiting for an empty
 # host) no longer blocks everything behind it. STARVATION BOUND: each ticket skipped for its cap gets blocked_since=
 # (first time only); once any skipped ticket has been blocked for STARVE seconds, nothing behind it is granted, so the
 # host drains and it runs.
 pick() {
-  local r id f c bs now lh mh cand="" oldest="" ocr=0 cr; r=$(reactors); now=$(date +%s)
+  local me=${1-${ID-}} r id f c bs now lh mh cand="" oldest="" ocr=0 cr; r=$(reactors); now=$(date +%s)
   for id in $(grantable); do
     f=$Q/waiting/$id; c=$(field "$f" cap); case "$c" in ''|*[!0-9]*) c=3;; esac
     cr=$(created_s "$f"); if [ -z "$oldest" ] || [ "$cr" -lt "$ocr" ]; then oldest=$id; ocr=$cr; fi
@@ -245,15 +246,18 @@ pick() {
   [ -z "$lh" ] && [ -z "$mh" ] && { echo "$cand"; return 0; }
   # A GATE is held. Starvation bound: the OLDEST grantable ticket goes once it has waited > LOAD_STARVE s and its own cap allows a
   # start, provided every held gate may be overridden: the LOAD GATE while fewer than LOAD_STARVE_REACTORS reactors run, the MEMORY
-  # FLOOR only while NO reactor runs (granting into low memory beside a running reactor reproduces the OOM; with none running, an
-  # outside job must not wedge the queue). Each override is recorded on the ticket (load_override=, mem_override=).
+  # FLOOR only while NO ticket of any kind runs (no reactor, and nothing in running/: a bb-hold's containers hold memory without a
+  # launcher; granting into low memory beside either reproduces the OOM; with nothing running, an outside job must not wedge the
+  # queue). Each override is recorded on the ticket (load_override=, mem_override=), once, by the oldest ticket's own waiter.
   [ $((now - ocr)) -gt "$LOAD_STARVE" ] || return 0
   [ -z "$lh" ] || [ "$r" -lt "$LOAD_STARVE_REACTORS" ] || return 0
-  [ -z "$mh" ] || [ "$r" -eq 0 ] || return 0
+  [ -z "$mh" ] || { [ "$r" -eq 0 ] && [ -z "$(ls "$Q/running" 2>/dev/null)" ]; } || return 0
   f=$Q/waiting/$oldest; c=$(field "$f" cap); case "$c" in ''|*[!0-9]*) c=3;; esac
   [ "$r" -lt "$c" ] || return 0
-  [ -z "$lh" ] || echo "load_override=$now waited=$((now - ocr))s reactors=$r $lh" >> "$f"
-  [ -z "$mh" ] || echo "mem_override=$now waited=$((now - ocr))s reactors=$r $(mem_available_gb) $mh" >> "$f"
+  if [ "$me" = "$oldest" ]; then   # record once: only the oldest's own waiter writes it, not every waiter that polls
+    [ -z "$lh" ] || echo "load_override=$now waited=$((now - ocr))s reactors=$r $lh" >> "$f"
+    [ -z "$mh" ] || echo "mem_override=$now waited=$((now - ocr))s reactors=$r $(mem_available_gb) $mh" >> "$f"
+  fi
   echo "$oldest"
   return 0
 }
@@ -265,7 +269,7 @@ load_held() {
   local cores; cores=$(nproc 2>/dev/null); case "$cores" in ''|*[!0-9]*|0) cores=1;; esac
   awk -v c="$cores" -v m="$LOAD_MAX" 'NR == 1 { if ($2 ~ /^[0-9]+(\.[0-9]+)?$/ && $2 / c >= m + 0) printf "held: load %.2f/core (ceiling %s; load5 %s, %d cores)\n", $2 / c, m, $2, c; exit }' "$LOADAVG" 2>/dev/null || true
 }
-# mem_floor_gb: the memory floor in GiB: the first line of $MEMFLOOR if it is a positive integer, else BB_MEM_FLOOR_GB if it is one, else 8.
+# mem_floor_gb: the memory floor in GiB: the first line of $MEMFLOOR that is a positive integer (others are skipped), else BB_MEM_FLOOR_GB if it is one, else 8.
 mem_floor_gb() {
   local n; n=$(sed -n 's/^[[:space:]]*\([1-9][0-9]*\)[[:space:]]*$/\1/p' "$MEMFLOOR" 2>/dev/null | head -1)
   [ -n "$n" ] || case "${BB_MEM_FLOOR_GB:-}" in ''|0*|*[!0-9]*) ;; *) n=$BB_MEM_FLOOR_GB;; esac

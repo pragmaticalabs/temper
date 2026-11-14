@@ -22,7 +22,8 @@
 # (~/work/port-group-slots, default 3) group tickets run at once per host, each holding a slot (bb-queue shows it). No change to the
 # tests. BB_PG_ISOLATE=0 at enqueue = the old host-exclusive behaviour for that ticket (ticket has no iso=1).
 # LOAD GATE (2026-11-11): a ticket is also granted only while load5/cores < 1.2 (BB_LOAD_MAX); the oldest grantable ticket goes
-# regardless once it waited > 1200 s (BB_LOAD_STARVE_SECS) while < 2 reactors run (BB_LOAD_STARVE_REACTORS). See pick() in the lib.
+# once it waited > 1200 s (BB_LOAD_STARVE_SECS) while < 2 reactors run (BB_LOAD_STARVE_REACTORS). MEMORY FLOOR (#53): a grant also
+# needs MemAvailable >= the per-host floor; the oldest ticket overrides it only while no ticket runs at all. pick() in the lib decides.
 # VERDICT SOURCE (2026-11-12, bbrc1; reap and too-late cancel fixed 2026-11-13): the ticket's rc= is the exit status of the build subshell
 # as returned by `wait` in the waiter, never a read of .bb/rc. A ticket whose waiter is gone (reap, or a cancel that finds the build
 # already ended) is finalized as orphaned with NO rc: bb-wait exits 70, and .bb/rc is not read into it. .bb/rc is a read-only (444) copy
@@ -60,7 +61,7 @@ if [ "${1:-}" = __run ]; then
     flock 8
     [ -f "$T" ] || exit 0   # cancelled or reaped while we slept
     reap
-    if [ "$(pick)" = "$ID" ]; then break; fi   # backfill + starvation bound, see pick() in bb-queue-lib.sh
+    if [ "$(pick "$ID")" = "$ID" ]; then break; fi   # backfill + starvation bound, see pick() in bb-queue-lib.sh
     if [ "$LIMIT" -gt 0 ] && [ "$WAITED" -ge "$LIMIT" ]; then
       never_started "$CO" 5 "queue wait expired after ${WAITED}s (BB_CAP_WAIT_SECS=$LIMIT)"
       printf 'state=expired\nended=%s\n' "$(date +%s)" >> "$T"; to_done "$T"; exit 0
