@@ -124,6 +124,8 @@ TRACKED=0
 # the gate line comes BEFORE the sections: the worker (BbQueue.java) wants each header directly above its column line
 LH=$(load_held)
 echo "LOAD GATE (grant only while load5/cores < $LOAD_MAX; override: the oldest grantable ticket after ${LOAD_STARVE}s while < $LOAD_STARVE_REACTORS reactors run): ${LH:-open}"
+MH=$(mem_held)
+echo "MEMORY GATE (grant only while MemAvailable >= $(mem_floor_gb) GB; override: the oldest grantable ticket after ${LOAD_STARVE}s, only while 0 reactors run): ${MH:-open}"
 echo "RUNNING (reactors on host: $(reactors); cap 5 unless a ticket overrides; port-group slots: $(pg_slots); port group held by: $(group_holder))"
 row TICKET OWNER PRIO AGE CHECKOUT ARGS
 for f in "$Q"/running/*; do
@@ -132,6 +134,7 @@ for f in "$Q"/running/*; do
   [ "$(fv requireDocker)" = 0 ] && s="$s [no-requireDocker]"
   s="$s$(mutant_tag "$(fv via)")"
   [ -n "$(fv load_override)" ] && s="$s [granted by load override: $(fv load_override | cut -d' ' -f2-3)]"
+  [ -n "$(fv mem_override)" ] && s="$s [granted by memory override: $(fv mem_override | cut -d' ' -f2,4)]"
   row "${f##*/}" "$(fv owner)" "$(prio "$(fv owner)" "$(fv sha)")" "$(age "$(fv started)")" "$(basename "$(fv co)")" "$(fv args)$s"
 done
 U=$(( $(reactors) - TRACKED )); [ "$U" -gt 0 ] && echo "  + $U reactor(s) not started through the queue (direct mvn or BB_QUEUE=0)"
