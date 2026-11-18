@@ -172,7 +172,7 @@ class BbHostIsolationIT {
                                                                                "BbBypassFormsIT.builderVarargs -> HermeticProcess.builder",
                                                                                "BbBypassFormsIT.environmentPut -> ProcessBuilder.environment",
                                                                                "BbBypassFormsIT.environmentPutAll -> ProcessBuilder.environment",
-                                                                               "BbBypassFormsIT.lambda$insideALambda$0 -> ProcessBuilder.environment",
+                                                                               "BbBypassFormsIT.insideALambda -> ProcessBuilder.environment",
                                                                                "BbBypassFormsIT.prepared -> HermeticProcess.prepared");
     }
 }
