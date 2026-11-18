@@ -9,8 +9,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
-import org.pragmatica.temper.testsupport.HermeticProcess;
-
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -29,7 +27,9 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 /// (mark only the reactor itself) -> [#aReactorsOwnHeap_andItsForks_doNotCloseTheGate] red; count every java whatever its -Xmx unit
 /// as bytes -> [#xmxUnits_lastOneWins_absentSkips_andRssAboveXmxIsZero] red; drop the real maven launcher pattern ->
 /// [#aRealMavenLaunchersForks_areNeverOffQueue] red; read argv[0] as `java` only (no path) ->
-/// [#realProcesses_theRealPsPass_findsTheOffQueueJvm_andSkipsTheReactorsChild] red.
+/// [#realProcesses_theRealPsPass_findsTheOffQueueJvm_andSkipsTheReactorsChild] red; read -Xmx from words after the main class or `-jar` ->
+/// [#onlyJvmOptions_areRead_notWordsAfterTheMainClassOrJar] red; list only the current user's processes (`ps -u $USER`) ->
+/// [#theRealPsScan_coversEveryUser_notOnlyTheCurrentOne] red.
 class BbOffQueueJvmIT {
     private static final long GIB_KB = 1024L * 1024L;
 
@@ -143,6 +143,44 @@ class BbOffQueueJvmIT {
     }
 
     @Test
+    void onlyJvmOptions_areRead_notWordsAfterTheMainClassOrJar() throws Exception {
+        processes("  30     1 100 java -Xmx2g -jar app.jar -Xmx50g",
+                  "  31     1 100 java -Xmx2g -cp a.jar:b.jar my.Main -Xmx50g",
+                  "  32     1 100 java -cp a.jar -Xmx3g my.Main",
+                  "  33     1 100 java -Xmx4g -m some.module/my.Main -Xmx50g",
+                  "  34     1 100 java -jar app.jar -Xmx50g",
+                  "  35     1 100 java -Xms1g my.Main -Xmx50g",
+                  "  36     1 100 java -p mods -Xmx5g --add-modules m.x my.Main",
+                  "  37     1 100 java -Xmx6g --module=some.module -Xmx50g");
+        assertThat(lib("offqueue_jvms").stdout()).as("an application argument is never a JVM option; an option's separate value is skipped")
+                  .isEqualTo("""
+                             30 2097052 2097152 100
+                             31 2097052 2097152 100
+                             32 3145628 3145728 100
+                             33 4194204 4194304 100
+                             36 5242780 5242880 100
+                             37 6291356 6291456 100
+                             """);
+    }
+
+    @Test
+    void theRealPsScan_coversEveryUser_notOnlyTheCurrentOne() throws Exception {
+        // a fake ps first on PATH records its arguments: an off-queue JVM (TLC) can belong to another user, so `-u $USER` must not appear
+        var shim = BbFixtures.executable(dir.resolve("shim/ps"),
+                                         "#!/bin/sh\necho \"$*\" > \"" + dir.resolve("ps-args")
+                                        + "\"\necho '  300     1 1000 java -Xmx2g x'\n");
+
+        env.put("BB_TEST_PS", "");
+        env.put("PATH",
+                shim.getParent() + ":" + System.getenv("PATH"));
+        var listed = lib("offqueue_jvms").stdout();
+        var args = Files.readString(dir.resolve("ps-args")).strip();
+
+        assertThat(listed).as("the shim's line went through the real-ps branch").isEqualTo("300 2096152 2097152 1000\n");
+        assertThat(args.split(" ")).as("ps " + args).contains("-e").doesNotContain("-u", "-U", "--user", "-x");
+    }
+
+    @Test
     void anUnreadableProcessList_addsNoHeadroom() throws Exception {
         var id = ticket("fresh");
 
@@ -170,12 +208,12 @@ class BbOffQueueJvmIT {
         var offQueue = Long.parseLong(launch.stdout().strip());
 
         detached.add(offQueue);
-        var reactor = HermeticProcess.builder("bash",
-                                              "-c",
-                                              "\"$0\" -Xmx3g -XX:+UseSerialGC \"$1\"; : " + marker,
-                                              java,
-                                              sleeper.toString())
-                                     .start();
+        var reactor = BbFixtures.process("bash",
+                                         "-c",
+                                         "\"$0\" -Xmx3g -XX:+UseSerialGC \"$1\"; : " + marker,
+                                         java,
+                                         sleeper.toString())
+                                .start();
 
         started.add(reactor);
         var child = awaitChild(reactor.pid());

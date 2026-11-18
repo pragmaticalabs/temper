@@ -1,13 +1,14 @@
 package org.pragmatica.temper.dist;
 
-import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
-import java.util.regex.Pattern;
-import java.util.stream.Stream;
 
+import com.tngtech.archunit.base.DescribedPredicate;
+import com.tngtech.archunit.core.domain.JavaClass;
+import com.tngtech.archunit.core.domain.JavaClasses;
+import com.tngtech.archunit.core.importer.ClassFileImporter;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -20,9 +21,13 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 /// and BbRequireDockerIT failed 7 of 9 on "the build finished". The shared harness (`BbFixtures.run` / `BbFixtures.isolated`) supplies a
 /// generous fixed meminfo, an empty process list and a high cap file unless the test passes its own.
 ///
+/// The guard reads the bytecode of every Bb*IT: only `BbFixtures.process`, `processClean` and `run` may start a child, so a call of
+/// `HermeticProcess.builder` (any overload) or `prepared`, or any `ProcessBuilder.environment()`, is a bypass. The fixture package
+/// holds one method per bypass form and [#theGuard_catchesEveryBypassForm] proves each is flagged.
+///
 /// Probes: drop a default from [BbFixtures] -> [#everyLaunch_getsIsolatedHostInputs] red; make `run` pass `env` as is ->
-/// [#aRealMemoryGate_isOpen_whileAnOffQueueJvmHoldsAHugeUnclaimedHeap] red where an off-queue -Xmx64g JVM exists; launch a bb script
-/// with a raw env in a Bb*IT -> [#noBbIT_launchesWithoutTheSharedIsolation] red.
+/// [#aRealMemoryGate_isOpen_whileAnOffQueueJvmHoldsAHugeUnclaimedHeap] red where an off-queue -Xmx64g JVM exists; call `HermeticProcess.builder` in a real Bb*IT -> [#noBbIT_launchesWithoutTheSharedIsolation] red;
+/// drop a predicate branch of the guard -> [#theGuard_catchesEveryBypassForm] red.
 class BbHostIsolationIT {
     @TempDir
     Path dir;
@@ -116,43 +121,58 @@ class BbHostIsolationIT {
         }
     }
 
-    private static final Pattern RAW_ENV = Pattern.compile("(HermeticProcess\\.builder\\([^;]*,\\s*env\\w*(\\(\\))?\\s*\\))"
-                                                          + "|(environment\\(\\)\\.putAll\\((?!BbFixtures\\.isolated\\())");
+    private static final String HERMETIC = "org.pragmatica.temper.testsupport.HermeticProcess";
+    private static final String DIST = "org.pragmatica.temper.dist";
 
-    @Test
-    void noBbIT_launchesWithoutTheSharedIsolation() throws Exception {
-        var root = Path.of("src", "test", "java", "org", "pragmatica", "temper", "dist");
-
-        try (Stream<Path> files = Files.list(root)) {
-            var offenders = files.filter(f -> f.getFileName()
-                                               .toString()
-                                               .matches("Bb.*IT\\.java"))
-                                 .filter(f -> !f.getFileName()
-                                                .toString()
-                                                .equals("BbHostIsolationIT.java"))
-                                 .filter(BbHostIsolationIT::launchesRaw)
-                                 .map(f -> f.getFileName()
-                                            .toString())
-                                 .toList();
-
-            assertThat(offenders).as("Bb ITs that pass a raw env to a process (use BbFixtures.run or BbFixtures.isolated)")
-                      .isEmpty();
-        }
+    /// "Class.method" of every call or reference, in a Bb*IT class of `classes`, that starts a child or edits a child's environment by
+    /// any route but `BbFixtures.process`/`processClean`/`run`: a method of [#HERMETIC] (`builder` in all overloads, `prepared`) or
+    /// `ProcessBuilder.environment()` (`put`, `putAll`, `clear`, in a lambda too). Read from the bytecode, so no source layout hides one.
+    static List<String> launchesWithoutTheSharedIsolation(JavaClasses classes) {
+        return classes.stream()
+                      .filter(c -> c.getName()
+                                    .matches(".*\\.Bb\\w*IT(\\$.*)?"))
+                      .flatMap(c -> c.getAccessesFromSelf()
+                                     .stream())
+                      .filter(a -> HERMETIC.equals(a.getTargetOwner().getName()) || ("java.lang.ProcessBuilder".equals(a.getTargetOwner()
+                                                                                                                        .getName()) && a.getName()
+                                                                                                                                        .equals("environment")))
+                      .map(a -> a.getOrigin()
+                                 .getOwner()
+                                 .getSimpleName()
+                               + "." + a.getOrigin()
+                                        .getName()
+                               + " -> " + a.getTargetOwner()
+                                           .getSimpleName()
+                               + "." + a.getName())
+                      .distinct()
+                      .sorted()
+                      .toList();
     }
 
-    private static boolean launchesRaw(Path file) {
-        try {
-            var text = Files.readAllLines(file)
-                            .stream()
-                            .filter(l -> !l.strip()
-                                           .startsWith("//"))
-                            .collect(java.util.stream.Collectors.joining("\n"));
-            // BbAwaitIT launches bb-await only (no queue, no memory gate): its raw env is deliberate
-            return ! file.getFileName()
-                         .toString()
-                         .equals("BbAwaitIT.java") && RAW_ENV.matcher(text).find();
-        } catch (IOException e) {
-            throw new IllegalStateException(e);
-        }
+    @Test
+    void noBbIT_launchesWithoutTheSharedIsolation() {
+        var real = new ClassFileImporter().importPackages(DIST)
+                                          .that(DescribedPredicate.describe("directly in " + DIST,
+                                                                            (JavaClass c) -> c.getPackageName()
+                                                                                              .equals(DIST)));
+
+        assertThat(real.stream().filter(c -> c.getSimpleName()
+                                              .matches("Bb\\w*IT")).count()).as("the scan sees the Bb*ITs")
+                  .isGreaterThan(15);
+        assertThat(launchesWithoutTheSharedIsolation(real)).as("Bb*IT starts a child only through BbFixtures.process, processClean or run")
+                  .isEmpty();
+    }
+
+    @Test
+    void theGuard_catchesEveryBypassForm() {
+        var fixture = new ClassFileImporter().importPackages(DIST + ".fixture");
+
+        assertThat(launchesWithoutTheSharedIsolation(fixture)).containsExactly("BbBypassFormsIT.builderList -> HermeticProcess.builder",
+                                                                               "BbBypassFormsIT.builderListEnv -> HermeticProcess.builder",
+                                                                               "BbBypassFormsIT.builderVarargs -> HermeticProcess.builder",
+                                                                               "BbBypassFormsIT.environmentPut -> ProcessBuilder.environment",
+                                                                               "BbBypassFormsIT.environmentPutAll -> ProcessBuilder.environment",
+                                                                               "BbBypassFormsIT.lambda$insideALambda$0 -> ProcessBuilder.environment",
+                                                                               "BbBypassFormsIT.prepared -> HermeticProcess.prepared");
     }
 }

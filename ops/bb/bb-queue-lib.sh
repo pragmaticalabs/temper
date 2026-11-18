@@ -29,10 +29,10 @@ MEMINFO=${BB_TEST_MEMINFO:-/proc/meminfo}   # TEST ONLY: a file in /proc/meminfo
 # -Xmx 8+10+8G on 30G cloudbb-3; suite forks were then killed with 137). mem_held subtracts, for every java process that is neither a
 # reactor ($PAT) nor a descendant of one (its surefire/failsafe forks), max(0, Xmx - RSS) from MemAvailable before the floor test. One
 # ps pass per call. A java without -Xmx is skipped (its default max heap is not on the command line). RSS also counts non-heap memory,
-# so the headroom is an underestimate, never an overestimate.
+# so the headroom is an underestimate, never an overestimate: only words before the main class or -jar are read as JVM options, so an application argument such as `-Xmx50g` after them never counts.
 PSLIST=${BB_TEST_PS:-}   # TEST ONLY: a file of "pid ppid rss_kb args..." lines, read instead of ps
 # HOST REACTOR CAP (issue #56, CTO request 2026-11-18): a ticket is granted only while running reactors < min(its own cap, host_cap).
-# host_cap is the first positive-integer line of the per-host file $MAXREACT (read at every pick), else 3 (the CTO's value for the 30G
+# host_cap is the first line of 1..999 of the per-host file $MAXREACT (read at every pick), else 3 (the CTO's value for the 30G
 # hosts). There is no environment fallback on purpose: pick runs with the ENQUEUER's environment, so an env value would let a submitter
 # lift the host's bound. No override (load or memory starvation) passes it.
 MAXREACT=${BB_TEST_MAX_REACTORS_FILE:-$HOME/work/max-reactors}
@@ -288,16 +288,17 @@ mem_floor_gb() {
   [ -n "$n" ] || case "${BB_MEM_FLOOR_GB:-}" in ''|0*|*[!0-9]*) ;; *) n=$BB_MEM_FLOOR_GB;; esac
   echo "${n:-8}"
 }
-# host_cap: the first line of $MAXREACT that is a positive integer (others are skipped), else 3.
+# host_cap: the first line of $MAXREACT that is an integer of 1..999 (others are skipped, so 0, 1000 and 99999999999999999999 are malformed:
+# an INT64-overflowing value would make every `[ -lt ]` fail and wedge the queue), else 3.
 host_cap() {
-  local n; n=$(sed -n 's/^[[:space:]]*\([1-9][0-9]*\)[[:space:]]*$/\1/p' "$MAXREACT" 2>/dev/null | head -1)
+  local n; n=$(sed -n 's/^[[:space:]]*\([1-9][0-9]\{0,2\}\)[[:space:]]*$/\1/p' "$MAXREACT" 2>/dev/null | head -1)
   echo "${n:-3}"
 }
 # ps_list: "pid ppid rss_kb args..." for every process on the host (all users: an off-queue JVM need not be ours), or $PSLIST.
 ps_list() { if [ -n "$PSLIST" ]; then cat "$PSLIST" 2>/dev/null; else ps -e -ww -o pid= -o ppid= -o rss= -o args= 2>/dev/null; fi; true; }
 # offqueue_jvms: one line "pid headroom_kb xmx_kb rss_kb" per java process (argv[0] is java or ends in /java) that is neither a reactor
 # nor below one (a reactor is $PAT or a real maven launcher, also under a test's own $PAT: no maven reactor or fork is ever off-queue)
-# and carries -Xmx<n>[kmgt] (the last one wins, as in the JVM; a bare byte count is accepted too); headroom = max(0, Xmx - RSS).
+# and carries -Xmx<n>[kmgt] among its JVM options, i.e. before the main class, `-jar <jar>` or `-m <module>` (the last one wins, as in the JVM; a bare byte count is accepted too); headroom = max(0, Xmx - RSS).
 offqueue_jvms() {
   ps_list | awk -v pat="$PAT" -v mvn='[c]lassworlds[.]launcher[.]Launcher' '
     $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ { n++; pid[n] = $1; par[$1] = $2; rss[$1] = $3 + 0; a = $0
@@ -305,9 +306,12 @@ offqueue_jvms() {
     END { for (i = 1; i <= n; i++) { p = pid[i]; split(args[p], w, " "); if (w[1] != "java" && w[1] !~ /\/java$/) continue
             for (q = p; q in par && !(q in re) && !(q in seen); q = par[q]) seen[q] = 1
             delete seen; if (q in re) continue
-            x = -1; for (j = 2; j in w; j++) if (w[j] ~ /^-Xmx[0-9]+[kKmMgGtT]?$/) { v = substr(w[j], 5); u = tolower(substr(v, length(v)))
-              if (u ~ /[kmgt]/) { v = substr(v, 1, length(v) - 1) + 0; x = (u == "k") ? v : (u == "m") ? v * 1024 : (u == "g") ? v * 1048576 : v * 1073741824 }
-              else x = int(v / 1024) }
+            x = -1; for (j = 2; j in w; j++) { o = w[j]
+              if (o !~ /^-/ || o == "-jar" || o == "-m" || o == "--module" || o ~ /^--module=/) break
+              if (o ~ /^(-cp|-classpath|-p|--class-path|--module-path|--upgrade-module-path|--add-modules|--limit-modules|--add-opens|--add-exports|--add-reads|--patch-module)$/) { j++; continue }
+              if (o ~ /^-Xmx[0-9]+[kKmMgGtT]?$/) { v = substr(o, 5); u = tolower(substr(v, length(v)))
+                if (u ~ /[kmgt]/) { v = substr(v, 1, length(v) - 1) + 0; x = (u == "k") ? v : (u == "m") ? v * 1024 : (u == "g") ? v * 1048576 : v * 1073741824 }
+                else x = int(v / 1024) } }
             if (x < 0) continue
             h = x - rss[p]; if (h < 0) h = 0; printf "%s %.0f %.0f %.0f\n", p, h, x, rss[p] } }'
 }

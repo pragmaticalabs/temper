@@ -9,8 +9,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
-import org.pragmatica.temper.testsupport.HermeticProcess;
-
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -31,7 +29,9 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 /// Probes: drop the min with the host cap in pick's loop -> [#noFile_capsTheHostAtThree_evenForATicketThatAllowsFive] and
 /// [#theHostCap_isNotPassedByTheLoadStarvationOverride] red; read only the default (ignore the file) ->
 /// [#aFileOfOne_capsTheHostAtOne] red; accept 0 as a cap -> [#aMalformedFile_meansThree] red; drop the HOST CAP line from bb-queue ->
-/// [#bbQueue_showsTheHostCap_besideTheMemoryGate] red.
+/// [#bbQueue_showsTheHostCap_besideTheMemoryGate] red; allow a value above 999 or beyond INT64 ->
+/// [#aMalformedFile_meansThree] and [#aValueBeyondInt64_isMalformed_andDoesNotWedgeTheQueue] red; `head -1` -> `tail -1` ->
+/// [#ofTwoValidLines_theFirstWins_and999IsTheLargestValue] red; the RUNNING line shows a fixed cap 5 -> [#bbQueue_showsTheHostCap_besideTheMemoryGate] red.
 class BbHostCapIT {
     @TempDir
     Path dir;
@@ -117,20 +117,54 @@ class BbHostCapIT {
         reactor();
         reactor();
         reactor();
-        for (var content : List.of("abc\n", "0\n", "-1\n", "2.5\n", "", "\n", "1 2\n", "07\n")) {
+        for (var content : List.of("abc\n",
+                                   "0\n",
+                                   "-1\n",
+                                   "2.5\n",
+                                   "",
+                                   "\n",
+                                   "1 2\n",
+                                   "07\n",
+                                   "1000\n",
+                                   "9999\n",
+                                   "99999999999999999999\n",
+                                   "9223372036854775808\n")) {
             Files.writeString(capFile, content);
             assertThat(hostCap()).as("file '" + content + "'").isEqualTo("3");
             assertThat(pick()).as("file '" + content + "': 3 reactors = cap 3").isEmpty();
         }
 
         Files.writeString(capFile, "junk\n4\n");
-        assertThat(hostCap()).as("the first positive-integer line counts").isEqualTo("4");
+        assertThat(hostCap()).as("the first valid line counts").isEqualTo("4");
         assertThat(pick()).isEqualTo(id);
         Files.createDirectories(dir.resolve("unreadable"));
         env.put("BB_TEST_MAX_REACTORS_FILE",
                 dir.resolve("unreadable").toString());
         assertThat(hostCap()).as("file a directory").isEqualTo("3");
         assertThat(pick()).isEmpty();
+    }
+
+    @Test
+    void ofTwoValidLines_theFirstWins_and999IsTheLargestValue() throws Exception {
+        Files.writeString(capFile, "2\n5\n");
+        assertThat(hostCap()).as("first of two valid lines").isEqualTo("2");
+        Files.writeString(capFile, "bad\n7\n2\n");
+        assertThat(hostCap()).as("first valid of three").isEqualTo("7");
+        Files.writeString(capFile, "999\n");
+        assertThat(hostCap()).isEqualTo("999");
+        Files.writeString(capFile, "1000\n999\n");
+        assertThat(hostCap()).as("1000 is malformed, so the next valid line counts").isEqualTo("999");
+    }
+
+    @Test
+    void aValueBeyondInt64_isMalformed_andDoesNotWedgeTheQueue() throws Exception {
+        var id = ticket("five", 0, 5);
+
+        Files.writeString(capFile, "99999999999999999999\n");
+        var run = lib("pick");
+
+        assertThat(run.stderr()).as("no 'integer expression expected'").isEmpty();
+        assertThat(run.stdout().strip()).as("0 reactors < the default cap 3: granted").isEqualTo(id);
     }
 
     @Test
@@ -193,8 +227,22 @@ class BbHostCapIT {
         assertThat(lines.get(cap - 1)).startsWith("MEMORY GATE (");
         assertThat(lines.get(cap + 1)).startsWith("RUNNING (");
         assertThat(lines.get(cap + 2)).startsWith("TICKET ");
+        assertThat(running(shown)).as("default host cap 3 binds the default ticket cap 5")
+                  .contains("; cap 3 (5 bounded by the host cap 3) unless a ticket sets a lower one;");
         Files.writeString(capFile, "2\n");
-        assertThat(bbQueue()).contains("no override passes it): 2\n");
+        shown = bbQueue();
+        assertThat(shown).contains("no override passes it): 2\n");
+        assertThat(running(shown)).contains("; cap 2 (5 bounded by the host cap 2) unless");
+        Files.writeString(capFile, "8\n");
+        assertThat(running(bbQueue())).as("a host cap above 5 leaves the default ticket cap 5")
+                  .contains("; cap 5 (5 bounded by the host cap 8) unless");
+    }
+
+    private static String running(String listing) {
+        return listing.lines()
+                      .filter(l -> l.startsWith("RUNNING ("))
+                      .findFirst()
+                      .orElseThrow();
     }
 
     private String pick() throws Exception {
@@ -276,7 +324,7 @@ class BbHostCapIT {
 
     /// A stand-in reactor: a shell whose command line holds the marker, so `pgrep -fc $PAT` counts exactly it.
     private void reactor() throws Exception {
-        reactors.add(HermeticProcess.builder("bash", "-c", "sleep 600; : " + marker).start());
+        reactors.add(BbFixtures.process("bash", "-c", "sleep 600; : " + marker).start());
         var deadline = System.currentTimeMillis() + 10_000;
 
         while (!count().equals(Integer.toString(reactors.size())) && System.currentTimeMillis() < deadline) {

@@ -15,8 +15,6 @@ import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
-import org.pragmatica.temper.testsupport.HermeticProcess;
-
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
@@ -103,7 +101,7 @@ class BbTicketsIT {
     }
 
     private void waiterFor(String id) throws Exception {
-        var process = HermeticProcess.builder("bash", "-c", "exec -a \"bb-build __run " + id + "\" sleep 300").start();
+        var process = BbFixtures.process("bash", "-c", "exec -a \"bb-build __run " + id + "\" sleep 300").start();
 
         standIns.add(process);
         for (var i = 0; i < 100 && BbFixtures.waiters(id).isEmpty(); i++) {

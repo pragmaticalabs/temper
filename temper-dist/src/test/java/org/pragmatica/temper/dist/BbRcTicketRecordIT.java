@@ -12,8 +12,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
-import org.pragmatica.temper.testsupport.HermeticProcess;
-
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -156,13 +154,12 @@ class BbRcTicketRecordIT {
                       .orElseThrow()
                       .toString());
         env.put("PATH", shim + ":" + env.get("PATH"));
-        var builder = HermeticProcess.builder("bash",
-                                              tools.resolve("bb-build").toString(),
-                                              "__run",
-                                              id);
+        var builder = BbFixtures.processClean(List.of("bash",
+                                                      tools.resolve("bb-build").toString(),
+                                                      "__run",
+                                                      id),
+                                              env);
 
-        builder.environment().clear();
-        builder.environment().putAll(BbFixtures.isolated(env));
         builder.redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.DISCARD);
         var process = builder.start();
 

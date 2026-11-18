@@ -1,6 +1,5 @@
 package org.pragmatica.temper.dist;
 
-import org.pragmatica.temper.testsupport.HermeticProcess;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -66,10 +65,10 @@ class BbTemperHostIT {
         MacScripts.executable(bin.resolve("ssh"), "for a in \"$@\"; do printf '%s\\n' \"$a\" >> \"$STUBS/ssh.args\"; done\necho -- >> \"$STUBS/ssh.args\"\n"
                                                    + "exit \"$(cat \"$STUBS/ssh.rc\" 2> /dev/null || echo 0)\"\n");
         MacScripts.executable(bin.resolve("scp"), "exit 0\n");
-        var gitInit = HermeticProcess.builder("git", "-c", "user.email=t@t", "-c", "user.name=t", "init", "-q").directory(dir.toFile()).inheritIO();
+        var gitInit = BbFixtures.process("git", "-c", "user.email=t@t", "-c", "user.name=t", "init", "-q").directory(dir.toFile()).inheritIO();
         var git = gitInit.start();
         assertThat(git.waitFor()).isZero();
-        var gitCommit = HermeticProcess.builder("git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "i")
+        var gitCommit = BbFixtures.process("git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "i")
                 .directory(dir.toFile()).inheritIO();
         var commit = gitCommit.start();
         assertThat(commit.waitFor()).isZero();

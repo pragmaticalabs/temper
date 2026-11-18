@@ -37,7 +37,7 @@ readonly BB_LIB_PREV=621b2252c3da05e7dd1161d076908864   # the 2026-11-09 orphan-
 readonly BB_LIB_PRERC=d890115b62a8af7583a18a7eddd75bab   # live on all four hosts from 2026-11-12: the ticket rc= is read from .bb/rc (replaced by the exit-status record)
 readonly BB_LIB_PREMEM=a8fb757b12597e167b9804f7d14327e0   # the #42 version: no memory floor (issue #53)
 readonly BB_LIB_PRECAP=cca5e8cd6942f988bb932f37f4de93e1   # the #53 version: no host reactor cap, no off-queue JVM headroom (issue #56)
-readonly BB_LIB_NEW=a4e8665794aa68a1d5248873060ab85b
+readonly BB_LIB_NEW=e1b318e7bef1d4acff934b041d5ecc1a
 readonly BB_QUEUE_OLD=7efbfbecb9739fed35223cdc97eb185d
 readonly BB_QUEUE_PREV=a04b7be02f840d4f1e2bd19c54c52b3f
 readonly BB_QUEUE_LIVE=af86457ae18f4ca331e47137cd088bc7   # what the 2026-11-11 hosts run: its header says `group tickets running:`, which the worker cannot parse
@@ -46,7 +46,7 @@ readonly BB_QUEUE_PRERC=5691f8d57fc2d88e18d23ab33fc98b75   # live on all four ho
 readonly BB_QUEUE_PREVIA=617b0bff8c73753e4a8e8b57201192ab   # live from the 2026-11-13 install: no [mutant <id>] mark (issue #46)
 readonly BB_QUEUE_PREMEM=de6c69845c05e97f1234b4b4977f1b52   # the #46 version: no MEMORY GATE line, no [granted by memory override] mark (issue #53)
 readonly BB_QUEUE_PRECAP=841403902eeb4af490300f8f56011c8e   # the #53 version: no HOST CAP line (issue #56)
-readonly BB_QUEUE_NEW=a4b89eaa408f5928d78427ef8f874904
+readonly BB_QUEUE_NEW=fcbdc6cf8130550b57f83ebb00ef859b
 readonly BB_BUILD_MID=a1100c916b866ad3716bc4095ddb1991   # the T3 fields version, before the waiter's first-writer-wins guard
 readonly BB_BUILD_PREV=cae49573d06f632d3081f7d5be1e9b66
 readonly BB_BUILD_LIVE=015b2a2261a6789c5af215b3745a2b84   # what c3/c4/d1 run since 2026-11-11: no requireDocker flag

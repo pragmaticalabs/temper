@@ -127,7 +127,8 @@ echo "LOAD GATE (grant only while load5/cores < $LOAD_MAX; override: the oldest 
 MH=$(mem_held)
 echo "MEMORY GATE (grant only while MemAvailable >= $(mem_floor_gb) GB; override: the oldest grantable ticket after ${LOAD_STARVE}s, only while 0 reactors run): ${MH:-open}"
 echo "HOST CAP (grant only while reactors < min(the ticket's cap, this host's cap); ~/work/max-reactors, default 3; no override passes it): $(host_cap)"
-echo "RUNNING (reactors on host: $(reactors); cap 5 unless a ticket overrides; port-group slots: $(pg_slots); port group held by: $(group_holder))"
+HC=$(host_cap); EFF=5; [ "$HC" -ge "$EFF" ] || EFF=$HC
+echo "RUNNING (reactors on host: $(reactors); cap $EFF (5 bounded by the host cap $HC) unless a ticket sets a lower one; port-group slots: $(pg_slots); port group held by: $(group_holder))"
 row TICKET OWNER PRIO AGE CHECKOUT ARGS
 for f in "$Q"/running/*; do
   snap "$f" || continue; TRACKED=$((TRACKED + 1))
