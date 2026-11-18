@@ -154,7 +154,7 @@ class BbOffQueueJvmIT {
 
     @Test
     void realProcesses_theRealPsPass_findsTheOffQueueJvm_andSkipsTheReactorsChild() throws Exception {
-        env.remove("BB_TEST_PS");
+        env.put("BB_TEST_PS", "");  // empty: the real ps
         var java = ProcessHandle.current().info().command().orElseThrow();
         var sleeper = Files.writeString(dir.resolve("Sleeper.java"),
                                         "class Sleeper { public static void main(String[] a) throws Exception { Thread.sleep(600_000); } }\n");

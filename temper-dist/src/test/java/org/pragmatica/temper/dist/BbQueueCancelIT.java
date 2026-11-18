@@ -430,7 +430,7 @@ class BbQueueCancelIT {
                                               id);
 
         builder.environment().clear();
-        builder.environment().putAll(env);
+        builder.environment().putAll(BbFixtures.isolated(env));
         builder.redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.DISCARD);
         var waiter = builder.start();
 

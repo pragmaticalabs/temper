@@ -162,7 +162,7 @@ class BbRcTicketRecordIT {
                                               id);
 
         builder.environment().clear();
-        builder.environment().putAll(env);
+        builder.environment().putAll(BbFixtures.isolated(env));
         builder.redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.DISCARD);
         var process = builder.start();
 
@@ -346,7 +346,8 @@ class BbRcTicketRecordIT {
             var killed = tool("bb-build", Map.of("BB_MAX_REACTORS", "0", "BB_DEDUP", "0"), co.toString(), "-B", "again");
 
             assertThat(killed.rc()).as(state + ": " + killed.stdout() + killed.stderr()).isEqualTo(3);
-            assertThat(killed.stderr()).as(state).contains("a build appears to be running in " + co)
+            assertThat(killed.stderr()).as(state)
+                      .contains("a build appears to be running in " + co)
                       .doesNotContain("deleted by hand");
             Files.delete(gone);
         }

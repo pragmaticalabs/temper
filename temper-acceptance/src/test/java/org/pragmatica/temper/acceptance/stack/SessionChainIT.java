@@ -1,7 +1,5 @@
 package org.pragmatica.temper.acceptance.stack;
 
-import org.pragmatica.temper.testsupport.HermeticProcess;
-
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -21,11 +19,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
 import java.util.regex.Pattern;
 
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Tag;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
+import org.pragmatica.temper.testsupport.HermeticProcess;
 import org.pragmatica.lang.Option;
 import org.pragmatica.lang.Promise;
 import org.pragmatica.lang.Result;
@@ -47,9 +41,16 @@ import org.pragmatica.temper.protocol.exec.ProcessRunner;
 import org.pragmatica.temper.protocol.exec.Spawned;
 import org.pragmatica.temper.store.api.Store;
 
-import static org.assertj.core.api.Assertions.assertThat;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Tag;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+
 import static org.pragmatica.lang.Option.none;
 import static org.pragmatica.lang.Option.some;
+import static org.assertj.core.api.Assertions.assertThat;
+
 
 /// CI-T3 WP-E (T3.1.m and T3.2): the real chain on one machine. A `claude`-named bash (a copy of
 /// `/bin/bash`) runs `ops/mac/temper-mac session` and the real `ops/bb/bb-build` (the only stub is mvn, never reached: the
@@ -72,9 +73,13 @@ class SessionChainIT {
     private static final String TZ = "Pacific/Chatham";
     private static final String HOST = "bigboy";
     private static final Duration SHORT = Duration.ofSeconds(60);
+
     private static final Path OPS = Path.of(System.getProperty("temper.ops.dir")).toAbsolutePath().normalize();
+
     private static final Pattern QUEUED = Pattern.compile("queued ticket=(\\S+)");
+
     private static final Pattern MAC_LAST_OK = Pattern.compile("\"mac\"\\s*:\\s*\\{\\s*\"lastOkAt\"\\s*:\\s*\"([^\"]+)\"");
+
     private static final String KEY_LINE = "127.0.0.1 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAISessionChainITSessionChainITSessionCh\n";
 
     private Path dir;
@@ -100,6 +105,7 @@ class SessionChainIT {
         token(dir.resolve("mac-token"), MAC_TOKEN);
         fixture = FixtureRepo.create(dir, List.of());
         var opened = Pg.freshStore(AcceptanceStack.firstJobId(System.currentTimeMillis()));
+
         store = opened.store();
         database = opened.database();
         config = config();
@@ -111,13 +117,18 @@ class SessionChainIT {
         if (standIn != null) {
             standIn.destroyForcibly();
         }
+
         waiters(ticket).forEach(handle -> {
             handle.destroyForcibly();
-            handle.onExit().orTimeout(10, TimeUnit.SECONDS).exceptionally(_ -> null).join();
+            handle.onExit()
+                  .orTimeout(10, TimeUnit.SECONDS)
+                  .exceptionally(_ -> null)
+                  .join();
         });
         if (running != null) {
             running.stop().await(TimeSpan.timeSpan(60).seconds());
         }
+
         store.close();
     }
 
@@ -128,12 +139,12 @@ class SessionChainIT {
         queueTicketFromStandIn();
         post();
         awaitCollected();
-
         var line = ticketLine();
 
         assertThat(line).as(line).startsWith("  waiting " + ticket + " | SESSION-ALIVE | ");
         assertThat(sessionStart()).as("ticket session_start against ProcessHandle start")
-                                  .isBetween(javaStart() - 2, javaStart() + 2);
+                  .isBetween(javaStart() - 2,
+                             javaStart() + 2);
     }
 
     /// T3.2: after `kill -9` of the stand-in the next post makes the row `DEAD(last seen <t>)`, t = the previous post's
@@ -151,16 +162,15 @@ class SessionChainIT {
         assertThat(standIn.waitFor(10, TimeUnit.SECONDS)).isTrue();
         Thread.sleep(1500);
         post();
-
         assertThat(ticketLine()).startsWith("  waiting " + ticket + " | DEAD(last seen " + receipt + ") | ");
     }
 
     // ---- the chain ---------------------------------------------------------------------------------------------------
-
     /// The stand-in: `temper-mac session` as its direct child, then the real `bb-build` with that session in its
     /// environment; it then stays alive until killed.
     private void queueTicketFromStandIn() throws Exception {
         var claude = dir.resolve("bin/claude");
+
         Files.createDirectories(claude.getParent());
         Files.copy(Path.of("/bin/bash"), claude, StandardCopyOption.REPLACE_EXISTING);
         Files.setPosixFilePermissions(claude, PosixFilePermissions.fromString("rwxr-xr-x"));
@@ -172,48 +182,79 @@ class SessionChainIT {
                                  "\"" + OPS.resolve("mac/temper-mac") + "\" session > \"" + session + "\" || exit 9",
                                  "read -r line < \"" + session + "\"",
                                  "export $line",
-                                 "\"" + OPS.resolve("bb/bb-build") + "\" \"" + checkout + "\" -B test > \"" + built + "\" 2>&1",
+                                 "\"" + OPS.resolve("bb/bb-build")
+                                + "\" \"" + checkout
+                                + "\" -B test > \"" + built
+                                + "\" 2>&1",
                                  "while :; do sleep 1; done");
         var env = new java.util.LinkedHashMap<String, String>();
+
         env.put("PATH", "/usr/bin:/bin");
-        env.put("HOME", Files.createDirectories(dir.resolve("home")).toString());
+        env.put("HOME",
+                Files.createDirectories(dir.resolve("home")).toString());
         env.put("USER", System.getProperty("user.name"));
         env.put("TZ", TZ);
         env.put("BB_OWNER", "t3e");
         env.put("BB_TEST_QUEUE_ROOT", queue.toString());
-        env.put("BB_TEST_PRIORITIES", dir.resolve("none-priorities").toString());
-        env.put("BB_TEST_PORT_MODULES", dir.resolve("none-modules").toString());
+        env.put("BB_TEST_PRIORITIES",
+                dir.resolve("none-priorities").toString());
+        env.put("BB_TEST_PORT_MODULES",
+                dir.resolve("none-modules").toString());
         env.put("BB_TEST_REACTOR_PATTERN", "[n]o-such-maven-reactor");
         env.put("BB_TEST_MVN", mvn.toString());
+        // host isolation (#56): the real bb-build's memory gate and reactor cap must not read the build host's memory, processes or cap file
+        env.put("BB_TEST_MEMINFO",
+                Files.writeString(dir.resolve("meminfo"), "MemAvailable:   67108864 kB\n").toString());
+        env.put("BB_TEST_PS",
+                Files.writeString(dir.resolve("ps"), "").toString());
+        env.put("BB_TEST_MAX_REACTORS_FILE",
+                Files.writeString(dir.resolve("max-reactors"), "64\n").toString());
         env.put("BB_PORT_GROUP", "0");
         env.put("BB_MAX_REACTORS", "0");
         var builder = HermeticProcess.builder(claude.toString(), "-c", script);
+
         builder.environment().clear();
         builder.environment().putAll(env);
         builder.directory(dir.toFile());
         builder.redirectOutput(ProcessBuilder.Redirect.DISCARD);
         builder.redirectError(ProcessBuilder.Redirect.DISCARD);
         standIn = builder.start();
-        until(() -> read(built).contains("queued ticket="), SHORT, "bb-build queued a ticket: " + read(built) + read(session));
+        until(() -> read(built).contains("queued ticket="),
+              SHORT,
+              "bb-build queued a ticket: " + read(built) + read(session));
         var found = QUEUED.matcher(read(built));
+
         assertThat(found.find()).as(read(built)).isTrue();
         ticket = found.group(1);
     }
 
     /// `temper-mac post` as launchd runs it: the real `ps`, the MAC token, the controller's URL.
     private void post() throws Exception {
-        var builder = HermeticProcess.builder("/bin/bash", OPS.resolve("mac/temper-mac").toString(), "post");
+        var builder = HermeticProcess.builder("/bin/bash",
+                                              OPS.resolve("mac/temper-mac").toString(),
+                                              "post");
+
         builder.environment().clear();
-        builder.environment().putAll(Map.of("PATH", "/usr/bin:/bin",
-                                            "HOME", dir.resolve("home").toString(),
-                                            "TZ", TZ,
-                                            "TEMPER_MAC_URL", url(),
-                                            "TEMPER_MAC_TOKEN", dir.resolve("mac-token").toString(),
-                                            "TEMPER_MAC_STATE", dir.resolve("mac-state").toString(),
-                                            "TEMPER_MAC_LOG", dir.resolve("mac.log").toString()));
+        builder.environment()
+               .putAll(Map.of("PATH",
+                              "/usr/bin:/bin",
+                              "HOME",
+                              dir.resolve("home").toString(),
+                              "TZ",
+                              TZ,
+                              "TEMPER_MAC_URL",
+                              url(),
+                              "TEMPER_MAC_TOKEN",
+                              dir.resolve("mac-token").toString(),
+                              "TEMPER_MAC_STATE",
+                              dir.resolve("mac-state").toString(),
+                              "TEMPER_MAC_LOG",
+                              dir.resolve("mac.log").toString()));
         builder.redirectErrorStream(true);
         var process = builder.start();
-        var output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+        var output = new String(process.getInputStream().readAllBytes(),
+                                StandardCharsets.UTF_8);
+
         assertThat(process.waitFor(60, TimeUnit.SECONDS)).isTrue();
         assertThat(process.exitValue()).as("temper-mac post: " + output + read(dir.resolve("mac.log"))).isZero();
     }
@@ -221,49 +262,57 @@ class SessionChainIT {
     /// The controller's collection round (30 s) has listed the ticket.
     private void awaitCollected() throws Exception {
         until(() -> {
-            try {
-                var reply = HttpClient.newHttpClient()
-                                      .send(HttpRequest.newBuilder(URI.create(url() + "/api/v1/fleet/tickets?host=" + HOST))
-                                                       .header("Authorization", "Bearer " + TOKEN)
-                                                       .build(),
-                                            HttpResponse.BodyHandlers.ofString());
-                return reply.statusCode() == 200 && reply.body().contains(ticket);
-            } catch (Exception e) {
-                return false;
-            }
-        }, Duration.ofSeconds(120), "the controller collected the ticket " + ticket);
+                  try {
+                  var reply = HttpClient.newHttpClient().send(HttpRequest.newBuilder(URI.create(url()
+                                                                                               + "/api/v1/fleet/tickets?host=" + HOST))
+                                                                         .header("Authorization", "Bearer " + TOKEN)
+                                                                         .build(),
+                                                              HttpResponse.BodyHandlers.ofString());
+
+                  return reply.statusCode() == 200 && reply.body()
+                                                           .contains(ticket);
+              } catch (Exception e) {
+                  return false;
+              }
+              },
+              Duration.ofSeconds(120),
+              "the controller collected the ticket " + ticket);
     }
 
     private String controllerReceipt() throws Exception {
-        var reply = HttpClient.newHttpClient()
-                              .send(HttpRequest.newBuilder(URI.create(url() + "/api/v1/fleet/tickets?host=" + HOST))
-                                               .header("Authorization", "Bearer " + TOKEN)
-                                               .build(),
-                                    HttpResponse.BodyHandlers.ofString());
+        var reply = HttpClient.newHttpClient().send(HttpRequest.newBuilder(URI.create(url()
+                                                                                     + "/api/v1/fleet/tickets?host=" + HOST))
+                                                               .header("Authorization", "Bearer " + TOKEN)
+                                                               .build(),
+                                                    HttpResponse.BodyHandlers.ofString());
         var found = MAC_LAST_OK.matcher(reply.body());
 
         assertThat(reply.statusCode()).as(reply.body()).isEqualTo(200);
         assertThat(found.find()).as(reply.body()).isTrue();
+
         return found.group(1);
     }
 
     private String ticketLine() throws Exception {
         return cliLines("tickets", "--host", HOST).stream()
-                                                  .filter(line -> line.contains(" " + ticket + " "))
-                                                  .findFirst()
-                                                  .orElseThrow(() -> new AssertionError("no row for " + ticket));
+                       .filter(line -> line.contains(" " + ticket + " "))
+                       .findFirst()
+                       .orElseThrow(() -> new AssertionError("no row for " + ticket));
     }
 
     private List<String> cliLines(String... args) throws Exception {
         try (var cli = CliProcess.launch(cliHome, url(), args)) {
             var exit = cli.exit(SHORT);
+
             assertThat(exit).as("exit of " + List.of(args) + " " + cli.out() + cli.err()).isZero();
+
             return cli.out();
         }
     }
 
     private long sessionStart() throws Exception {
-        return Files.readAllLines(queue.resolve("waiting").resolve(ticket)).stream()
+        return Files.readAllLines(queue.resolve("waiting").resolve(ticket))
+                    .stream()
                     .filter(line -> line.startsWith("session_start="))
                     .map(line -> Long.parseLong(line.substring("session_start=".length())))
                     .reduce((first, last) -> last)
@@ -271,13 +320,18 @@ class SessionChainIT {
     }
 
     private long javaStart() {
-        return standIn.info().startInstant().orElseThrow().getEpochSecond();
+        return standIn.info()
+                      .startInstant()
+                      .orElseThrow()
+                      .getEpochSecond();
     }
 
     // ---- the controller ------------------------------------------------------------------------------------------------
-
     private Promise<Controller.Running> start() {
-        var git = GitCli.gitCli(ProcessRunner.processRunner(), config.repo().origin(), config.repo().mirror());
+        var git = GitCli.gitCli(ProcessRunner.processRunner(),
+                                config.repo().origin(),
+                                config.repo().mirror());
+
         return Controller.controller(config,
                                      store,
                                      Credentials.credentials(BearerToken.bearerToken(TOKEN).expect("chain setup"),
@@ -286,11 +340,16 @@ class SessionChainIT {
                                                              none(),
                                                              some(BearerToken.bearerToken(MAC_TOKEN).expect("chain setup"))),
                                      new Banner(),
-                                     Controller.Git.git(git, git, git, GitHubPulls.gitHubPulls(config.repo().origin())),
+                                     Controller.Git.git(git,
+                                                        git,
+                                                        git,
+                                                        GitHubPulls.gitHubPulls(config.repo().origin())),
                                      LinkTiming.DEFAULT,
                                      TimeSpan.timeSpan(5).seconds(),
                                      Instant::now,
-                                     host -> some(LocalTicketTransport.localTicketTransport(OPS.resolve("bb/bb-tickets"), _ -> queue, Map.of())))
+                                     host -> some(LocalTicketTransport.localTicketTransport(OPS.resolve("bb/bb-tickets"),
+                                                                                            _ -> queue,
+                                                                                            Map.of())))
                          .start();
     }
 
@@ -306,13 +365,21 @@ class SessionChainIT {
                                                  some(dir.resolve("mac-token")));
         var fleet = ControllerConfig.Fleet.fleet(none(),
                                                  Files.createDirectories(dir.resolve("state")),
-                                                 List.of(ControllerConfig.BbHost.bbHost(HOST, some(ControllerConfig.BbLink.bbLink("u", "127.0.0.1")))),
+                                                 List.of(ControllerConfig.BbHost.bbHost(HOST,
+                                                                                        some(ControllerConfig.BbLink.bbLink("u",
+                                                                                                                            "127.0.0.1")))),
                                                  none(),
                                                  none());
+
         return ControllerConfig.controllerConfig(AcceptanceStack.runnerVersion(),
                                                  server,
-                                                 ControllerConfig.Database.database("unused", 1, database, "temper", Path.of("/unused")),
-                                                 ControllerConfig.Repo.repo(fixture.origin().toString(), dir.resolve("controller-mirror.git")),
+                                                 ControllerConfig.Database.database("unused",
+                                                                                    1,
+                                                                                    database,
+                                                                                    "temper",
+                                                                                    Path.of("/unused")),
+                                                 ControllerConfig.Repo.repo(fixture.origin().toString(),
+                                                                            dir.resolve("controller-mirror.git")),
                                                  ControllerConfig.Scheduling.scheduling(Duration.ofMillis(500),
                                                                                         Duration.ofSeconds(1200),
                                                                                         Duration.ofSeconds(120),
@@ -324,17 +391,24 @@ class SessionChainIT {
                                                                               none(),
                                                                               none(),
                                                                               ControllerConfig.Units.RERUN_INSTALL_DEFAULT),
-                                                 ControllerConfig.PortGroup.portGroup(List.of(), OwnerTag.ownerTag("temper").expect("chain setup"), 1),
+                                                 ControllerConfig.PortGroup.portGroup(List.of(),
+                                                                                      OwnerTag.ownerTag("temper").expect("chain setup"),
+                                                                                      1),
                                                  ControllerConfig.Worker.worker(Path.of(System.getProperty("temper.worker.jar"))),
                                                  List.of(),
-                                                 ControllerConfig.Evidence.evidence(Files.createDirectories(dir.resolve("evidence")), 256L << 20, 1L << 30, 0),
+                                                 ControllerConfig.Evidence.evidence(Files.createDirectories(dir.resolve("evidence")),
+                                                                                    256L << 20,
+                                                                                    1L << 30,
+                                                                                    0),
                                                  ControllerConfig.Retention.retention(Duration.ofHours(6)),
-                                                 ControllerConfig.PgDump.pgDump(LocalTime.now().plusHours(12), "no-such-pg-container"),
+                                                 ControllerConfig.PgDump.pgDump(LocalTime.now().plusHours(12),
+                                                                                "no-such-pg-container"),
                                                  fleet);
     }
 
     private String url() {
-        return "http://127.0.0.1:" + config.server().port();
+        return "http://127.0.0.1:" + config.server()
+                                           .port();
     }
 
     /// The self-check's `ssh-keyscan` answered with a key line; everything else runs for real.
@@ -343,8 +417,14 @@ class SessionChainIT {
 
         @Override
         public Promise<Completed> run(Command command) {
-            return command.argv().getFirst().equals("ssh-keyscan")
-                   ? Promise.success(Completed.completed("ssh-keyscan", 0, KEY_LINE.getBytes(StandardCharsets.US_ASCII), new byte[0], false))
+            return command.argv()
+                          .getFirst()
+                          .equals("ssh-keyscan")
+                   ? Promise.success(Completed.completed("ssh-keyscan",
+                                                         0,
+                                                         KEY_LINE.getBytes(StandardCharsets.US_ASCII),
+                                                         new byte[0],
+                                                         false))
                    : real.run(command);
         }
 
@@ -355,24 +435,30 @@ class SessionChainIT {
     }
 
     // ---- helpers -------------------------------------------------------------------------------------------------------
-
     /// Only this ticket's own waiter (its argv holds `bb-build __run <id>`).
     private static List<ProcessHandle> waiters(String id) {
         return id == null
                ? List.of()
                : ProcessHandle.allProcesses()
-                              .filter(handle -> handle.info().commandLine().map(line -> line.contains("bb-build __run " + id)).orElse(false))
+                              .filter(handle -> handle.info()
+                                                      .commandLine()
+                                                      .map(line -> line.contains("bb-build __run " + id))
+                                                      .orElse(false))
                               .toList();
     }
 
     private static Path checkout(Path co) throws Exception {
         Files.createDirectories(co);
         Files.writeString(co.resolve(".gitignore"), ".bb/\n");
-        for (var step : List.of(List.of("init", "-q"), List.of("add", "."), List.of("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "c"))) {
+        for (var step : List.of(List.of("init", "-q"),
+                                List.of("add", "."),
+                                List.of("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "c"))) {
             var git = new ArrayList<>(List.of("git", "-C", co.toString()));
+
             git.addAll(step);
             assertThat(HermeticProcess.builder(git).inheritIO().start().waitFor()).isZero();
         }
+
         return co;
     }
 
@@ -380,6 +466,7 @@ class SessionChainIT {
         Files.createDirectories(file.getParent());
         Files.writeString(file, body);
         Files.setPosixFilePermissions(file, PosixFilePermissions.fromString("rwxr-xr-x"));
+
         return file;
     }
 
@@ -391,7 +478,9 @@ class SessionChainIT {
 
     private static String read(Path file) {
         try {
-            return Files.exists(file) ? Files.readString(file) : "";
+            return Files.exists(file)
+                   ? Files.readString(file)
+                   : "";
         } catch (Exception e) {
             return "";
         }
@@ -399,10 +488,12 @@ class SessionChainIT {
 
     private static void until(BooleanSupplier condition, Duration bound, String what) throws InterruptedException {
         var deadline = Instant.now().plus(bound);
+
         while (!condition.getAsBoolean()) {
             if (Instant.now().isAfter(deadline)) {
                 throw new AssertionError("not within " + bound + ": " + what);
             }
+
             Thread.sleep(500);
         }
     }
