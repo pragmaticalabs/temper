@@ -25,6 +25,17 @@ LOADAVG=${BB_TEST_LOADAVG:-/proc/loadavg}   # TEST ONLY: a file in /proc/loadavg
 # if the fork heap changes. The load gate's starvation override never bypasses this floor while any reactor runs (see pick).
 MEMFLOOR=${BB_TEST_MEM_FLOOR_FILE:-$HOME/work/mem-floor-gb}
 MEMINFO=${BB_TEST_MEMINFO:-/proc/meminfo}   # TEST ONLY: a file in /proc/meminfo format, read instead
+# OFF-QUEUE JVM HEADROOM (issue #56, 2026-11-18): MemAvailable misses heap a running JVM may still claim (three hand-started TLC JVMs at
+# -Xmx 8+10+8G on 30G cloudbb-3; suite forks were then killed with 137). mem_held subtracts, for every java process that is neither a
+# reactor ($PAT) nor a descendant of one (its surefire/failsafe forks), max(0, Xmx - RSS) from MemAvailable before the floor test. One
+# ps pass per call. A java without -Xmx is skipped (its default max heap is not on the command line). RSS also counts non-heap memory,
+# so the headroom is an underestimate, never an overestimate.
+PSLIST=${BB_TEST_PS:-}   # TEST ONLY: a file of "pid ppid rss_kb args..." lines, read instead of ps
+# HOST REACTOR CAP (issue #56, CTO request 2026-11-18): a ticket is granted only while running reactors < min(its own cap, host_cap).
+# host_cap is the first positive-integer line of the per-host file $MAXREACT (read at every pick), else 3 (the CTO's value for the 30G
+# hosts). There is no environment fallback on purpose: pick runs with the ENQUEUER's environment, so an env value would let a submitter
+# lift the host's bound. No override (load or memory starvation) passes it.
+MAXREACT=${BB_TEST_MAX_REACTORS_FILE:-$HOME/work/max-reactors}
 # TICKET LOG (2026-11-11): one TSV line per ticket when it reaches done/ (see ticket_log).
 TLOG=${BB_TEST_TICKET_LOG:-$HOME/work/bb-ticket-log.tsv}
 mkdir -p "$Q/waiting" "$Q/running" "$Q/done"
@@ -227,14 +238,15 @@ reap() {
 # pick [<caller id>] (under lock, after reap; caller defaults to the global $ID of bb-build/bb-hold): the ONE waiting ticket to
 # grant now, or nothing. BACKFILL (2026-09-29): walk the
 # grantable order (priority desc, FIFO; port-group tickets already filtered while the group is held) and grant the
-# first ticket whose OWN cap is satisfied, so a head that cannot start (e.g. BB_MAX_REACTORS=1 waiting for an empty
+# first ticket whose OWN cap (bounded by the HOST CAP, issue #56) is satisfied, so a head that cannot start (e.g. BB_MAX_REACTORS=1 waiting for an empty
 # host) no longer blocks everything behind it. STARVATION BOUND: each ticket skipped for its cap gets blocked_since=
 # (first time only); once any skipped ticket has been blocked for STARVE seconds, nothing behind it is granted, so the
 # host drains and it runs.
 pick() {
-  local me=${1-${ID-}} r id f c bs now lh mh cand="" oldest="" ocr=0 cr; r=$(reactors); now=$(date +%s)
+  local me=${1-${ID-}} r id f c hc bs now lh mh cand="" oldest="" ocr=0 cr; r=$(reactors); now=$(date +%s)
+  hc=$(host_cap)
   for id in $(grantable); do
-    f=$Q/waiting/$id; c=$(field "$f" cap); case "$c" in ''|*[!0-9]*) c=3;; esac
+    f=$Q/waiting/$id; c=$(field "$f" cap); case "$c" in ''|*[!0-9]*) c=3;; esac; [ "$c" -le "$hc" ] || c=$hc
     cr=$(created_s "$f"); if [ -z "$oldest" ] || [ "$cr" -lt "$ocr" ]; then oldest=$id; ocr=$cr; fi
     [ -z "$cand" ] || continue
     [ "$r" -lt "$c" ] && { cand=$id; continue; }
@@ -252,6 +264,7 @@ pick() {
   [ $((now - ocr)) -gt "$LOAD_STARVE" ] || return 0
   [ -z "$lh" ] || [ "$r" -lt "$LOAD_STARVE_REACTORS" ] || return 0
   [ -z "$mh" ] || { [ "$r" -eq 0 ] && [ -z "$(ls "$Q/running" 2>/dev/null)" ]; } || return 0
+  # The HOST CAP needs no check here: a candidate exists only while reactors < min(its cap, host cap), so r < host cap already holds.
   f=$Q/waiting/$oldest; c=$(field "$f" cap); case "$c" in ''|*[!0-9]*) c=3;; esac
   [ "$r" -lt "$c" ] || return 0
   if [ "$me" = "$oldest" ]; then   # record once: only the oldest's own waiter writes it, not every waiter that polls
@@ -275,14 +288,42 @@ mem_floor_gb() {
   [ -n "$n" ] || case "${BB_MEM_FLOOR_GB:-}" in ''|0*|*[!0-9]*) ;; *) n=$BB_MEM_FLOOR_GB;; esac
   echo "${n:-8}"
 }
+# host_cap: the first line of $MAXREACT that is a positive integer (others are skipped), else 3.
+host_cap() {
+  local n; n=$(sed -n 's/^[[:space:]]*\([1-9][0-9]*\)[[:space:]]*$/\1/p' "$MAXREACT" 2>/dev/null | head -1)
+  echo "${n:-3}"
+}
+# ps_list: "pid ppid rss_kb args..." for every process on the host (all users: an off-queue JVM need not be ours), or $PSLIST.
+ps_list() { if [ -n "$PSLIST" ]; then cat "$PSLIST" 2>/dev/null; else ps -e -ww -o pid= -o ppid= -o rss= -o args= 2>/dev/null; fi; true; }
+# offqueue_jvms: one line "pid headroom_kb xmx_kb rss_kb" per java process (argv[0] is java or ends in /java) that is neither a reactor
+# nor below one (a reactor is $PAT or a real maven launcher, also under a test's own $PAT: no maven reactor or fork is ever off-queue)
+# and carries -Xmx<n>[kmgt] (the last one wins, as in the JVM; a bare byte count is accepted too); headroom = max(0, Xmx - RSS).
+offqueue_jvms() {
+  ps_list | awk -v pat="$PAT" -v mvn='[c]lassworlds[.]launcher[.]Launcher' '
+    $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ { n++; pid[n] = $1; par[$1] = $2; rss[$1] = $3 + 0; a = $0
+      sub(/^[[:space:]]*[0-9]+[[:space:]]+[0-9]+[[:space:]]+[0-9]+[[:space:]]*/, "", a); args[$1] = a; if (a ~ pat || a ~ mvn) re[$1] = 1 }
+    END { for (i = 1; i <= n; i++) { p = pid[i]; split(args[p], w, " "); if (w[1] != "java" && w[1] !~ /\/java$/) continue
+            for (q = p; q in par && !(q in re) && !(q in seen); q = par[q]) seen[q] = 1
+            delete seen; if (q in re) continue
+            x = -1; for (j = 2; j in w; j++) if (w[j] ~ /^-Xmx[0-9]+[kKmMgGtT]?$/) { v = substr(w[j], 5); u = tolower(substr(v, length(v)))
+              if (u ~ /[kmgt]/) { v = substr(v, 1, length(v) - 1) + 0; x = (u == "k") ? v : (u == "m") ? v * 1024 : (u == "g") ? v * 1048576 : v * 1073741824 }
+              else x = int(v / 1024) }
+            if (x < 0) continue
+            h = x - rss[p]; if (h < 0) h = 0; printf "%s %.0f %.0f %.0f\n", p, h, x, rss[p] } }'
+}
+# offqueue_headroom_kb: the sum of offqueue_jvms headroom, in kB (0 when there is none).
+offqueue_headroom_kb() { offqueue_jvms | awk '{ s += $2 } END { printf "%.0f\n", s }'; }
 # mem_available_gb: "MemAvailable=<x.x>GB" from $MEMINFO, or nothing when it is unreadable or malformed.
 mem_available_gb() {
   awk '$1 == "MemAvailable:" { if ($2 ~ /^[0-9]+$/ && $3 == "kB") printf "MemAvailable=%.1fGB\n", $2 / 1048576; exit }' "$MEMINFO" 2>/dev/null || true
 }
-# mem_held: nothing when MemAvailable >= the floor, else the reason ("held: MemAvailable 5.1 GB < floor 8 GB"). An unreadable or
+# mem_held: nothing when MemAvailable minus the off-queue JVM headroom is >= the floor, else the reason ("held: MemAvailable 5.1 GB < floor
+# 8 GB", or with headroom "held: MemAvailable 20.0 GB - off-queue JVM headroom 18.0 GB = 2.0 GB < floor 8 GB"). An unreadable or
 # malformed meminfo (no MemAvailable line, a non-numeric value, a unit other than kB) never holds the queue.
 mem_held() {
-  awk -v fl="$(mem_floor_gb)" '$1 == "MemAvailable:" { if ($2 ~ /^[0-9]+$/ && $3 == "kB" && $2 / 1048576 < fl + 0) printf "held: MemAvailable %.1f GB < floor %d GB\n", $2 / 1048576, fl; exit }' "$MEMINFO" 2>/dev/null || true
+  awk -v fl="$(mem_floor_gb)" -v hr="$(offqueue_headroom_kb)" '$1 == "MemAvailable:" { if ($2 ~ /^[0-9]+$/ && $3 == "kB" && ($2 - hr) / 1048576 < fl + 0) {
+      if (hr > 0) printf "held: MemAvailable %.1f GB - off-queue JVM headroom %.1f GB = %.1f GB < floor %d GB\n", $2 / 1048576, hr / 1048576, ($2 - hr) / 1048576, fl
+      else printf "held: MemAvailable %.1f GB < floor %d GB\n", $2 / 1048576, fl }; exit }' "$MEMINFO" 2>/dev/null || true
 }
 
 # to_done <ticket file>: move a ticket that has just got its terminal state lines to done/, then log it. Caller holds the queue lock.

@@ -196,6 +196,9 @@ class BbInstallIT {
         assertThat(pin("BB_BUILD_PREMEM")).isEqualTo(BbFixtures.md5(prev("bb-build.premem")));
         assertThat(pin("BB_LIB_PREMEM")).isEqualTo(BbFixtures.md5(prev("bb-queue-lib.sh.premem")));
         assertThat(pin("BB_QUEUE_PREMEM")).isEqualTo(BbFixtures.md5(prev("bb-queue.premem")));
+        assertThat(pin("BB_BUILD_PRECAP")).isEqualTo(BbFixtures.md5(prev("bb-build.precap")));
+        assertThat(pin("BB_LIB_PRECAP")).isEqualTo(BbFixtures.md5(prev("bb-queue-lib.sh.precap")));
+        assertThat(pin("BB_QUEUE_PRECAP")).isEqualTo(BbFixtures.md5(prev("bb-queue.precap")));
         assertThat(pin("BB_HOLD_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-hold")));
         assertThat(pin("BB_WAIT_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-wait")));
         assertThat(pin("BB_AWAIT_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-await")));
@@ -443,6 +446,36 @@ class BbInstallIT {
         }
     }
 
+    /// The bb-build, bb-queue-lib.sh and bb-queue of issue #53 (BB_*_PRECAP: no host reactor cap, no off-queue JVM headroom, no HOST CAP line) are accepted sources and are replaced, backed up under their md5.
+    @Test
+    void aHostRunningThePreHostCapQueue_isUpdatedToTheOneWithTheHostCap() throws Exception {
+        var tools = host("h1");
+
+        assertThat(install("builder@h1").rc()).isZero();
+        var names = List.of("bb-build", "bb-queue-lib.sh", "bb-queue");
+
+        for (var name : names) {
+            Files.write(tools.resolve(name), prev(name + ".precap"));
+        }
+
+        var run = install("builder@h1");
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        for (var name : names) {
+            var key = switch (name) {
+                case "bb-build" -> "BB_BUILD_";
+                case "bb-queue-lib.sh" -> "BB_LIB_";
+                default -> "BB_QUEUE_";
+            };
+
+            assertThat(run.stdout()).contains("installed builder@h1 " + name
+                                             + " before=" + pin(key + "PRECAP")
+                                             + " after=" + pin(key + "NEW"));
+            assertThat(tools.resolve(name)).hasBinaryContent(Files.readAllBytes(OPS_BB.resolve(name)));
+            assertThat(tools.resolve(name + ".bak-" + pin(key + "PRECAP"))).hasBinaryContent(prev(name + ".precap"));
+        }
+    }
+
     /// The bb-netns-run of 2026-11-11 (BB_NETNS_PREV, no docker socket in the container; live on c3/c4/d1) is an accepted source and is replaced, backed up under its md5.
     @Test
     void aHostRunningThePreviousNetnsRun_isUpdatedToTheOneThatReachesDocker() throws Exception {
@@ -545,6 +578,7 @@ class BbInstallIT {
                                                                  + "|" + pin("BB_BUILD_PRERC")
                                                                  + "|" + pin("BB_BUILD_PREVIA")
                                                                  + "|" + pin("BB_BUILD_PREMEM")
+                                                                 + "|" + pin("BB_BUILD_PRECAP")
                                                                  + "|" + pin("BB_BUILD_NEW"));
         assertThat(listing(good)).isEqualTo(goodBefore);
         assertThat(listing(diverged)).isEqualTo(divergedBefore);
@@ -581,6 +615,7 @@ class BbInstallIT {
                            + " expected=" + BbFixtures.BB_LIB_OLD
                            + "|621b2252c3da05e7dd1161d076908864|" + pin("BB_LIB_PRERC")
                            + "|" + pin("BB_LIB_PREMEM")
+                           + "|" + pin("BB_LIB_PRECAP")
                            + "|" + pin("BB_LIB_NEW"))
                   .contains("bb-queue installed=" + BbFixtures.md5("unrelated tool\n".getBytes())
                            + " expected=" + BbFixtures.BB_QUEUE_OLD
@@ -589,6 +624,7 @@ class BbInstallIT {
                            + "|" + pin("BB_QUEUE_PRERC")
                            + "|" + pin("BB_QUEUE_PREVIA")
                            + "|" + pin("BB_QUEUE_PREMEM")
+                           + "|" + pin("BB_QUEUE_PRECAP")
                            + "|" + pin("BB_QUEUE_NEW"));
     }
 

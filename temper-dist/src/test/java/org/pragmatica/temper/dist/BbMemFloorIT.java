@@ -24,7 +24,8 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 /// /proc/meminfo) is below the floor (per-host file BB_TEST_MEM_FLOOR_FILE, else BB_MEM_FLOOR_GB, else 8 GiB). The load gate's
 /// starvation override must not bypass the floor while a reactor runs, because granting into low memory beside a running reactor
 /// reproduced the 2026-11-13 OOM kills; with no reactor running the oldest ticket goes after LOAD_STARVE and records mem_override=.
-/// A reactor is a stand-in process whose command line matches BB_TEST_REACTOR_PATTERN, so the count is the real pgrep count.
+/// A reactor is a stand-in process whose command line matches BB_TEST_REACTOR_PATTERN, so the count is the real pgrep count. The
+/// process list is an empty BB_TEST_PS, so the build host's own JVMs add no off-queue headroom (that is BbOffQueueJvmIT's subject).
 ///
 /// Probes: drop mem_held from pick's gate -> [#belowTheFloor_holdsTheGrant_andAboveItGrants] red; let the memory override fire with a
 /// reactor running -> [#oneReactorBelowTheFloor_neverGrants_evenPastLoadStarve] red; make an unreadable meminfo hold ->
@@ -65,6 +66,8 @@ class BbMemFloorIT {
         env.put("BB_TEST_MEMINFO", meminfo.toString());
         env.put("BB_TEST_MEM_FLOOR_FILE",
                 dir.resolve("mem-floor-gb").toString());
+        env.put("BB_TEST_PS",
+                Files.writeString(dir.resolve("ps"), "").toString());
         env.put("BB_LOAD_STARVE_SECS", "1200");
         env.put("BB_LOAD_STARVE_REACTORS", "2");
         loadIs("0.00");
@@ -97,8 +100,9 @@ class BbMemFloorIT {
         var memory = indexStartingWith(lines, "MEMORY GATE (");
 
         assertThat(lines.get(memory - 1)).startsWith("LOAD GATE (");
-        assertThat(lines.get(memory + 1)).startsWith("RUNNING (");
-        assertThat(lines.get(memory + 2)).startsWith("TICKET ");
+        assertThat(lines.get(memory + 1)).startsWith("HOST CAP (");
+        assertThat(lines.get(memory + 2)).startsWith("RUNNING (");
+        assertThat(lines.get(memory + 3)).startsWith("TICKET ");
         memAvailableKb(9 * GIB_KB);
         assertThat(bbQueue()).contains("only while 0 reactors run): open");
     }
