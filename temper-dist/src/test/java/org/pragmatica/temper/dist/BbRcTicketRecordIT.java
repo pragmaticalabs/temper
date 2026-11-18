@@ -12,8 +12,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
-import org.pragmatica.temper.testsupport.HermeticProcess;
-
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -156,13 +154,12 @@ class BbRcTicketRecordIT {
                       .orElseThrow()
                       .toString());
         env.put("PATH", shim + ":" + env.get("PATH"));
-        var builder = HermeticProcess.builder("bash",
-                                              tools.resolve("bb-build").toString(),
-                                              "__run",
-                                              id);
+        var builder = BbFixtures.processClean(List.of("bash",
+                                                      tools.resolve("bb-build").toString(),
+                                                      "__run",
+                                                      id),
+                                              env);
 
-        builder.environment().clear();
-        builder.environment().putAll(env);
         builder.redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.DISCARD);
         var process = builder.start();
 
@@ -346,7 +343,8 @@ class BbRcTicketRecordIT {
             var killed = tool("bb-build", Map.of("BB_MAX_REACTORS", "0", "BB_DEDUP", "0"), co.toString(), "-B", "again");
 
             assertThat(killed.rc()).as(state + ": " + killed.stdout() + killed.stderr()).isEqualTo(3);
-            assertThat(killed.stderr()).as(state).contains("a build appears to be running in " + co)
+            assertThat(killed.stderr()).as(state)
+                      .contains("a build appears to be running in " + co)
                       .doesNotContain("deleted by hand");
             Files.delete(gone);
         }

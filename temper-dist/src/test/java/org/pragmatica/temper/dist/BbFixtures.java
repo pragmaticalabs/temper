@@ -29,6 +29,72 @@ final class BbFixtures {
 
     private BbFixtures() {}
 
+    /// Host isolation of every bb script a test runs (issue #56, 2026-11-18): the memory gate reads MemAvailable and the process list of
+    /// the machine it runs on, and the host cap reads `~/work/max-reactors`, so a test that runs a real `bb-build`/`bb-queue` without
+    /// them depends on what else the build host is doing (cloudbb-3: two hand-started TLC JVMs at -Xmx8g closed the gate and
+    /// BbRequireDockerIT failed 7 of 9 on "the build finished"). The defaults below are a generous fixed meminfo (64 GiB available),
+    /// an empty process list, a host cap far above any test's reactor count and an absent memory-floor file (floor 8 GiB). A test
+    /// that is about one of these passes its own value, which wins; an empty `BB_TEST_PS` means the real `ps`.
+    private static final class Isolation {
+        static final Map<String, String> DEFAULTS = defaults();
+
+        private static Map<String, String> defaults() {
+            try {
+                var root = Files.createTempDirectory("bb-host-isolation");
+
+                root.toFile().deleteOnExit();
+                var meminfo = Files.writeString(root.resolve("meminfo"),
+                                                "MemTotal:       67108864 kB\nMemFree:        67108864 kB\nMemAvailable:   67108864 kB\n");
+                var ps = Files.writeString(root.resolve("ps"), "");
+                var cap = Files.writeString(root.resolve("max-reactors"), "64\n");
+
+                for (var f : List.of(meminfo, ps, cap)) {
+                    f.toFile().deleteOnExit();
+                }
+
+                return Map.of("BB_TEST_MEMINFO",
+                              meminfo.toString(),
+                              "BB_TEST_PS",
+                              ps.toString(),
+                              "BB_TEST_MAX_REACTORS_FILE",
+                              cap.toString(),
+                              "BB_TEST_MEM_FLOOR_FILE",
+                              root.resolve("no-mem-floor-file").toString());
+            } catch (IOException e) {
+                throw new IllegalStateException(e);
+            }
+        }
+    }
+
+    /// `env` over the host-isolation defaults. Every launch of a bb script goes through this (or `run`), see [Isolation].
+    static Map<String, String> isolated(Map<String, String> env) {
+        var merged = new java.util.HashMap<>(Isolation.DEFAULTS);
+
+        merged.putAll(env);
+
+        return merged;
+    }
+
+    /// The only way a Bb*IT starts a child (`BbHostIsolationIT#noBbIT_launchesWithoutTheSharedIsolation` checks the bytecode): a hermetic
+    /// builder whose environment already holds the [Isolation] defaults. `env` wins over them.
+    static ProcessBuilder process(List<String> command, Map<String, String> env) {
+        return HermeticProcess.builder(command, isolated(env));
+    }
+
+    static ProcessBuilder process(String... command) {
+        return process(List.of(command), Map.of());
+    }
+
+    /// As [#process(List, Map)], but the child sees only `env` and the defaults: the host's PATH, HOME and the rest are cleared.
+    static ProcessBuilder processClean(List<String> command, Map<String, String> env) {
+        var builder = HermeticProcess.builder(command);
+
+        builder.environment().clear();
+        builder.environment().putAll(isolated(env));
+
+        return builder;
+    }
+
     static boolean linux() {
         return System.getProperty("os.name").startsWith("Linux");
     }
@@ -82,7 +148,7 @@ final class BbFixtures {
     static Outcome run(List<String> command, Map<String, String> env, Path cwd, String stdin) throws IOException, InterruptedException {
         // hermetic: a BB_* variable of the build host (bb-submit exports BB_SESSION_*, BB_AGENT, BB_LANE, BB_PR into the maven
         // run that hosts this test) must not reach the script under test; only what the test passes does
-        var builder = HermeticProcess.builder(command, env);
+        var builder = process(command, env);
 
         if (cwd != null) {
             builder.directory(cwd.toFile());

@@ -10,8 +10,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
-import org.pragmatica.temper.testsupport.HermeticProcess;
-
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -104,7 +102,7 @@ class BbAwaitIT {
         var n = outputs++;
         var out = dir.resolve("out-" + n);
         var err = dir.resolve("err-" + n);
-        var builder = HermeticProcess.builder(command(args), env());
+        var builder = BbFixtures.process(command(args), env());
 
         builder.redirectOutput(out.toFile()).redirectError(err.toFile());
         var process = builder.start();
@@ -131,10 +129,10 @@ class BbAwaitIT {
     }
 
     private Process waiterFor(String id) throws IOException {
-        var builder = HermeticProcess.builder("bash",
-                                              fake.resolve("bb-build").toString(),
-                                              "__run",
-                                              id);
+        var builder = BbFixtures.process("bash",
+                                         fake.resolve("bb-build").toString(),
+                                         "__run",
+                                         id);
 
         builder.redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.DISCARD);
         var process = builder.start();
@@ -250,7 +248,7 @@ class BbAwaitIT {
 
     @Test
     void aProcess_isWaitedOnUntilItIsGone() throws Exception {
-        var sleeper = HermeticProcess.builder("sleep", "600").start();
+        var sleeper = BbFixtures.process("sleep", "600").start();
 
         started.add(sleeper);
         var wait = awaitInBackground("--gone",
@@ -265,7 +263,7 @@ class BbAwaitIT {
 
     @Test
     void anAlreadyGoneProcess_endsAtOnce() throws Exception {
-        var sleeper = HermeticProcess.builder("true").start();
+        var sleeper = BbFixtures.process("true").start();
 
         sleeper.waitFor();
         var run = await("--gone",
@@ -285,7 +283,7 @@ class BbAwaitIT {
         assertThat(rc).as(Files.readString(wait.err())).isEqualTo(124);
         assertThat(Files.readString(wait.err())).contains("deadline 2s passed waiting for file " + never);
         assertThat(seconds).as("within a second of the deadline, never an unbounded wait").isBetween(0.9, 8.0);
-        var sleeper = HermeticProcess.builder("sleep", "600").start();
+        var sleeper = BbFixtures.process("sleep", "600").start();
 
         started.add(sleeper);
         var gone = awaitInBackground("--gone",
@@ -301,11 +299,11 @@ class BbAwaitIT {
     @Test
     void aHeldQueueLock_doesNotOverrunTheTicketDeadline() throws Exception {
         var held = dir.resolve("held");
-        var holder = HermeticProcess.builder("bash",
-                                             "-c",
-                                             "exec 9> \"$1\"; flock 9; echo held; exec sleep 30",
-                                             "_",
-                                             queue.resolve(".lock").toString());
+        var holder = BbFixtures.process("bash",
+                                        "-c",
+                                        "exec 9> \"$1\"; flock 9; echo held; exec sleep 30",
+                                        "_",
+                                        queue.resolve(".lock").toString());
 
         holder.redirectOutput(held.toFile()).redirectErrorStream(true);
         started.add(holder.start());
@@ -336,7 +334,7 @@ class BbAwaitIT {
     @Test
     void minutesAndHours_areNotReadAsSeconds() throws Exception {
         for (var unit : List.of("1m", "1h")) {
-            var sleeper = HermeticProcess.builder("sleep", "600").start();
+            var sleeper = BbFixtures.process("sleep", "600").start();
 
             started.add(sleeper);
             var wait = awaitInBackground("--gone",
@@ -430,7 +428,7 @@ class BbAwaitIT {
 
     @Test
     void aZombie_countsAsAlive() throws Exception {
-        var builder = HermeticProcess.builder("sh", "-c", "sleep 0.1 & echo $!; exec sleep 30");
+        var builder = BbFixtures.process("sh", "-c", "sleep 0.1 & echo $!; exec sleep 30");
         var out = dir.resolve("zombie-pid");
 
         builder.redirectOutput(out.toFile());

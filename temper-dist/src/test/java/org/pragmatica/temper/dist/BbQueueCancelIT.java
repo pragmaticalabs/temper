@@ -13,8 +13,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
-import org.pragmatica.temper.testsupport.HermeticProcess;
-
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -104,7 +102,7 @@ class BbQueueCancelIT {
     }
 
     private Process spawn(Path cwd, String... command) throws IOException {
-        var builder = HermeticProcess.builder(command).directory(cwd.toFile());
+        var builder = BbFixtures.process(command).directory(cwd.toFile());
 
         builder.redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.DISCARD);
         var process = builder.start();
@@ -424,13 +422,12 @@ class BbQueueCancelIT {
         var env = env(ME, more);
 
         env.put("PATH", shim + ":" + env.get("PATH"));
-        var builder = HermeticProcess.builder("bash",
-                                              tools.resolve("bb-build").toString(),
-                                              "__run",
-                                              id);
+        var builder = BbFixtures.processClean(List.of("bash",
+                                                      tools.resolve("bb-build").toString(),
+                                                      "__run",
+                                                      id),
+                                              env);
 
-        builder.environment().clear();
-        builder.environment().putAll(env);
         builder.redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.DISCARD);
         var waiter = builder.start();
 

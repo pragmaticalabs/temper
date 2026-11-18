@@ -24,6 +24,8 @@
 # LOAD GATE (2026-11-11): a ticket is also granted only while load5/cores < 1.2 (BB_LOAD_MAX); the oldest grantable ticket goes
 # once it waited > 1200 s (BB_LOAD_STARVE_SECS) while < 2 reactors run (BB_LOAD_STARVE_REACTORS). MEMORY FLOOR (#53): a grant also
 # needs MemAvailable >= the per-host floor; the oldest ticket overrides it only while no ticket runs at all. pick() in the lib decides.
+# HOST CAP (#56): a grant also needs reactors < min(this ticket's cap, the host's ~/work/max-reactors, default 3); nothing overrides it.
+# Off-queue JVMs (#56): the memory floor is compared against MemAvailable minus their unclaimed heap, max(0, Xmx - RSS) each.
 # VERDICT SOURCE (2026-11-12, bbrc1; reap and too-late cancel fixed 2026-11-13): the ticket's rc= is the exit status of the build subshell
 # as returned by `wait` in the waiter, never a read of .bb/rc. A ticket whose waiter is gone (reap, or a cancel that finds the build
 # already ended) is finalized as orphaned with NO rc: bb-wait exits 70, and .bb/rc is not read into it. .bb/rc is a read-only (444) copy
@@ -149,7 +151,7 @@ if [ "${BB_IT_UNFILTERED:-0}" != 1 ] && printf '%s' "$A" | grep -Eq -- ' (-pl|--
 fi
 # Concurrency cap (2026-09-27): above 3 concurrent reactors, fixed-port tests collide (BindException)
 # and Testcontainers fails to start, so results are environmental noise. The queue grants a ticket only while
-# fewer than CAP reactors run. Override the cap only with BB_MAX_REACTORS. BB_CAP_WAIT_SECS > 0 bounds the
+# fewer than CAP reactors run, and never more than the host cap (~/work/max-reactors, #56). Override the cap only with BB_MAX_REACTORS. BB_CAP_WAIT_SECS > 0 bounds the
 # queue wait (then .bb/rc = 5); unset = wait until granted.
 CAP=${BB_MAX_REACTORS:-5}; LIMIT=${BB_CAP_WAIT_SECS:-0}
 case "$CAP$LIMIT" in *[!0-9]*) echo "refusing: BB_MAX_REACTORS / BB_CAP_WAIT_SECS must be non-negative integers" >&2; exit 2;; esac
