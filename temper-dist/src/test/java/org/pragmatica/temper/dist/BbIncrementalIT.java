@@ -26,7 +26,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 /// [#unmappedPath_runsTheFullReactor], [#unmappedPathBesideAModuleChange_runsTheFullReactor] and [#since_unmappedPath_recordsItsOwnReason] red
 /// (without the guard the empty-S fallback answers `FULL empty-set`; the asserted REASON pins each fallback on its own).
 /// Edge probes (inc2): drop the profile edges -> [#profileOnlyDependency_isAnEdge] red; drop the plugin-dependency edges -> [#pluginDependency_isAnEdge] red.
-/// `FULL empty-set` is a defensive branch no input reaches (a changed module is always in S), so no test pins it.
+/// Coordinate probes (inc3): drop the `${` check -> [#unresolvedCoordinate_runsTheFullReactor_neverDropsTheEdge] and [#since_unresolvedCoordinate_recordsItsOwnReason] red; a resolver that ignores <properties> -> [#propertyResolvedCoordinate_isTheEdge_notFull] red.\n/// There is no `FULL empty-set`: S always holds the changed module, so the branch was deleted (nothing could pin it).
 class BbIncrementalIT {
     private static final Path MODULES = BbFixtures.OPS_BB.resolve("bb-modules.py");
     private static final Path BB_BUILD = BbFixtures.OPS_BB.resolve("bb-build");
@@ -362,6 +362,60 @@ class BbIncrementalIT {
 
         commit(co, "plib/src/main/java/A.java", "class A { int changed; }\n");
         assertThat(selected(co)).isEqualTo("build-parent,pdep,plib");
+    }
+
+    /// Adds one module `name` (parent build-parent) to the fixture reactor, committed and `base` re-tagged: a module this test alone needs.
+    private void addModule(Path co, String name, String pomXml) throws Exception {
+        write(co, name + "/pom.xml", pomXml);
+        write(co,
+              "pom.xml",
+              Files.readString(co.resolve("pom.xml")).replace("</modules>", "<module>" + name + "</module></modules>"));
+        git(co, "add", ".");
+        git(co, "commit", "-qm", "add " + name);
+        git(co, "tag", "-f", "base");
+    }
+
+    @Test
+    void unresolvedCoordinate_runsTheFullReactor_neverDropsTheEdge() throws Exception {
+        var co = reactor("unresolved");
+
+        addModule(co,
+                  "rdep",
+                  with(pom("rdep", "build-parent", "jar", List.of(), List.of()),
+                       "<dependencies>" + depOn("${dep.a}", "") + "</dependencies>"));
+        commit(co, "z/src/main/java/A.java", "class A { int changed; }\n");
+        assertThat(selected(co)).isEqualTo("FULL unresolved-coordinate:rdep/pom.xml:??dep.a?");
+    }
+
+    @Test
+    void propertyResolvedCoordinate_isTheEdge_notFull() throws Exception {
+        var co = reactor("resolved");
+
+        addModule(co,
+                  "rdep",
+                  with(pom("rdep", "build-parent", "jar", List.of(), List.of()),
+                       "<properties><dep.a>m</dep.a></properties>\n<dependencies>" + depOn("${dep.a}", "")
+                      + "</dependencies>"));
+        commit(co, "m/src/main/java/A.java", "class A { int changed; }\n");
+        assertThat(selected(co)).isEqualTo("build-parent,d,m,rdep,u,x");
+    }
+
+    @Test
+    void since_unresolvedCoordinate_recordsItsOwnReason() throws Exception {
+        assumeTrue(BbFixtures.linux(), "bb-build needs GNU tools, flock and pgrep");
+        var co = reactor("unresolvedtkt");
+
+        addModule(co,
+                  "rdep",
+                  with(pom("rdep", "build-parent", "jar", List.of(), List.of()),
+                       "<build><plugins><plugin><groupId>g</groupId><artifactId>${dep.a}</artifactId></plugin></plugins></build>"));
+        commit(co, "z/src/main/java/A.java", "class A { int changed; }\n");
+        var queue = dir.resolve("q");
+        var out = bb(queue, "--since", "base", co.toString(), "-B", "test");
+        var lines = ticket(queue, out);
+
+        assertThat(value(lines, "modules")).isEqualTo("FULL");
+        assertThat(value(lines, "since_reason")).isEqualTo("unresolved-coordinate:rdep/pom.xml:??dep.a?");
     }
 
     @Test
