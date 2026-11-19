@@ -62,7 +62,7 @@ class BbTemperHostIT {
         home = Files.createDirectories(dir.resolve("home"));
         bin = Files.createDirectories(dir.resolve("bin"));
         TestHosts.write(home);
-        MacScripts.executable(bin.resolve("ssh"), "for a in \"$@\"; do printf '%s\\n' \"$a\" >> \"$STUBS/ssh.args\"; done\necho -- >> \"$STUBS/ssh.args\"\n"
+        MacScripts.executable(bin.resolve("ssh"), "[ \"${@: -1}\" = true ] && exit 0  # bb-temper's path probe (2026-11-19); BbTemperPathIT covers it\nfor a in \"$@\"; do printf '%s\\n' \"$a\" >> \"$STUBS/ssh.args\"; done\necho -- >> \"$STUBS/ssh.args\"\n"
                                                    + "exit \"$(cat \"$STUBS/ssh.rc\" 2> /dev/null || echo 0)\"\n");
         MacScripts.executable(bin.resolve("scp"), "exit 0\n");
         var gitInit = BbFixtures.process("git", "-c", "user.email=t@t", "-c", "user.name=t", "init", "-q").directory(dir.toFile()).inheritIO();

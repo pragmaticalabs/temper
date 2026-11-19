@@ -8,7 +8,12 @@
 #   host <name> <user@address> <jump> <known_hosts> <pick>
 #     name         [a-z0-9][a-z0-9-]*, not "auto" or "mac"; BB_HOST=<name> and bb-drift's places use it
 #     user@address what ssh connects to
-#     jump         - (direct) or user@address of the host ssh goes THROUGH (ProxyCommand ssh -W)
+#     jump         - (direct) or user@address of the host ssh goes THROUGH (ProxyCommand ssh -W). With a jump set, bb-temper
+#                  tries the host DIRECTLY first (5 s connect timeout) and falls back to the jump only when that connect fails;
+#                  the last working path is cached in ~/.temper/bb-path/<host> for 30 min (BB_PATH_TTL=<minutes>), so a blocked
+#                  direct path costs 5 s once per TTL, not per call. BB_PATH=direct|jump forces one path (no fallback, loud
+#                  failure). The direct path uses the same known_hosts file and StrictHostKeyChecking=yes. Each call prints
+#                  `bb-temper: <host> via direct|jump(<jump>)` on stderr. The config format is unchanged.
 #     known_hosts  - (ssh's own) or the file pinning this host's key, StrictHostKeyChecking=yes; set exactly when jump is set
 #     pick         auto: bb-temper's automatic pick may choose it (config order breaks ties); explicit: only BB_HOST=<name>
 # The first auto host is the home host: bb-temper reads the controller's host list through it and falls back to it, and

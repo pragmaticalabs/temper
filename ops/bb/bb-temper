@@ -33,7 +33,7 @@
 #                                       the old line runs, after a warning, and the ticket has no session fields.
 #                                       BB_DEDUP, BB_QUEUE, BB_PG_ISOLATE and BB_REQUIRE_DOCKER (0 or 1; else exit 2) reach bb-build on both paths.
 #                                       Any other BB_* in the environment that this tool does not read or forward (read:
-#                                       BB_OWNER BB_HOST BB_HOSTS_CMD BB_TEMPER_HOSTS BB_SUBMIT BB_SSH_*; BB_KNOWN_HOSTS) gets
+#                                       BB_OWNER BB_HOST BB_HOSTS_CMD BB_TEMPER_HOSTS BB_SUBMIT BB_PATH BB_PATH_TTL BB_SSH_*; BB_KNOWN_HOSTS) gets
 #                                       one stderr line naming it; never a refusal.
 #   bb-temper wait <name>               block until .bb/rc exists, then print rc and the BUILD/Tests summary lines
 #   bb-temper report <name>             rc, wall time and per-module testcase/failure/skip counts from the XML reports
@@ -43,7 +43,7 @@
 #                                       refuses the rm (exit 3, names the ticket and --kill) so a tree is never deleted under a
 #                                       live maven. --kill cancels the running ticket first (`bb-queue cancel --running`: its
 #                                       waiter tree and every process with its cwd in the checkout or below), then removes.
-# Exit: 0 ok; 2 usage; 3 refused; 70 (wait; report prints rc=unknown) the ticket has no numeric rc (orphaned: waiter died, reap, too-late cancel); 71
+# Exit: 0 ok; 2 usage; 3 refused; 69 host unreachable (path choice, see "path choice" below); 70 (wait; report prints rc=unknown) the ticket has no numeric rc (orphaned: waiter died, reap, too-late cancel); 71
 #   RC-MISMATCH (wait, report): a finished ticket's rc and the checkout's .bb/rc disagree; 78 host config missing or malformed; else the failing step's code.
 #   `wait` exits with maven's rc (the ticket's), 7 for a deduped call. GUARANTEE: the verdict comes from mvn's exit status, never from the checkout; any later disagreement in the checkout is detected (RC-MISMATCH, exit 71); deliberate tampering with queue/done by the same uid stays possible.
 set -euo pipefail
@@ -93,24 +93,107 @@ auto_hosts() {  # auto_hosts: AUTO = the hosts with pick auto, in file order (th
   [ "${#AUTO[@]}" -gt 0 ] || cfg_die "no host with pick auto"
 }
 # ---- end of the shared host-config block ----------------------------------------------------------------------------------
+# ---- path choice for a jumped host (2026-11-19, fb1) ---------------------------------------------------------------------
+# A host whose config line has a jump can be reached two ways: DIRECT (ssh to its address) and through the JUMP host (ProxyCommand
+# ssh -W). Both use the same pinned known_hosts file with StrictHostKeyChecking=yes, so the direct path checks the host key exactly
+# as the jump path does. Before this, the jump was always used, so one dropped ssh to the jump host made every host behind it
+# unreachable.
+#   BB_PATH=auto (default): the path cached in ~/.temper/bb-path/<host> ("<direct|jump> <epoch>", written tmp + mv) when it is
+#     younger than BB_PATH_TTL minutes (default 30); else probe direct (5 s) and, on a connect failure, the jump (15 s), and
+#     cache the one that answered. Both down: exit 69 naming both. The Mac's egress is a rotating VPN that today blocks direct,
+#     so without the cache every call would pay the 5 s direct timeout.
+#   BB_PATH=direct|jump: that path only, never a fallback; unreachable: exit 69 naming the path.
+# HOW A CONNECT FAILURE IS TOLD FROM A COMMAND FAILURE: the choice is made by a no-op probe (`ssh ... true`, hard wall of timeout
+# + 2 s), never by running the real command and looking at its exit code. The probe has no remote effect, so any non-zero from
+# it is a connect failure; the real command then runs ONCE on the chosen path and its exit status is final. ssh exit 255 from the
+# real command is ambiguous (the remote side may have acted), which is why a build is never retried on the other path.
+# A cache hit costs one `true` on the cached path (every verb, via confirm_path; the host pick alone trusts it), never a probe of the other path;
+# the cached path failing drops the cache and probes the other one. Each call prints `bb-temper: <host> via direct|jump(<jump>)`
+# on stderr. bb-submit gets BB_SSH_PROXY only on the jump path; BB_KNOWN_HOSTS on both.
+PATH_DIR=$HOME/.temper/bb-path
+PATH_TTL=${BB_PATH_TTL:-30}
+[[ $PATH_TTL =~ ^[0-9]+$ ]] || { echo "$PROG: BB_PATH_TTL must be minutes (digits)" >&2; exit 2; }
+case ${BB_PATH:-auto} in auto|direct|jump) ;; *) echo "$PROG: BB_PATH must be auto, direct or jump" >&2; exit 2 ;; esac
+NAME=; JUMP=; KNOWNF=; PATHSEL=direct; PATHSRC=; SETUP_KEY=
+apply_path() {  # apply_path direct|jump: SSHO and the bb-submit variables for that path
+  PATHSEL=$1
+  SSHO=(-i "$KEY" -o BatchMode=yes)
+  # bb-submit reads these (it runs its own ssh); cleared first so a stray value never applies.
+  export BB_SSH_KEY=$KEY
+  unset BB_SSH_PROXY BB_KNOWN_HOSTS
+  [ -n "$JUMP" ] || return 0
+  export BB_KNOWN_HOSTS=$KNOWNF
+  # the paths sit inside ssh -o values (the ProxyCommand one is re-read by a shell), so they are double-quoted: a HOME with spaces
+  SSHO+=(-o "UserKnownHostsFile=\"$KNOWNF\"" -o StrictHostKeyChecking=yes)
+  if [ "$1" = jump ]; then
+    export BB_SSH_PROXY=$JUMP
+    SSHO+=(-o "ProxyCommand=ssh -i \"$KEY\" -o BatchMode=yes -o ConnectTimeout=15 -W %h:%p $JUMP")
+  fi
+}
+path_label() { if [ "$1" = jump ]; then echo "jump($JUMP)"; else echo direct; fi; }
+probe_path() {  # probe_path direct|jump: a no-op `true` over that path; non-zero = connect failure. Hard wall: timeout + 2 s.
+  local t=5 p w rc=0
+  [ "$1" != jump ] || t=15
+  apply_path "$1"
+  ssh "${SSHO[@]}" -o ConnectTimeout=$t "$HOST" true > /dev/null 2>&1 & p=$!
+  ( sleep $((t + 2)); kill "$p" 2> /dev/null ) > /dev/null 2>&1 & w=$!
+  { wait "$p" || rc=$?; } 2> /dev/null  # the shell reports a killed job on stderr
+  kill "$w" 2> /dev/null || true; wait "$w" 2> /dev/null || true
+  return "$rc"
+}
+cache_get() {  # cache_get <name>: print the cached path when it is younger than the TTL
+  local f=$PATH_DIR/$1 p= t=
+  [ -f "$f" ] || return 1
+  read -r p t < "$f" || true
+  case $p in direct|jump) ;; *) return 1 ;; esac
+  [[ $t =~ ^[0-9]+$ ]] || return 1
+  [ $(( $(date +%s) - t )) -lt $((PATH_TTL * 60)) ] && [ "$t" -le "$(date +%s)" ] || return 1
+  printf '%s\n' "$p"
+}
+cache_put() { mkdir -p "$PATH_DIR"; printf '%s %s\n' "$1" "$(date +%s)" > "$PATH_DIR/$NAME.tmp.$$"; mv "$PATH_DIR/$NAME.tmp.$$" "$PATH_DIR/$NAME"; }
+choose_path() {  # choose_path [<excluded path>]: set PATHSEL and the ssh options for the jumped host $NAME
+  local c p failed=
+  PATHSRC=
+  if [ "${BB_PATH:-auto}" != auto ]; then
+    probe_path "$BB_PATH" || die 69 "$NAME unreachable via $(path_label "$BB_PATH"): BB_PATH=$BB_PATH forces that path, no fallback to the other"
+    apply_path "$BB_PATH"; PATHSRC=forced; return 0
+  fi
+  if [ -z "${1:-}" ] && c=$(cache_get "$NAME"); then apply_path "$c"; PATHSRC=cache; return 0; fi
+  for p in direct jump; do
+    [ "$p" != "${1:-}" ] || { failed="$failed $p"; continue; }
+    if probe_path "$p"; then
+      [ -z "$failed" ] || echo "bb-temper: $NAME connect failed via$failed; using $(path_label "$p")" >&2
+      cache_put "$p"; apply_path "$p"; PATHSRC=probe; return 0
+    fi
+    failed="$failed $p"
+  done
+  die 69 "$NAME unreachable: $(path_label direct) and $(path_label jump) both failed to connect"
+}
+confirm_path() {  # a cached path is trusted by setup_host; checkout/build/... confirm it with one `true` before acting
+  [ "$PATHSRC" = cache ] || return 0
+  probe_path "$PATHSEL" && return 0
+  rm -f "$PATH_DIR/$NAME"
+  echo "bb-temper: $NAME cached path $(path_label "$PATHSEL") failed to connect; probing again" >&2
+  choose_path "$PATHSEL"
+}
+announce_path() { [ -z "$JUMP" ] || echo "bb-temper: $NAME via $(path_label "$PATHSEL")" >&2; }
 # setup_host <key>: HOST and the ssh options for one host key (a configured name, or user@host: direct, ssh's own known_hosts).
 setup_host() {
   local i=
+  [ "$1" != "$SETUP_KEY" ] || { apply_path "$PATHSEL"; return 0; }
+  NAME=$1; JUMP=; KNOWNF=
   case $1 in
     *@*) HOST=$1 ;;
     *) i=$(host_index "$1") || return 1; HOST=${H_ADDR[i]} ;;
   esac
-  SSHO=(-i "$KEY" -o BatchMode=yes)
-  # bb-submit reads these (it runs its own ssh); the jump pair is set for a jumped host only, cleared otherwise so a stray
-  # value never applies.
-  export BB_SSH_KEY=$KEY
-  unset BB_SSH_PROXY BB_KNOWN_HOSTS
   if [ -n "$i" ] && [ "${H_JUMP[i]}" != - ]; then
-    export BB_SSH_PROXY=${H_JUMP[i]} BB_KNOWN_HOSTS=${H_KNOWN[i]}
-    # the paths sit inside ssh -o values (the ProxyCommand one is re-read by a shell), so they are double-quoted: a HOME with spaces
-    SSHO+=(-o "UserKnownHostsFile=\"$BB_KNOWN_HOSTS\"" -o StrictHostKeyChecking=yes
-           -o "ProxyCommand=ssh -i \"$KEY\" -o BatchMode=yes -o ConnectTimeout=15 -W %h:%p $BB_SSH_PROXY")
+    JUMP=${H_JUMP[i]} KNOWNF=${H_KNOWN[i]}
+    apply_path direct; choose_path
+    [ "${CONFIRM:-1}" = 0 ] || confirm_path
+  else
+    apply_path direct
   fi
+  SETUP_KEY=$1
 }
 rsh() { ssh "${SSHO[@]}" -o ConnectTimeout=15 "$HOST" "$@"; }
 # Read-only remote commands retry ssh's own failure (rc 255: host down, timeout, dropped session) 5 times, 30 s apart.
@@ -163,7 +246,7 @@ bound=; [ ! -f "$BIND" ] || bound=$(head -n 1 "$BIND")
 # pick_host: print the chosen host key on stdout, the "host ..." line on stderr (or "fallback"); never fails.
 pick_host() {
   local json out verdict detail
-  setup_host "${AUTO[0]}"
+  CONFIRM=0 setup_host "${AUTO[0]}"  # the pick trusts a cached path; the chosen host is confirmed below
   if [ -n "${BB_HOSTS_CMD:-}" ]; then json=$(bash -c "$BB_HOSTS_CMD" 2> /dev/null) || json=
   else json=$(rsh 'curl -sf -m 5 -H "Authorization: Bearer $(cat ~/.config/temper/read-token)" http://localhost:7070/api/v1/hosts' 2> /dev/null) || json=; fi
   if [ -z "$json" ]; then echo "bb-temper: host ${AUTO[0]} (fallback: controller unreachable)" >&2; echo "${AUTO[0]}"; return; fi
@@ -256,6 +339,7 @@ else
   fi
 fi
 setup_host "$hostkey" || die 3 "corrupt host binding for $name: $hostkey"
+announce_path
 case $cmd in
   checkout)
     ref=${1:-HEAD}
@@ -285,7 +369,7 @@ case $cmd in
     # BB_UNFORWARDED_WARNED tells bb-submit (which has a wider known set) that this check has run. Never a refusal.
     while IFS= read -r v; do
       case $v in
-        BB_OWNER|BB_HOST|BB_HOSTS_CMD|BB_TEMPER_HOSTS|BB_SUBMIT|BB_AGENT|BB_LANE|BB_PR|BB_DEDUP|BB_QUEUE|BB_PG_ISOLATE|BB_REQUIRE_DOCKER) ;;
+        BB_OWNER|BB_HOST|BB_HOSTS_CMD|BB_TEMPER_HOSTS|BB_SUBMIT|BB_PATH|BB_PATH_TTL|BB_AGENT|BB_LANE|BB_PR|BB_DEDUP|BB_QUEUE|BB_PG_ISOLATE|BB_REQUIRE_DOCKER) ;;
         BB_SSH_KEY|BB_SSH_PROXY|BB_KNOWN_HOSTS|BB_UNFORWARDED_WARNED) ;;
         BB_SESSION|BB_SESSION_*) ;;
         BB_*) echo "bb-temper: warning: $v is set but is not forwarded to bb-build (dropped)" >&2 ;;

@@ -16,9 +16,11 @@
 #   each mvn argument is printf %q-quoted.
 # - --detached --reader <label> (only as the first three arguments, in that order) marks a build whose owner is a reader
 #   session, not this caller (bb-build writes detached_reader=<label>).
-# - Optional BB_SSH_PROXY=<user@host> and BB_KNOWN_HOSTS=<existing file> (set by bb-temper for a host reached through a jump host, which may only
-#   admit the jump host's network): ssh then goes through that host (ProxyCommand ssh -W) and with the host keys pinned in
-#   that file (StrictHostKeyChecking=yes). A malformed value is refused (exit 2) before any ssh. Unset: ssh as before.
+# - Optional BB_KNOWN_HOSTS=<existing file> and BB_SSH_PROXY=<user@host> (set by bb-temper for a host that has a jump host, which may only
+#   admit the jump host's network): BB_KNOWN_HOSTS pins the host keys in that file (StrictHostKeyChecking=yes) on either path; with
+#   BB_SSH_PROXY too, ssh goes through that host (ProxyCommand ssh -W); BB_KNOWN_HOSTS alone is the DIRECT path of a jumped host
+#   (bb-temper's direct-first choice). BB_SSH_PROXY without BB_KNOWN_HOSTS, or a malformed value, is refused (exit 2) before any
+#   ssh. Both unset: ssh as before.
 # - BB_DEDUP, BB_QUEUE, BB_PG_ISOLATE, BB_REQUIRE_DOCKER (0 or 1; else exit 2) are forwarded. Any other BB_* variable in the environment that is
 #   not forwarded or read here (read: BB_SSH_KEY BB_SSH_PROXY BB_KNOWN_HOSTS BB_TEMPER_HOSTS BB_SESSION) gets one stderr line
 #   naming it, and the build is queued all the same.
@@ -85,10 +87,12 @@ if [ -z "$key" ]; then
 fi
 sshopts=(-i "$key" -o BatchMode=yes)
 if [ -n "${BB_SSH_PROXY:-}" ] || [ -n "${BB_KNOWN_HOSTS:-}" ]; then
-  [[ ${BB_SSH_PROXY:-} =~ $PROXY_RE ]] || die "BB_SSH_PROXY must match $PROXY_RE"
   [ -f "${BB_KNOWN_HOSTS:-}" ] || die "BB_KNOWN_HOSTS must be an existing regular file"
-  sshopts+=(-o "UserKnownHostsFile=$BB_KNOWN_HOSTS" -o StrictHostKeyChecking=yes
-            -o "ProxyCommand=ssh -i $key -o BatchMode=yes -o ConnectTimeout=15 -W %h:%p $BB_SSH_PROXY")
+  sshopts+=(-o "UserKnownHostsFile=$BB_KNOWN_HOSTS" -o StrictHostKeyChecking=yes)
+  if [ -n "${BB_SSH_PROXY:-}" ]; then
+    [[ $BB_SSH_PROXY =~ $PROXY_RE ]] || die "BB_SSH_PROXY must match $PROXY_RE"
+    sshopts+=(-o "ProxyCommand=ssh -i $key -o BatchMode=yes -o ConnectTimeout=15 -W %h:%p $BB_SSH_PROXY")
+  fi
 fi
 
 mac=$(dirname "$0")/temper-mac
