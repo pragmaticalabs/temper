@@ -13,12 +13,13 @@
 # same <owner>-<name>; 9 the ticket left the queue while waiting (bb-queue cancel); 1 docker wait itself failed.
 # State: ~/work/bb-hold/<owner>-<name>/pid (removed on exit) and state (key=value: ticket, container, started, granted,
 # phase=waiting|holding|exited, rc, ended). The ticket's co= is this directory, so bb-queue shows it as the checkout.
-# HOW IT FITS bb-queue-lib.sh WITHOUT CHANGING IT (the lib finds liveness and reactors by cmdline):
+# HOW IT FITS bb-queue-lib.sh (the lib finds liveness by cmdline and counts launches by its LEDGER):
 #  - liveness: this process re-execs itself with "bb-build __run <id>" in its argv, so waiter_alive() sees it, reap()
 #    leaves the ticket alone while it lives, and "bb-queue cancel" reaches it (SIGTERM -> release).
-#  - reactor count: from grant to release a slot process whose argv carries "classworlds.launcher.Launcher" runs with
-#    its cwd in the state dir, so reactors() counts the hold as one reactor. The slot exits within 2 s of this process
-#    dying by any means (it polls our pid), after which reap() moves a kill -9'd ticket to done as orphaned.
+#  - launch count: from grant to release a slot process runs with its cwd in the state dir; it is recorded in the lib's LAUNCH
+#    LEDGER at spawn, so the cap counts the hold as one launch (its argv still carries "classworlds.launcher.Launcher", which only
+#    the reactors() observation reads). The slot exits within 2 s of this process dying by any means (it polls our pid), after
+#    which reap() moves a kill -9'd ticket to done as orphaned.
 # Built to run under setsid with no tty: absolute PATH, no reads from stdin. Linux only (flock, /proc), like the lib.
 set -u
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; LC_ALL=C; export PATH LC_ALL
@@ -111,12 +112,12 @@ while :; do
   flock -u 8
   sleep 5 8>&- 7>&- & CHILD=$!; wait "$CHILD"; CHILD=""; WAITED=$((WAITED + 5))
 done
-# granted (lock held): move to running/ and keep the lock until the slot is visible, so the next grant counts it
+# granted (lock held): move to running/, start the slot and record it in the LEDGER (the next grant counts it), release the lock
 GRANTED=$(date +%s)
 printf 'started=%s\nwaited=%s\n' "$GRANTED" "$WAITED" >> "$T"; mv "$T" "$Q/running/$ID"; T=$Q/running/$ID
 ( cd "$D" && exec bash -c 'while kill -0 "$1" 2>/dev/null; do sleep 2; done' "bb-hold-slot:classworlds.launcher.Launcher:$ID" "$$" ) < /dev/null > /dev/null 2>&1 8>&- 7>&- &
 SLOT=$!
-for _ in $(seq 50); do pgrep -u "$USER" -f "bb-hold-slot:[c]lassworlds.launcher.Launcher:$ID" > /dev/null && break; sleep 0.1; done
+ledger_add "$ID" "$SLOT"
 flock -u 8
 PHASE=holding; write_state
 echo "granted $ID" >&2

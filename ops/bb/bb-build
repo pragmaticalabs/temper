@@ -22,9 +22,9 @@
 # (~/work/port-group-slots, default 3) group tickets run at once per host, each holding a slot (bb-queue shows it). No change to the
 # tests. BB_PG_ISOLATE=0 at enqueue = the old host-exclusive behaviour for that ticket (ticket has no iso=1).
 # LOAD GATE (2026-11-11): a ticket is also granted only while load5/cores < 1.2 (BB_LOAD_MAX); the oldest grantable ticket goes
-# once it waited > 1200 s (BB_LOAD_STARVE_SECS) while < 2 reactors run (BB_LOAD_STARVE_REACTORS). MEMORY FLOOR (#53): a grant also
+# once it waited > 1200 s (BB_LOAD_STARVE_SECS) while < 2 queue launches run (BB_LOAD_STARVE_REACTORS). MEMORY FLOOR (#53): a grant also
 # needs MemAvailable >= the per-host floor; the oldest ticket overrides it only while no ticket runs at all. pick() in the lib decides.
-# HOST CAP (#56): a grant also needs reactors < min(this ticket's cap, the host's ~/work/max-reactors, default 3); nothing overrides it.
+# HOST CAP (#56): a grant also needs live queue launches (the lib's LAUNCH LEDGER, never a process pattern) < min(this ticket's cap, the host's ~/work/max-reactors, default 3); nothing overrides it.
 # Off-queue JVMs (#56): the memory floor is compared against MemAvailable minus their unclaimed heap, max(0, Xmx - RSS) each.
 # VERDICT SOURCE (2026-11-12, bbrc1; reap and too-late cancel fixed 2026-11-13): the ticket's rc= is the exit status of the build subshell
 # as returned by `wait` in the waiter, never a read of .bb/rc. A ticket whose waiter is gone (reap, or a cancel that finds the build
@@ -74,7 +74,7 @@ if [ "${1:-}" = __run ]; then
     fi
     flock -u 8; sleep 5; WAITED=$((WAITED + 5))
   done
-  # granted (lock held): launch, and keep the lock until the reactor is visible so the next grant counts it
+  # granted (lock held): launch, record the launch in the LEDGER (the next grant counts it from that line), release the lock at once
   NOW=$(date +%s)
   rm -f "$B/queued" "$B/rc" "$B/end"; touch "$B/run.marker"; echo "$NOW" > "$B/start"; printf '%q ' "$@" > "$B/args"   # for bb-report's EMPTY RUN check
   RDF=(-Daether.requireDocker=true); [ "$(field "$T" requireDocker)" != 0 ] || RDF=()   # #31: the ticket's own record decides
@@ -98,12 +98,8 @@ if [ "${1:-}" = __run ]; then
     exit "$rc"
   ) 8>&- &
   C=$!
-  for _ in $(seq 120); do
-    kill -0 "$C" 2>/dev/null || break
-    for p in $(pgrep -u "$USER" -f "$PAT"); do [ "$(readlink "/proc/$p/cwd" 2>/dev/null)" = "$CO" ] && break 3; done
-    sleep 0.5
-  done
-  flock -u 8
+  ledger_add "$ID" "$C"   # the job subshell lives as long as maven / bb-test's java / bb-netns-run (and survives a kill -9 of this waiter)
+  flock -u 8   # the lock covers the slot decision and the ledger write only, never the launch's run time
   wait "$C"; BRC=$?   # the build's exit status: the verdict. Never re-read from $B/rc, which a lane can delete or rewrite
   flock 8
   [ -f "$T" ] || exit 0   # cancel or reap already finalized this ticket (first writer wins): do not recreate running/<id> or overwrite done/<id>
@@ -161,7 +157,7 @@ if [ "${BB_IT_UNFILTERED:-0}" != 1 ] && printf '%s' "$A" | grep -Eq -- ' (-pl|--
 fi
 # Concurrency cap (2026-09-27): above 3 concurrent reactors, fixed-port tests collide (BindException)
 # and Testcontainers fails to start, so results are environmental noise. The queue grants a ticket only while
-# fewer than CAP reactors run, and never more than the host cap (~/work/max-reactors, #56). Override the cap only with BB_MAX_REACTORS. BB_CAP_WAIT_SECS > 0 bounds the
+# fewer than CAP queue launches (the LEDGER: what this queue started, maven or bb-test's java alike) run, and never more than the host cap (~/work/max-reactors, #56). Override the cap only with BB_MAX_REACTORS. BB_CAP_WAIT_SECS > 0 bounds the
 # queue wait (then .bb/rc = 5); unset = wait until granted.
 CAP=${BB_MAX_REACTORS:-5}; LIMIT=${BB_CAP_WAIT_SECS:-0}
 case "$CAP$LIMIT" in *[!0-9]*) echo "refusing: BB_MAX_REACTORS / BB_CAP_WAIT_SECS must be non-negative integers" >&2; exit 2;; esac

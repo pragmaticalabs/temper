@@ -29,7 +29,8 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 /// [#aRealMavenLaunchersForks_areNeverOffQueue] red; read argv[0] as `java` only (no path) ->
 /// [#realProcesses_theRealPsPass_findsTheOffQueueJvm_andSkipsTheReactorsChild] red; read -Xmx from words after the main class or `-jar` ->
 /// [#onlyJvmOptions_areRead_notWordsAfterTheMainClassOrJar] red; list only the current user's processes (`ps -u $USER`) ->
-/// [#theRealPsScan_coversEveryUser_notOnlyTheCurrentOne] red.
+/// [#theRealPsScan_coversEveryUser_notOnlyTheCurrentOne] red; drop the ledger pids from the reactor set ->
+/// [#aLedgerLaunchsJava_andItsForks_areNeverOffQueue] red.
 class BbOffQueueJvmIT {
     private static final long GIB_KB = 1024L * 1024L;
 
@@ -89,7 +90,7 @@ class BbOffQueueJvmIT {
         assertThat(pick()).as("20 GB - (16 - 1) GB = 5 GB < 8").isEmpty();
         assertThat(lib("mem_held").stdout()).isEqualTo("held: MemAvailable 20.0 GB - off-queue JVM headroom 15.0 GB = 5.0 GB"
                                                       + " < floor 8 GB\n");
-        assertThat(bbQueue()).contains("only while 0 reactors run): held: MemAvailable 20.0 GB - off-queue JVM headroom 15.0 GB");
+        assertThat(bbQueue()).contains("only while 0 queue launches run): held: MemAvailable 20.0 GB - off-queue JVM headroom 15.0 GB");
         memAvailableKb(24 * GIB_KB);
         assertThat(pick()).as("24 - 15 = 9 GB >= 8").isEqualTo(id);
     }
@@ -107,6 +108,22 @@ class BbOffQueueJvmIT {
         assertThat(lib("offqueue_jvms").stdout()).as("only the JVM outside the reactor tree")
                   .isEqualTo("301 2096152 2097152 1000\n");
         assertThat(pick()).as("20 - ~2 GB = ~18 GB >= 8").isEqualTo(id);
+    }
+
+    @Test
+    void aLedgerLaunchsJava_andItsForks_areNeverOffQueue() throws Exception {
+        var launch = BbFixtures.process("sleep", "600").start();
+
+        started.add(launch);
+        var c = launch.pid();
+
+        processes("  " + c + "     1 1000 bash bb-build-job-subshell",
+                  "  500  " + c + " 500000 /usr/bin/java -Xmx16g -cp classes org.example.BbTestLaunch",
+                  "  501   500 1000 /usr/bin/java -Xmx8g fork");
+        assertThat(lib("offqueue_jvms").stdout()).as("not in the ledger: both JVMs are off-queue").hasLineCount(2);
+        BbFixtures.recordLaunch(dir.resolve("q"), "t-ledger", c);
+        assertThat(lib("offqueue_jvms").stdout()).as("a live ledger launch's java (no pattern matches it) is the queue's own")
+                  .isEmpty();
     }
 
     @Test

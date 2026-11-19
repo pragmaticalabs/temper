@@ -22,7 +22,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 /// min(the ticket's cap=, the host cap). The host cap is the first positive-integer line of the per-host file
 /// (BB_TEST_MAX_REACTORS_FILE, really ~/work/max-reactors), else 3. It is a HARD bound: neither the load nor the memory starvation
 /// override passes it, and backfill still grants a ticket behind a head that its own smaller cap blocks.
-/// A reactor is a stand-in process whose command line matches BB_TEST_REACTOR_PATTERN, so the count is the real pgrep count.
+/// A reactor is a stand-in process recorded in the LAUNCH LEDGER (the cap's input); its command line also matches BB_TEST_REACTOR_PATTERN, the observation.
 ///
 /// The override path needs no check of its own: it runs only when the loop found a candidate, i.e. while reactors < the host cap.
 ///
@@ -176,7 +176,7 @@ class BbHostCapIT {
         reactor();
         Files.writeString(capFile, "2\n");
         assertThat(pick(old)).as("control: 1 reactor < host cap 2, starved past LOAD_STARVE").isEqualTo(old);
-        assertThat(field(old, "load_override")).contains("reactors=1 held: load");
+        assertThat(field(old, "load_override")).contains("launches=1 held: load");
         Files.delete(dir.resolve("q/waiting").resolve(old));
         var older = ticket("older", 6000, 5);
 
@@ -194,7 +194,7 @@ class BbHostCapIT {
         Files.writeString(capFile, "1\n");
         Files.writeString(dir.resolve("meminfo"), "MemAvailable:   1048576 kB\n");
         assertThat(pick(old)).as("0 reactors, nothing running, starved: the memory override starts it").isEqualTo(old);
-        assertThat(field(old, "mem_override")).contains("reactors=0");
+        assertThat(field(old, "mem_override")).contains("launches=0");
         reactor();
         Files.delete(dir.resolve("q/waiting").resolve(old));
         var next = ticket("next", 6000, 5);
@@ -222,7 +222,7 @@ class BbHostCapIT {
         var lines = shown.lines().toList();
         var cap = indexStartingWith(lines, "HOST CAP (");
 
-        assertThat(lines.get(cap)).isEqualTo("HOST CAP (grant only while reactors < min(the ticket's cap, this host's cap);"
+        assertThat(lines.get(cap)).isEqualTo("HOST CAP (grant only while queue launches < min(the ticket's cap, this host's cap);"
                                             + " ~/work/max-reactors, default 3; no override passes it): 3");
         assertThat(lines.get(cap - 1)).startsWith("MEMORY GATE (");
         assertThat(lines.get(cap + 1)).startsWith("RUNNING (");
@@ -322,9 +322,13 @@ class BbHostCapIT {
                 Files.writeString(dir.resolve("loadavg"), load5 + " " + load5 + " " + load5 + " 1/100 1\n").toString());
     }
 
-    /// A stand-in reactor: a shell whose command line holds the marker, so `pgrep -fc $PAT` counts exactly it.
+    /// A stand-in launch: a shell whose command line holds the marker (so the `reactors` observation counts it) and that is recorded
+    /// in the LAUNCH LEDGER, the cap's only input.
     private void reactor() throws Exception {
-        reactors.add(BbFixtures.process("bash", "-c", "sleep 600; : " + marker).start());
+        var launch = BbFixtures.process("bash", "-c", "sleep 600; : " + marker).start();
+
+        reactors.add(launch);
+        BbFixtures.recordLaunch(dir.resolve("q"), "standin-" + reactors.size(), launch.pid());
         var deadline = System.currentTimeMillis() + 10_000;
 
         while (!count().equals(Integer.toString(reactors.size())) && System.currentTimeMillis() < deadline) {
