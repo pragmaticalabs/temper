@@ -13,7 +13,7 @@
 # check: the stale-jar guard. Exit 0 = the recorded state is still the state on disk. Exit 12 = refused; stderr names the module and
 #   which guard fired: (a) HEAD differs from the manifest, (b) a module on the classpath has a different working-tree digest,
 #   (c) a recorded jar or classes-dir digest differs (or an in-checkout classpath entry was never recorded), (d) the classpath
-#   holds a reactor artifact from outside this checkout (an .m2-local jar). No record at all is refused too. No override exists.
+#   holds a reactor artifact resolved from a repository layout (an .m2-local or ~/.m2 SNAPSHOT jar, in or out of the checkout). No record at all is refused too. No override exists.
 import hashlib, os, re, subprocess, sys, xml.etree.ElementTree as ET
 
 REFUSED = 12
@@ -154,11 +154,9 @@ def check(co, module):
         gid, aid = coord.split(':', 1)
         reactor.append((gid.replace('.', '/') + '/' + aid + '/', aid))
     for e in entries:
-        if inside(co, e):
-            continue
         for gpath, aid in reactor:
             if re.search('/' + re.escape(gpath) + r'[^/]+/' + re.escape(aid) + r'-[^/]*\.jar$', e):
-                refuse(module, 'd', 'classpath holds %s, a reactor artifact from outside this checkout' % e)
+                refuse(module, 'd', 'classpath holds %s, a reactor artifact resolved from a maven repository, not from this build' % e)
     own = {module + '/target/classes', module + '/target/test-classes'}
     in_co = {os.path.relpath(e, co) for e in entries if inside(co, e)}
     owners = {module}
