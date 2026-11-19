@@ -276,7 +276,7 @@ class BbTestGuardIT {
         assertThat(run.rc()).as(run.stderr()).isEqualTo(14);
     }
 
-    private BbFixtures.Outcome launchDirect(String pom) throws Exception {
+    private BbFixtures.Outcome launchDirect(String pom, String... extra) throws Exception {
         // what the queue's waiter runs for a bb-test ticket, with the enqueue-time check out of the way: __launch in the checkout,
         // with one running ticket naming it
         Files.writeString(co.resolve("pom.xml"), pom);
@@ -286,12 +286,15 @@ class BbTestGuardIT {
         var running = Files.createDirectories(tmp.resolve("q").resolve("running"));
 
         Files.writeString(running.resolve("T1"), "id=T1\nco=" + co + "\n");
+        var cmd = new java.util.ArrayList<>(List.of(BbFixtures.OPS_BB.resolve("bb-test").toString(),
+                                                    "__launch",
+                                                    "app",
+                                                    "1",
+                                                    "SomeTest"));
 
-        return BbFixtures.run(List.of(BbFixtures.OPS_BB.resolve("bb-test").toString(),
-                                      "__launch",
-                                      "app",
-                                      "1",
-                                      "SomeTest"),
+        cmd.addAll(List.of(extra));
+
+        return BbFixtures.run(cmd,
                               Map.of("BB_TEST_QUEUE_ROOT",
                                      tmp.resolve("q").toString(),
                                      "BB_TEST_LAUNCHER_JAR",
@@ -473,5 +476,142 @@ class BbTestGuardIT {
         Files.copy(REPORTS.resolve("TEST-junit-jupiter.xml"), dup.resolve("TEST-junit-jupiter.xml"));
         Files.copy(REPORTS.resolve("TEST-junit-jupiter.xml"), dup.resolve("TEST-again.xml"));
         assertThat(count(dup).rc()).isEqualTo(3);
+    }
+
+    // ---- vbt4 M1: every override of the junit version properties is refused (rc 15), not only the root pom's /project/properties ----
+    private static final String ROOT_PROPS = "<properties><junit.version>5.13.4</junit.version></properties>";
+
+    @Test
+    void versionGuard_aRootPomProfileSettingThePlatformProperty_isRefusedWithRc15() throws Exception {
+        var run = versionOf(ROOT_PROPS
+                           + "<profiles><profile><id>p</id><properties><junit-platform.version>1.13.4</junit-platform.version></properties></profile></profiles>");
+
+        refused15(run);
+        assertThat(run.stderr()).contains("a <profile> in the root pom sets <junit-platform.version>");
+    }
+
+    @Test
+    void versionGuard_twoPropertiesBlocks_areRefusedWithRc15() throws Exception {
+        var run = versionOf(ROOT_PROPS + "<properties><other>x</other></properties>");
+
+        refused15(run);
+        assertThat(run.stderr()).contains("the root pom has 2 <properties> blocks");
+    }
+
+    @Test
+    void versionGuard_aModulePomOnThePathSettingTheProperty_isRefusedWithRc15() throws Exception {
+        Files.writeString(co.resolve("app").resolve("pom.xml"),
+                          "<project><modelVersion>4.0.0</modelVersion><groupId>g</groupId><artifactId>app</artifactId><version>1</version>"
+                         + "<properties><junit.version>5.12.2</junit.version></properties></project>");
+        var run = bbTestWithRootPom(ROOT_POM, tmp.resolve("no-launcher.jar"));
+
+        refused15(run);
+        assertThat(run.stderr()).contains("app/pom.xml sets <junit.version>");
+    }
+
+    @Test
+    void versionGuard_aMavenConfigDefineOfTheProperty_isRefusedWithRc15() throws Exception {
+        Files.createDirectories(co.resolve(".mvn"));
+        Files.writeString(co.resolve(".mvn").resolve("maven.config"),
+                          "-B\n-D junit-platform.version=1.12.2\n");
+        var run = bbTestWithRootPom(ROOT_POM, tmp.resolve("no-launcher.jar"));
+
+        refused15(run);
+        assertThat(run.stderr()).contains(".mvn/maven.config sets -Djunit-platform.version");
+    }
+
+    @Test
+    void launchTime_aDefineOfTheVersionInTheLaunchArgs_isRefusedWithRc15() throws Exception {
+        var run = launchDirect(ROOT_POM, "-Djunit.version=5.12.2");
+
+        assertThat(run.rc()).as(run.stderr()).isEqualTo(15);
+        assertThat(run.stderr()).contains("the launch args set -Djunit.version");
+    }
+
+    // ---- vbt4 L2: a launch-time guard refusal is told apart from java's own exit status on the ticket ----
+    @Test
+    void launchTime_aGuardRefusal_writesVerdictSourceGuard_onTheTicket() throws Exception {
+        var run = launchDirect(ROOT_POM.replace("5.13.4", "5.12.2"));
+
+        assertThat(run.rc()).as(run.stderr()).isEqualTo(15);
+        assertThat(Files.readString(tmp.resolve("q").resolve("running").resolve("T1"))).contains("\nverdict_source=guard\n")
+                  .doesNotContain("verdict_source=java");
+    }
+
+    // ---- vbt4 L3: content behind a symlink is under no digest, so a symlink leaving its module is refused (rc 12) ----
+    @Test
+    void digest_aFileSymlinkInClassesLeavingTheModule_isRefusedWithRc12() throws Exception {
+        recorded();
+        var outside = Files.writeString(tmp.resolve("outside.class"), "x");
+
+        Files.createSymbolicLink(co.resolve("lib/target/classes/B.class"), outside);
+        var run = check();
+
+        assertThat(run.rc()).as(run.stderr()).isEqualTo(12);
+        assertThat(run.stderr()).contains("guard (c)", "resolves outside");
+    }
+
+    @Test
+    void record_aFileSymlinkInClassesLeavingTheModule_failsTheRecord_soTheCheckRefusesWithRc12() throws Exception {
+        // without the refusal the record hashes the link string, and the outside file can change under an unchanged digest
+        var outside = Files.writeString(tmp.resolve("outside.class"), "x");
+
+        Files.createDirectories(co.resolve("lib/target/classes"));
+        Files.createSymbolicLink(co.resolve("lib/target/classes/B.class"), outside);
+        var rec = record("/seed/x.jar");
+
+        assertThat(rec.rc()).as(rec.stdout() + rec.stderr()).isEqualTo(1);
+        assertThat(rec.stderr()).contains("FAILED, record removed", "resolves outside");
+        assertThat(check().rc()).as("no record: refused").isEqualTo(12);
+    }
+
+    @Test
+    void digest_aDirectorySymlinkInsideAClassesDir_isRefusedWithRc12() throws Exception {
+        recorded();
+        Files.createSymbolicLink(co.resolve("lib/target/classes/pkg"), co.resolve("lib/src"));
+        var run = check();
+
+        assertThat(run.rc()).as(run.stderr()).isEqualTo(12);
+        assertThat(run.stderr()).contains("guard (c)", "directory symlink");
+    }
+
+    @Test
+    void digest_aTrackedSymlinkInAModuleLeavingIt_isRefusedWithRc12() throws Exception {
+        recorded();
+        Files.createSymbolicLink(co.resolve("lib/src/B.java"), co.resolve("app/src/A.java"));
+        var run = check();
+
+        assertThat(run.rc()).as(run.stderr()).isEqualTo(12);
+        assertThat(run.stderr()).contains("guard (b)", "resolves outside");
+    }
+
+    // ---- vbt4 L4: record names its maven's process group in .bb/cp-record.pgid while maven runs, and removes it after ----
+    @Test
+    void record_writesItsMavensPgidAndStartTime_whileMavenRuns_andRemovesTheFile() throws Exception {
+        var seen = tmp.resolve("seen-pgid");
+        var waitingMvn = BbFixtures.executable(tmp.resolve("bin").resolve("mvn-pgid"),
+                                               "#!/usr/bin/env bash\n"
+                                              + "for _ in $(seq 100); do [ -s .bb/cp-record.pgid ] && break; sleep 0.1; done\n"
+                                              + "echo \"$$ $(sed 's/^.*) //' /proc/$$/stat | cut -d' ' -f20) $(cat .bb/cp-record.pgid)\" > " + seen
+                                              + "\n"
+                                              + "exec " + fakeMvn
+                                              + " \"$@\"\n");
+        var run = BbFixtures.run(List.of(BbFixtures.OPS_BB.resolve("bb-cp-record").toString(),
+                                         "record",
+                                         co.toString(),
+                                         "-pl",
+                                         "app",
+                                         "-am"),
+                                 Map.of("BB_TEST_MVN", waitingMvn.toString(), "APP_EXTRA", "/seed/x.jar"),
+                                 null,
+                                 null);
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        var w = Files.readString(seen).strip().split(" ");
+
+        assertThat(w).as("maven's own pid and start time, then the file's <pgid> <start>").hasSize(4);
+        assertThat(w[2]).as("pgid = maven's pid (its own session)").isEqualTo(w[0]);
+        assertThat(w[3]).as("the start time of that process").isEqualTo(w[1]);
+        assertThat(co.resolve(".bb/cp-record.pgid")).as("removed once maven exited").doesNotExist();
     }
 }

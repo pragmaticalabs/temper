@@ -91,7 +91,11 @@ if [ "${1:-}" = __run ]; then
     if [ "$rc" = 0 ]; then   # bb-test lane: classpath + manifest of a GREEN build; bounded, and never changes rc
       timeout -k 10 "${BB_CP_RECORD_TIMEOUT:-300}" "$(dirname "$SELF")/bb-cp-record" record "$CO" "$@" >> "$B/build.log" 2>&1
       case $? in
-        124|137) echo "bb-build: cp-record skipped: timeout after ${BB_CP_RECORD_TIMEOUT:-300}s (no record is left; bb-test will refuse until a rebuild)" >> "$B/build.log"; rm -rf "$B/cp" "$B/cp.new" "$B/cp.old";;
+        124|137) # a SIGKILLed bb-cp-record leaves its maven running: kill that recorded process group, after an identity check (vbt4 L4)
+          { read -r PG PS 2> /dev/null < "$B/cp-record.pgid" && case "$PG" in ''|*[!0-9]*) false;; esac && [ "$(pstart "$PG")" = "$PS" ] \
+              && kill -KILL -- "-$PG" 2> /dev/null && echo "bb-build: cp-record's maven (process group $PG) killed" >> "$B/build.log"; } || true
+          rm -f "$B/cp-record.pgid"
+          echo "bb-build: cp-record skipped: timeout after ${BB_CP_RECORD_TIMEOUT:-300}s (no record is left; bb-test will refuse until a rebuild)" >> "$B/build.log"; rm -rf "$B/cp" "$B/cp.new" "$B/cp.old";;
       esac
     fi
     write_rc "$B" "$rc"   # convenience copy for pollers, 444; the ticket's rc= comes from this subshell's exit status below

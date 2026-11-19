@@ -26,6 +26,10 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 /// Probes: make ledger_count return reactors() -> [#aRunningJavaLaunch_countsAgainstTheCap] red; drop the start-time comparison in
 /// ledger_live -> [#aRecycledPid_isNotCounted_andReapDropsIt] red; restore bb-build's wait-for-a-visible-reactor loop under the lock
 /// (or drop ledger_add) -> [#aSecondWaiter_takesASlot_whileTheFirstLaunchRuns] red (and the first test, for a dropped ledger_add).
+///
+/// The same waiter harness also pins bb-build's cleanup after a SIGKILLed bb-cp-record (vbt4 L4): on rc 124/137 it kills the process
+/// group named in <co>/.bb/cp-record.pgid only when that pid still has the recorded start time, never by pattern. Probes: drop the kill
+/// -> [#aSigkilledCpRecord_hasItsRecordedMavenGroupKilled] red; drop the start-time check -> [#aPgidFileWithAnotherStartTime_killsNothing] red.
 class BbQueueLedgerIT {
     private static final String ME = "led";
 
@@ -269,6 +273,58 @@ class BbQueueLedgerIT {
         assertThat(System.currentTimeMillis() - t0).as("no 60 s wait on the queue lock").isLessThan(25_000);
         assertThat(in("running", first)).as("the first launch is still running").isTrue();
         assertThat(Files.readString(queue.resolve("done").resolve(second))).contains("\nrc=0\n");
+    }
+
+    /// A bb-cp-record stand-in that starts a "maven" in its own session, names it in .bb/cp-record.pgid (with its real start time, or
+    /// `1` when `staleStart`), writes its pid to <dir>/victim.pid and then SIGKILLs itself, as `timeout -k` would.
+    private long sigkilledRecord(boolean staleStart) throws Exception {
+        BbFixtures.executable(tools.resolve("bb-cp-record"),
+                              "#!/bin/bash\nco=$2\nsetsid sleep 600 < /dev/null > /dev/null 2>&1 &\np=$!\n"
+                             + "for _ in $(seq 50); do [ \"$(ps -o pgid= -p $p | tr -d ' ')\" = \"$p\" ] && break; sleep 0.1; done\n" + (staleStart
+                                                                                                                                         ? "s=1\n"
+                                                                                                                                         : "s=$(sed 's/^.*) //' /proc/$p/stat | cut -d' ' -f20)\n")
+                             + "echo \"$p $s\" > \"$co/.bb/cp-record.pgid\"\necho $p > \"$HOLD_DIR/victim.pid\"\nkill -KILL $$\n");
+        var id = enqueue("quick");
+
+        assertThat(within(30_000, () -> in("done", id))).as("the ticket finished").isTrue();
+        assertThat(Files.readString(queue.resolve("done").resolve(id))).as("the record never changes the build's rc")
+                  .contains("\nrc=0\n");
+
+        return Long.parseLong(Files.readString(dir.resolve("victim.pid")).strip());
+    }
+
+    private String buildLog(String name) throws IOException {
+        return Files.readString(dir.resolve("work").resolve(ME + "-" + name).resolve(".bb/build.log"));
+    }
+
+    @Test
+    void aSigkilledCpRecord_hasItsRecordedMavenGroupKilled() throws Exception {
+        var victim = sigkilledRecord(false);
+
+        try {
+            assertThat(within(10_000,
+                              () -> ProcessHandle.of(victim).isEmpty())).as("the recorded maven group was killed")
+                      .isTrue();
+            assertThat(buildLog("quick")).contains("cp-record's maven (process group " + victim + ") killed",
+                                                   "cp-record skipped");
+            assertThat(dir.resolve("work").resolve(ME + "-quick").resolve(".bb/cp-record.pgid")).doesNotExist();
+        } finally {
+            ProcessHandle.of(victim).ifPresent(ProcessHandle::destroyForcibly);
+        }
+    }
+
+    @Test
+    void aPgidFileWithAnotherStartTime_killsNothing() throws Exception {
+        var victim = sigkilledRecord(true);
+
+        try {
+            Thread.sleep(2_000);
+            assertThat(ProcessHandle.of(victim)).as("a recycled pid (start time differs) is never signalled")
+                      .isPresent();
+            assertThat(buildLog("quick")).doesNotContain("killed").contains("cp-record skipped");
+        } finally {
+            ProcessHandle.of(victim).ifPresent(ProcessHandle::destroyForcibly);
+        }
     }
 
     /// The java launch: marks <path>.up, then holds until <path>.go exists (bounded at 120 s).

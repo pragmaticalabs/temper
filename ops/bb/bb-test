@@ -14,7 +14,10 @@
 # read from /project/properties of its root pom.xml by an XML parse (comments, dependencyManagement and plugin config are never read): exactly one literal
 # <junit-platform.version>, else exactly one literal <junit.version> 5.N.P read as platform 1.N.P, must equal LAUNCHER_VERSION. A different version = rc 15
 # naming both; anything else (no property, two definitions, a ${ref}, a -SNAPSHOT or other non-literal, a 6.x junit.version, an unparsable pom) = rc 15, fail closed,
-# "cannot be determined".
+# "cannot be determined". Every override of either property also = rc 15: a <profile> (root pom or a pom on the module path), a module-path
+# pom's own properties, two <properties> blocks, a -D in .mvn/maven.config or in the launch args (vbt4 M1).
+# VERDICT SOURCE (vbt4 L2): the launch writes verdict_source=guard (a launch-time guard refused: rc 12/14/15) or verdict_source=java (java
+# ran; rc = its exit status) on the ticket, so a java System.exit(12|14|15) never reads as a guard.
 # Call rc: 0 queued (as bb-build); 2 usage; 12 stale-jar guard; 14 launcher jar absent/not the pin; 15 checkout's junit-platform version differs from
 # the launcher's or is undeterminable; others from bb-build (3, 4).
 # REQUIRE DOCKER (CTO ruling 2026-11-19): the launch runs with -Daether.requireDocker=true (bb-build appends it to every ticket's args) unless
@@ -35,41 +38,85 @@ launcher_ok() {
   return 14
 }
 
-platform_version_of() {  # <checkout>: the junit-platform version its root pom pins, or nothing (fail closed)
-  [ -f "$1/pom.xml" ] || return 0
-  python3 -I - "$1/pom.xml" 2> /dev/null <<'PY' || true
-import re, sys, xml.etree.ElementTree as ET
-# /project/properties only (comments, dependencyManagement and plugin config are never read). Exactly one literal <junit-platform.version>,
-# else (none at all) exactly one literal <junit.version> 5.N.P read as platform 1.N.P; two definitions, a ${ref}, a non-literal or a 6.x = nothing.
-try:
-    root = ET.parse(sys.argv[1]).getroot()
-except Exception:
+platform_version_of() {  # <checkout> <module>: "v <version>" its root pom pins, or "x <why it cannot be determined>" (fail closed)
+  python3 -I - "$1" "$2" 2> /dev/null <<'PY' || echo "x the version parse failed"
+import os, re, sys, xml.etree.ElementTree as ET
+# /project/properties of the root pom only (comments, dependencyManagement and plugin config are never read). Exactly one literal
+# <junit-platform.version>, else (none at all) exactly one literal <junit.version> 5.N.P read as platform 1.N.P. Fail closed (rc 15) on:
+# two <properties> blocks, two definitions, a ${ref}, a non-literal or a 6.x; and on every OVERRIDE of either property (vbt4 M1): a
+# <profile>'s properties in the root pom or in any pom from the root down to the module, a module-path pom's own properties, and a
+# -D of either name in .mvn/maven.config. The launch-time -D args are checked by the caller (jvm_args_ok).
+NAMES = ('junit-platform.version', 'junit.version')
+co, module = sys.argv[1], sys.argv[2].strip('/')
+local = lambda t: t.rsplit('}', 1)[-1] if isinstance(t, str) else ''
+def no(why):
+    print('x ' + why)
     sys.exit(0)
-local = lambda t: t.rsplit('}', 1)[-1]
-if local(root.tag) != 'project':
-    sys.exit(0)
+def project(path):
+    try:
+        root = ET.parse(path).getroot()
+    except Exception:
+        no('%s does not parse' % os.path.relpath(path, co))
+    if local(root.tag) != 'project':
+        no('%s is not a <project>' % os.path.relpath(path, co))
+    return root
+def defines(props):
+    return [local(c.tag) for p in props for c in p if local(c.tag) in NAMES]
+def profile_props(root):
+    return [p for prof in root.iter() if local(prof.tag) == 'profile' for p in prof if local(p.tag) == 'properties']
+if not os.path.isfile(os.path.join(co, 'pom.xml')):
+    no('no root pom.xml')
+root = project(os.path.join(co, 'pom.xml'))
 props = [c for c in root if local(c.tag) == 'properties']
+if len(props) > 1:
+    no('the root pom has %d <properties> blocks' % len(props))
+for name in defines(profile_props(root)):
+    no('a <profile> in the root pom sets <%s>' % name)
+d = co
+for part in module.split('/'):
+    d = os.path.join(d, part)
+    pom = os.path.join(d, 'pom.xml')
+    if os.path.isfile(pom):
+        mod = project(pom)
+        for name in defines([c for c in mod if local(c.tag) == 'properties'] + profile_props(mod)):
+            no('%s sets <%s>' % (os.path.relpath(pom, co), name))
+try:
+    cfg = open(os.path.join(co, '.mvn', 'maven.config'), encoding='utf-8', errors='replace').read()
+except OSError:
+    cfg = ''
+for name in NAMES:
+    if re.search(r'(-D|--define)\s*' + re.escape(name) + r'(=|\s|$)', cfg):
+        no('.mvn/maven.config sets -D%s' % name)
 vals = lambda name: [(c.text or '').strip() for p in props for c in p if local(c.tag) == name]
 plat, junit = vals('junit-platform.version'), vals('junit.version')
 if plat:
     if len(plat) == 1 and re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', plat[0]):
-        print(plat[0])
-elif len(junit) == 1:
-    m = re.fullmatch(r'5\.([0-9]+\.[0-9]+)', junit[0])
-    if m:
-        print('1.' + m.group(1))
+        print('v ' + plat[0])
+    else:
+        no('<junit-platform.version> is not exactly one literal N.N.N')
+elif len(junit) == 1 and re.fullmatch(r'5\.[0-9]+\.[0-9]+', junit[0]):
+    print('v 1.' + junit[0].split('.', 1)[1])
+else:
+    no('no literal <junit-platform.version>, nor exactly one literal <junit.version> 5.N.P, in its root pom.xml')
 PY
   return 0
 }
-version_ok() {  # <checkout>
-  local v; v=$(platform_version_of "$1")
-  if [ -z "$v" ]; then
-    echo "bb-test: the junit-platform version of $1 cannot be determined (rc 15): no literal <junit-platform.version> or <junit.version> 5.N.P in its root pom.xml; refusing, the launcher is $LAUNCHER_VERSION" >&2
-    return 15
-  fi
-  [ "$v" = "$LAUNCHER_VERSION" ] && return 0
-  echo "bb-test: the checkout's junit-platform version is $v but the launcher is $LAUNCHER_VERSION (rc 15); refusing: a launcher of another version can run the tests differently from maven" >&2
+version_ok() {  # <checkout> <module>
+  local v; v=$(platform_version_of "$1" "$2")
+  case "$v" in
+    "v $LAUNCHER_VERSION") return 0;;
+    "v "*) echo "bb-test: the checkout's junit-platform version is ${v#v } but the launcher is $LAUNCHER_VERSION (rc 15); refusing: a launcher of another version can run the tests differently from maven" >&2;;
+    *) echo "bb-test: the junit-platform version of $1 cannot be determined (rc 15): ${v#x }; refusing, the launcher is $LAUNCHER_VERSION" >&2;;
+  esac
   return 15
+}
+# jvm_args_ok <arg>...: a launch-time -D of either version property is an override the pom check cannot see (rc 15).
+jvm_args_ok() {
+  local a; for a in "$@"; do
+    case "$a" in -Djunit-platform.version|-Djunit-platform.version=*|-Djunit.version|-Djunit.version=*)
+      echo "bb-test: the launch args set ${a%%=*} (rc 15); refusing: an override of the junit-platform version is not checked against the launcher" >&2; return 15;;
+    esac
+  done
 }
 
 if [ "${1:-}" = __launch ]; then
@@ -80,9 +127,9 @@ if [ "${1:-}" = __launch ]; then
   TICKET=""; N=0
   for f in "$Q"/running/*; do [ -f "$f" ] && [ "$(field "$f" co)" = "$CO" ] && { TICKET=${f##*/}; N=$((N + 1)); }; done
   [ "$N" = 1 ] || { echo "bb-test: cannot name this run's ticket ($N running tickets for $CO)" >&2; exit 1; }
-  "$HERE/bb-cp-record" check "$CO" "$MOD" || exit $?
-  version_ok "$CO" || exit $?
-  launcher_ok || exit $?
+  # verdict_source (vbt4 L2): rc 12/14/15 from a guard and the same number from java are told apart on the ticket, not by the number.
+  source_is() { ( flock 9; [ ! -f "$Q/running/$TICKET" ] || echo "verdict_source=$1" >> "$Q/running/$TICKET" ) 9> "$Q/.lock"; }
+  guard() { "$@" && return 0; local r=$?; source_is guard; exit "$r"; }
   JVM=(); SELS=()
   for a in "$@"; do
     case "$a" in
@@ -91,6 +138,11 @@ if [ "${1:-}" = __launch ]; then
       *) SELS+=(--select-class "$a");;
     esac
   done
+  guard "$HERE/bb-cp-record" check "$CO" "$MOD"
+  guard version_ok "$CO" "$MOD"
+  guard jvm_args_ok ${JVM[@]+"${JVM[@]}"}
+  guard launcher_ok
+  source_is java
   JAVA=${BB_TEST_JAVA:-${JAVA_HOME:-/usr/lib/jvm/java-25-openjdk-amd64}/bin/java}
   CP="$CO/$MOD/target/test-classes:$CO/$MOD/target/classes:$(cat "$CO/.bb/cp/${MOD//\//__}.cp")"
   RC=0; RD=false
@@ -126,7 +178,7 @@ while [ $# -gt 0 ]; do
 done
 [ ${#SELS[@]} -gt 0 ] || { echo "usage: bb-test <checkout> <module> <Class[#method]>... [--repeat N]" >&2; exit 2; }
 "$HERE/bb-cp-record" check "$CO" "$MOD" || exit $?
-version_ok "$CO" || exit $?
+version_ok "$CO" "$MOD" || exit $?
 launcher_ok || exit $?
 . "$HERE/bb-queue-lib.sh"
 GROUP=${BB_PORT_GROUP:-}

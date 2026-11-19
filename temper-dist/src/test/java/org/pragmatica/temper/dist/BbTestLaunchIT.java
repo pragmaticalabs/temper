@@ -230,6 +230,16 @@ class BbTestLaunchIT {
     }
 
     @Test
+    void aLaunchThatReachesJava_writesVerdictSourceJava_soItsRcIsNeverReadAsAGuard() throws Exception {
+        green();
+        var run = bbTest(Map.of(), "fx.CalcTest#fails");
+
+        assertThat(run.doneText()).as("vbt4 L2: java ran, its exit status is the rc")
+                  .contains("\nverdict_source=java\n")
+                  .doesNotContain("verdict_source=guard");
+    }
+
+    @Test
     void twoIdenticalRuns_areTwoTickets_neverDeduped() throws Exception {
         green();
         var first = bbTest(Map.of(), "fx.CalcTest#passes");
