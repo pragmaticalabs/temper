@@ -26,6 +26,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 /// [#aWorkingTreeCopyOfCiYml_doesNotWin_theListOfHeadIs_used] red; run the bootstrap without taking its rc (`|| true`-style: the main run
 /// follows a failed bootstrap) -> [#aFailedBootstrap_isTheTicketsRc_andTheMainRunNeverStarts] red; use the root project.version as <ver> instead
 /// of the plugin's effective version -> [#thePluginPinnedApartFromTheProjectVersion_isTheJarTheGuardChecks] red.
+/// Require every ci.yml install list to agree (not only those holding the plugin) -> [#realRc6Shape_pickedListIsThePluginsOne_versionIsTheRc6PomsRc5] red.
 class BbJbctBootstrapIT {
     private static final String LIST = "jbct/jbct-maven-plugin,jbct/slice-processor,aether/pg-tools/pg-codegen";
     private static final String VER = "1.2.3-rc1";
@@ -298,15 +299,65 @@ class BbJbctBootstrapIT {
         assertThat(r.installs()).containsExactly("install -B -DskipTests -pl " + LIST + " -am");
     }
 
+    private static final String EMBER_CMD = "mvn install -B -DskipTests -pl aether/ember -am";
+    private static final String CONSENSUS_CMD = "mvn install -B -DskipTests -pl integrations/consensus -am";
+
     @Test
-    void disagreeingLists_areRefused_nothingRuns() throws Exception {
-        var r = run(checkout(ci(BOOTSTRAP_CMD, "mvn install -B -DskipTests -pl jbct/other -am"), pom(VER), false),
+    void disagreeingPluginLists_areRefused_nothingRuns() throws Exception {
+        var r = run(checkout(ci(BOOTSTRAP_CMD, "mvn install -B -DskipTests -pl jbct/jbct-maven-plugin,jbct/other -am"),
+                             pom(VER),
+                             false),
                     "-B",
                     "jbct:check");
 
         assertThat(r.rc()).isEqualTo(84);
         assertThat(r.log()).contains("bootstrap: REFUSED").contains("different -pl lists").contains("(rc=84)");
         assertThat(r.mvn()).isEmpty();
+    }
+
+    @Test
+    void distractorInstallLines_areIgnored_thePluginListIsPicked() throws Exception {
+        var r = run(checkout(ci(EMBER_CMD, BOOTSTRAP_CMD, CONSENSUS_CMD, BOOTSTRAP_CMD, GROUP_CMD, ROOT_CMD),
+                             pom(VER),
+                             false),
+                    "-B",
+                    "jbct:check");
+
+        assertThat(r.rc()).isZero();
+        assertThat(r.installs()).containsExactly("install -B -DskipTests -pl " + LIST + " -am");
+    }
+
+    @Test
+    void aDistractorLineAlone_isRefused83_aSubstringOfThePluginNameDoesNotCount() throws Exception {
+        var r = run(checkout(ci(EMBER_CMD,
+                                "mvn install -B -DskipTests -pl x/jbct/jbct-maven-plugin-y,jbct/jbct-maven-plugins -am"),
+                             pom(VER),
+                             false),
+                    "-B",
+                    "jbct:check");
+
+        assertThat(r.rc()).isEqualTo(83);
+        assertThat(r.log()).contains("(rc=83)");
+        assertThat(r.mvn()).isEmpty();
+    }
+
+    @Test
+    void realRc6Shape_pickedListIsThePluginsOne_versionIsTheRc6PomsRc5() throws Exception {
+        var ciYml = resource("/bb/jbct-bootstrap-rc6-ci.yml");
+        var pomXml = resource("/bb/jbct-bootstrap-rc6-pom.xml");
+        var r = run(checkout(ciYml, pomXml, false), "-B", "jbct:check");
+
+        assertThat(r.rc()).isZero();
+        assertThat(r.log()).contains("bootstrap: jbct plugin 1.0.0-rc5 installed into .m2-local");
+        assertThat(r.installs()).containsExactly("install -B -DskipTests -pl " + LIST + " -am");
+    }
+
+    private static String resource(String name) throws IOException {
+        try (var in = BbJbctBootstrapIT.class.getResourceAsStream(name)) {
+            assertThat(in).as(name).isNotNull();
+
+            return new String(in.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+        }
     }
 
     @Test

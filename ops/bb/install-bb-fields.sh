@@ -58,7 +58,7 @@ readonly BB_BUILD_PRECAP=8478b2174ce3ff6de293b55a283e3ce7   # the #53 version: c
 readonly BB_BUILD_PREJBCT=12c68a554862caa672f7211456dfc84c   # the #56 version: no jbct plugin bootstrap hook
 readonly BB_BUILD_NEW=74c0649316568f6696c09b3588e28004
 # bb-jbct-bootstrap: absent on every host before its first install; bb-build calls it, so it is installed first.
-readonly BB_JBCTBOOT_NEW=132c2bfe5851805d6c3b1b5781902b02
+readonly BB_JBCTBOOT_NEW=e016ce9a7f16439a8a1cbaba6da93b46
 readonly BB_TICKETS_OLD=472cd816644fe0ee0902b8da3d33de8e   # before the per-ticket progressAt (issue #10)
 readonly BB_TICKETS_PRE31=e1aeba98541ba781295001f956b08c8d   # live since 2026-11-12: drops a ticket key with a capital letter
 readonly BB_TICKETS_NEW=6174119f0cd567c5dc462d1e063c6214

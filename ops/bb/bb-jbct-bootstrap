@@ -13,15 +13,16 @@
 # ${...}, resolved once more; deeper is unresolved). Entries that resolve to the same version agree. No mvn help:evaluate.
 # Any other call: prints nothing, does nothing, exit 0.
 # The module list is read from the checkout's OWN HEAD (git show HEAD:.github/workflows/ci.yml), never a copy: the -pl list of the
-# `mvn install ... -DskipTests -pl <list> -am` lines whose list is a literal (letters, digits, _ . / , -). A line with a quoted or
-# variable list (the CI group plan) is not such a line. All such lines must name one list. Never a guessed list.
+# `mvn install ... -DskipTests -pl <list> -am` lines whose list is a literal (letters, digits, _ . / , -) AND contains the element
+# jbct/jbct-maven-plugin (an exact list element, not a substring). Other install lines (aether/ember, integrations/consensus, the quoted
+# or variable CI group plan) are ignored. The selected lines must name one list. Never a guessed list.
 # The bootstrap is `mvn install -B -DskipTests -pl <list> -am` in the checkout, into its own .m2-local (maven.config), never ~/.m2.
 # Prints `bootstrap: jbct plugin <ver> installed into .m2-local` and appends `jbct_bootstrap=<ver>` to the ticket on success;
 # `bootstrap: jbct plugin <ver> present` when the jar is there (no install).
 # Exit: 0 nothing to do, present, or installed; the bootstrap maven's own rc (after `bootstrap: jbct plugin <ver> FAILED rc=<n>`);
 #   82 root pom unreadable at HEAD or holds no jbct-maven-plugin entry with a <version>; 86 entries that resolve to different versions;
 #   87 the version has an unresolved ${...}; 83 ci.yml unreadable at HEAD or holds no literal `mvn install -DskipTests -pl <list> -am`
-#   line; 84 those lines name different lists; 85 the checkout's .mvn/maven.config has no -Dmaven.repo.local (the install would go to ~/.m2).
+#   line whose list contains jbct/jbct-maven-plugin; 84 those lines name different lists; 85 the checkout's .mvn/maven.config has no -Dmaven.repo.local (the install would go to ~/.m2).
 set -uo pipefail
 CO=$1; MVN=$2; T=$3; shift 3
 
@@ -95,9 +96,9 @@ JAR=$CO/.m2-local/org/pragmatica-lite/jbct-maven-plugin/$VER/jbct-maven-plugin-$
 
 CI=$(git -C "$CO" show HEAD:.github/workflows/ci.yml 2> /dev/null) || refuse 83 "cannot read .github/workflows/ci.yml at the checkout's HEAD"
 LISTS=$(printf '%s\n' "$CI" | grep -E 'mvn[[:space:]]+install' | grep -E -e '-DskipTests' \
-        | sed -nE 's/.*[[:space:]]-pl[[:space:]]+([A-Za-z0-9_.\/,-]+)[[:space:]]+-am([[:space:]].*)?$/\1/p' | sort -u)
-[ -n "$LISTS" ] || refuse 83 "ci.yml at HEAD has no literal 'mvn install -DskipTests -pl <list> -am' line"
-[ "$(printf '%s\n' "$LISTS" | awk 'END { print NR }')" = 1 ] || refuse 84 "ci.yml at HEAD names different -pl lists: $(printf '%s' "$LISTS" | tr '\n' ' ')"
+        | sed -nE 's/.*[[:space:]]-pl[[:space:]]+([A-Za-z0-9_.\/,-]+)[[:space:]]+-am([[:space:]].*)?$/\1/p' | awk -F, '{ for (i = 1; i <= NF; i++) if ($i == "jbct/jbct-maven-plugin") { print; next } }' | sort -u)
+[ -n "$LISTS" ] || refuse 83 "ci.yml at HEAD has no literal 'mvn install -DskipTests -pl <list> -am' line whose list contains jbct/jbct-maven-plugin"
+[ "$(printf '%s\n' "$LISTS" | awk 'END { print NR }')" = 1 ] || refuse 84 "ci.yml at HEAD names different -pl lists containing jbct/jbct-maven-plugin: $(printf '%s' "$LISTS" | tr '\n' ' ')"
 
 grep -q '^-Dmaven\.repo\.local=' "$CO/.mvn/maven.config" 2> /dev/null || refuse 85 "$CO/.mvn/maven.config has no -Dmaven.repo.local (the install would write ~/.m2)"
 
