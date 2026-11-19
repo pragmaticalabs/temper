@@ -23,7 +23,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 ///
 /// Probes (2026-11-19): close upstream over C instead of C u amd(C) in select() -> [#leafChange_selectsTheLeafItsDependents_andTheirOtherUpstreams]
 /// red; skip the aggregator/parent/pom-packaging FULL -> [#parentPomChange_runsTheFullReactor] red; skip the unmapped-path FULL ->
-/// [#unmappedPath_runsTheFullReactor] and [#rootPomChange_runsTheFullReactor] red.
+/// [#unmappedPathBesideAModuleChange_runsTheFullReactor] red (the empty-S fallback alone already yields FULL for a lone unmapped path, so only the mixed case pins this guard).
 class BbIncrementalIT {
     private static final Path MODULES = BbFixtures.OPS_BB.resolve("bb-modules.py");
     private static final Path BB_BUILD = BbFixtures.OPS_BB.resolve("bb-build");
@@ -246,6 +246,15 @@ class BbIncrementalIT {
         var co = reactor("unmapped");
 
         commit(co, "docs/readme.md", "docs edited\n");
+        assertThat(selected(co)).isEqualTo("FULL");
+    }
+
+    @Test
+    void unmappedPathBesideAModuleChange_runsTheFullReactor() throws Exception {
+        var co = reactor("mixed");
+
+        commit(co, "docs/readme.md", "docs edited\n");
+        commit(co, "z/src/main/java/A.java", "class A { int changed; }\n");
         assertThat(selected(co)).isEqualTo("FULL");
     }
 
