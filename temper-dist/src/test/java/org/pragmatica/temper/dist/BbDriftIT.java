@@ -323,8 +323,7 @@ class BbDriftIT {
         assertThat(run.stdout().lines().toList()).containsExactly(line("builder@h1",
                                                                        "bb-modules.py",
                                                                        md5Of("a drifted modules helper\n"),
-                                                                       expected("bb-modules.py")),
-                                                                  "ok builder@h1 15 files");
+                                                                       expected("bb-modules.py")));
     }
 
     @Test
