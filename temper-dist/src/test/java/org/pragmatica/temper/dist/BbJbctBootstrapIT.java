@@ -501,6 +501,58 @@ class BbJbctBootstrapIT {
         assertThat(r.ticket()).noneMatch(l -> l.startsWith("jbct_bootstrap="));
     }
 
+    /// Pre-#64 behaviour for a ticket that is not a jbct run, on a host where the helper was never installed (the state of every host
+    /// until its operator runs install-bb-fields.sh): the same mvn argv, a build.log holding only maven's output, no bootstrap ticket line.
+    /// Mutation: call the helper unconditionally in bb-build -> "No such file or directory" in the log, rc != 0, red.
+    @Test
+    void plainVerify_withNoHelperInstalled_isUnaffected_sameArgvSameLogNoBootstrapLine() throws Exception {
+        Files.delete(tools.resolve("bb-jbct-bootstrap"));
+        var r = run(checkout(false), "-B", "verify");
+
+        assertThat(r.rc()).as(r.log()).isZero();
+        assertThat(r.mvn()).containsExactly("-B verify -Daether.requireDocker=true");
+        assertThat(r.log()).isEqualTo("stub mvn -B verify -Daether.requireDocker=true\n");
+        assertThat(r.ticket()).noneMatch(l -> l.contains("bootstrap"));
+    }
+
+    /// A ticket that is not a jbct run never execs the helper even when it is installed.
+    /// Mutation: call the helper unconditionally -> the marker exists, red.
+    @Test
+    void plainVerify_neverExecsAnInstalledHelper() throws Exception {
+        var marker = dir.resolve("helper-ran");
+
+        BbFixtures.executable(tools.resolve("bb-jbct-bootstrap"), "#!/bin/sh\ntouch " + marker + "\n");
+        var r = run(checkout(false), "-B", "verify");
+
+        assertThat(r.rc()).isZero();
+        assertThat(marker).doesNotExist();
+        assertThat(r.mains()).containsExactly("-B verify -Daether.requireDocker=true");
+    }
+
+    /// A jbct run on a host with no helper: refusal rc 88 (documented in bb-build's header), the named line, the rc on the ticket, no maven at all.
+    /// Mutation: drop the presence check on the jbct path -> bash's own "No such file" rc 127, no refusal line, red.
+    @Test
+    void jbctGoal_withNoHelper_isRefusedRc88_noMaven() throws Exception {
+        Files.delete(tools.resolve("bb-jbct-bootstrap"));
+        var r = run(checkout(false), "-B", "jbct:check");
+
+        assertThat(r.rc()).as(r.log()).isEqualTo(88);
+        assertThat(r.log()).contains("bootstrap: refused: helper ").contains(" missing");
+        assertThat(r.ticket()).contains("rc=88");
+        assertThat(r.mvn()).isEmpty();
+    }
+
+    /// Same refusal for a helper that is present but not executable, and for the profile form.
+    @Test
+    void jbctProfile_withANonExecutableHelper_isRefusedRc88_noMaven() throws Exception {
+        assertThat(tools.resolve("bb-jbct-bootstrap").toFile().setExecutable(false)).isTrue();
+        var r = run(checkout(false), "-B", "-Pjbct", "verify");
+
+        assertThat(r.rc()).as(r.log()).isEqualTo(88);
+        assertThat(r.log()).contains("bootstrap: refused: helper ").contains(" missing or not executable");
+        assertThat(r.mvn()).isEmpty();
+    }
+
     /// Negative control: with the hook gone the same run reaches maven with no bootstrap, and the positive checks above are what notice.
     @Test
     void negativeControl_hookRemoved_theMainRunHasNoBootstrap_andTheCheckGoesRed() throws Exception {
