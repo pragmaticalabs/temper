@@ -198,6 +198,9 @@ class BbInstallIT {
         assertThat(pin("BB_QUEUE_PREMEM")).isEqualTo(BbFixtures.md5(prev("bb-queue.premem")));
         assertThat(pin("BB_BUILD_PRECAP")).isEqualTo(BbFixtures.md5(prev("bb-build.precap")));
         assertThat(pin("BB_BUILD_PRECP")).isEqualTo(BbFixtures.md5(prev("bb-build.precp")));
+        assertThat(pin("BB_LIB_PRELEDGER")).isEqualTo(BbFixtures.md5(prev("bb-queue-lib.sh.preledger")));
+        assertThat(pin("BB_QUEUE_PRELEDGER")).isEqualTo(BbFixtures.md5(prev("bb-queue.preledger")));
+        assertThat(pin("BB_HOLD_PRELEDGER")).isEqualTo(BbFixtures.md5(prev("bb-hold.preledger")));
         assertThat(pin("BB_LIB_PRECAP")).isEqualTo(BbFixtures.md5(prev("bb-queue-lib.sh.precap")));
         assertThat(pin("BB_QUEUE_PRECAP")).isEqualTo(BbFixtures.md5(prev("bb-queue.precap")));
         assertThat(pin("BB_HOLD_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-hold")));
@@ -511,6 +514,37 @@ class BbInstallIT {
         }
     }
 
+    /// The bb-queue-lib.sh, bb-queue and bb-hold of issue #56 (BB_*_PRELEDGER: the cap counted reactors by process pattern; the 2026-11-19
+    /// CTO ruling replaced that with the launch ledger) are accepted sources and are replaced, backed up under their md5.
+    @Test
+    void aHostRunningThePreLedgerQueue_isUpdatedToTheLaunchLedger() throws Exception {
+        var tools = host("h1");
+
+        assertThat(install("builder@h1").rc()).isZero();
+        var names = List.of("bb-queue-lib.sh", "bb-queue", "bb-hold");
+
+        for (var name : names) {
+            Files.write(tools.resolve(name), prev(name + ".preledger"));
+        }
+
+        var run = install("builder@h1");
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        for (var name : names) {
+            var key = switch (name) {
+                case "bb-queue-lib.sh" -> "BB_LIB_";
+                case "bb-queue" -> "BB_QUEUE_";
+                default -> "BB_HOLD_";
+            };
+
+            assertThat(run.stdout()).contains("installed builder@h1 " + name
+                                             + " before=" + pin(key + "PRELEDGER")
+                                             + " after=" + pin(key + "NEW"));
+            assertThat(tools.resolve(name)).hasBinaryContent(Files.readAllBytes(OPS_BB.resolve(name)));
+            assertThat(tools.resolve(name + ".bak-" + pin(key + "PRELEDGER"))).hasBinaryContent(prev(name + ".preledger"));
+        }
+    }
+
     /// The bb-build of issue #56 (BB_BUILD_PRECP: no bb-cp-record hook, no BB_LAUNCH) is an accepted source and is replaced, backed up under its md5.
     @Test
     void aHostRunningThePreBbTestBuild_isUpdatedToTheOneWithTheClasspathRecord() throws Exception {
@@ -671,6 +705,7 @@ class BbInstallIT {
                            + "|621b2252c3da05e7dd1161d076908864|" + pin("BB_LIB_PRERC")
                            + "|" + pin("BB_LIB_PREMEM")
                            + "|" + pin("BB_LIB_PRECAP")
+                           + "|" + pin("BB_LIB_PRELEDGER")
                            + "|" + pin("BB_LIB_NEW"))
                   .contains("bb-queue installed=" + BbFixtures.md5("unrelated tool\n".getBytes())
                            + " expected=" + BbFixtures.BB_QUEUE_OLD
@@ -680,6 +715,7 @@ class BbInstallIT {
                            + "|" + pin("BB_QUEUE_PREVIA")
                            + "|" + pin("BB_QUEUE_PREMEM")
                            + "|" + pin("BB_QUEUE_PRECAP")
+                           + "|" + pin("BB_QUEUE_PRELEDGER")
                            + "|" + pin("BB_QUEUE_NEW"));
     }
 
