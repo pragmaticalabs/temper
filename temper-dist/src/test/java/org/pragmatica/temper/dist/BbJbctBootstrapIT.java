@@ -24,7 +24,8 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 /// Probes (throwaway local branches, never pushed): drop the present check in bb-jbct-bootstrap (always install) ->
 /// [#present_doesNotInstallAgain] red; read ci.yml from the working tree instead of `git show HEAD:` ->
 /// [#aWorkingTreeCopyOfCiYml_doesNotWin_theListOfHeadIs_used] red; run the bootstrap without taking its rc (`|| true`-style: the main run
-/// follows a failed bootstrap) -> [#aFailedBootstrap_isTheTicketsRc_andTheMainRunNeverStarts] red.
+/// follows a failed bootstrap) -> [#aFailedBootstrap_isTheTicketsRc_andTheMainRunNeverStarts] red; use the root project.version as <ver> instead
+/// of the plugin's effective version -> [#thePluginPinnedApartFromTheProjectVersion_isTheJarTheGuardChecks] red.
 class BbJbctBootstrapIT {
     private static final String LIST = "jbct/jbct-maven-plugin,jbct/slice-processor,aether/pg-tools/pg-codegen";
     private static final String VER = "1.2.3-rc1";
@@ -83,12 +84,28 @@ class BbJbctBootstrapIT {
     private static final String GROUP_CMD = "mvn install -B -DskipTests -pl \"${{ steps.plan.outputs.modules }}\" -am";
     private static final String ROOT_CMD = "mvn install -B -DskipTests";
 
-    private static String pom(String own) {
+    private static String plugin(String version) {
+        return "<plugin><groupId>org.pragmatica-lite</groupId><artifactId>jbct-maven-plugin</artifactId>" + (version == null
+                                                                                                             ? ""
+                                                                                                             : "<version>" + version
+                                                                                                              + "</version>")
+             + "</plugin>";
+    }
+
+    private static String pomWith(String own, String props, String build) {
         return "<project><parent><groupId>g</groupId><artifactId>p</artifactId><version>9.9.9</version></parent>"
              + "<artifactId>root</artifactId>" + (own == null
                                                   ? ""
                                                   : "<version>" + own + "</version>")
+             + "<properties>" + props
+             + "</properties><build>" + build
+             + "</build>"
              + "<dependencies><dependency><groupId>x</groupId><artifactId>y</artifactId><version>7.7.7</version></dependency></dependencies></project>\n";
+    }
+
+    /// The plugin is `${project.version}` of the root, as in a pragmatica checkout.
+    private static String pom(String own) {
+        return pomWith(own, "", "<plugins>" + plugin("${project.version}") + "</plugins>");
     }
 
     private void git(Path co, String... args) throws Exception {
@@ -302,12 +319,100 @@ class BbJbctBootstrapIT {
     }
 
     @Test
-    void anUnparsableVersion_isRefused_theParentsAndADependencysAreNotTheProjects() throws Exception {
+    void anUnresolvableVersion_isRefused_theParentsAndADependencysAreNotTheProjects() throws Exception {
         var r = run(checkout(ci(BOOTSTRAP_CMD), pom(null), false), "-B", "jbct:check");
+
+        assertThat(r.rc()).isEqualTo(87);
+        assertThat(r.log()).contains("bootstrap: REFUSED").contains("unresolved").contains("(rc=87)");
+        assertThat(r.mvn()).isEmpty();
+    }
+
+    @Test
+    void anUndefinedPropertyOrADeepChain_isRefused() throws Exception {
+        for (var build : List.of(pomWith("5.0.0", "", "<plugins>" + plugin("${nope}") + "</plugins>"),
+                                 pomWith("5.0.0",
+                                         "<a>${b}</a><b>${c}</b><c>" + VER + "</c>",
+                                         "<plugins>" + plugin("${a}") + "</plugins>"))) {
+            var r = run(checkout(ci(BOOTSTRAP_CMD), build, false), "-B", "jbct:check");
+
+            assertThat(r.rc()).as(r.log()).isEqualTo(87);
+            assertThat(r.mvn()).isEmpty();
+        }
+    }
+
+    @Test
+    void noPluginEntry_isRefused_theRootVersionAloneIsNotTheAnswer() throws Exception {
+        var r = run(checkout(ci(BOOTSTRAP_CMD), pomWith(VER, "", ""), false), "-B", "jbct:check");
 
         assertThat(r.rc()).isEqualTo(82);
         assertThat(r.log()).contains("bootstrap: REFUSED").contains("(rc=82)");
         assertThat(r.mvn()).isEmpty();
+    }
+
+    @Test
+    void conflictingEntries_areRefused_agreeingOnesAreNot() throws Exception {
+        var conflict = pomWith("5.0.0",
+                               "",
+                               "<pluginManagement><plugins>" + plugin(VER)
+                              + "</plugins></pluginManagement>"
+                              + "<plugins>" + plugin("4.4.4")
+                              + "</plugins>");
+        var r = run(checkout(ci(BOOTSTRAP_CMD), conflict, false), "-B", "jbct:check");
+
+        assertThat(r.rc()).isEqualTo(86);
+        assertThat(r.log()).contains("(rc=86)");
+        assertThat(r.mvn()).isEmpty();
+        var agree = pomWith(VER,
+                            "<pv>" + VER + "</pv>",
+                            "<pluginManagement><plugins>" + plugin("${pv}")
+                           + "</plugins></pluginManagement>"
+                           + "<plugins>" + plugin("${project.version}")
+                           + "</plugins>");
+        var ok = run(checkout(ci(BOOTSTRAP_CMD), agree, false), "-B", "jbct:check");
+
+        assertThat(ok.rc()).as(ok.log()).isZero();
+        assertThat(ok.log()).contains(BOOTSTRAP_LINE);
+    }
+
+    @Test
+    void thePluginPinnedApartFromTheProjectVersion_isTheJarTheGuardChecks() throws Exception {
+        var pinned = pomWith("5.0.0", "", "<plugins>" + plugin(VER) + "</plugins>");
+        var present = run(checkout(ci(BOOTSTRAP_CMD), pinned, true), "-B", "jbct:check");
+
+        assertThat(present.rc()).isZero();
+        assertThat(present.log()).contains("bootstrap: jbct plugin " + VER + " present");
+        assertThat(present.mvn()).as("only the main run").hasSize(1);
+        var missing = run(checkout(ci(BOOTSTRAP_CMD), pinned, false), "-B", "jbct:check");
+
+        assertThat(missing.rc()).isZero();
+        assertThat(missing.log()).contains(BOOTSTRAP_LINE);
+        assertThat(missing.installs()).hasSize(1);
+    }
+
+    @Test
+    void aPropertyVersion_isResolved_oneNestingLevelIncluded() throws Exception {
+        var direct = pomWith("5.0.0", "<pv>" + VER + "</pv>", "<plugins>" + plugin("${pv}") + "</plugins>");
+        var nested = pomWith("5.0.0",
+                             "<pv>${pw}</pv><pw>" + VER + "</pw>",
+                             "<pluginManagement><plugins>" + plugin("${pv}") + "</plugins></pluginManagement>");
+
+        for (var pom : List.of(direct, nested)) {
+            var r = run(checkout(ci(BOOTSTRAP_CMD), pom, false), "-B", "jbct:check");
+
+            assertThat(r.rc()).as(r.log()).isZero();
+            assertThat(r.log()).contains(BOOTSTRAP_LINE);
+        }
+    }
+
+    @Test
+    void aWorkingTreeCopyOfThePom_doesNotWin_theOneAtHeadIs_read() throws Exception {
+        var co = checkout(false);
+
+        Files.writeString(co.resolve("pom.xml"), pomWith("5.0.0", "", "<plugins>" + plugin("8.8.8") + "</plugins>"));
+        var r = run(co, "-B", "jbct:check");
+
+        assertThat(r.rc()).as(r.log()).isZero();
+        assertThat(r.log()).contains(BOOTSTRAP_LINE);
     }
 
     @Test

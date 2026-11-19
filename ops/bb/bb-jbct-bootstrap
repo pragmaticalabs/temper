@@ -6,8 +6,12 @@
 # the reactor builds it, so `package jbct:check` in one invocation does not help. CI's answer is a separate first invocation; this is that.
 # Needed only when BOTH hold: (1) the args ask for a jbct:* goal, an org.pragmatica-lite:jbct-maven-plugin:* goal or the jbct profile
 # (-Pjbct, -P a,jbct, --activate-profiles; "!jbct" / "-jbct" deactivate and do not count), and (2)
-# <checkout>/.m2-local/org/pragmatica-lite/jbct-maven-plugin/<ver>/jbct-maven-plugin-<ver>.jar is absent. <ver> is the root pom's own
-# project <version> (not the parent's, not a dependency's). Any other call: prints nothing, does nothing, exit 0.
+# <checkout>/.m2-local/org/pragmatica-lite/jbct-maven-plugin/<ver>/jbct-maven-plugin-<ver>.jar is absent. <ver> is the plugin's EFFECTIVE
+# version (not the root project <version> unless the plugin says ${project.version}): the <version> of org.pragmatica-lite:jbct-maven-plugin
+# in the root pom's <build><pluginManagement> or <build><plugins>, read from the checkout's HEAD (git show HEAD:pom.xml), as a literal,
+# ${project.version} (the root's own <version>, not the parent's) or ${prop} from the root <properties> (a property value may itself be one
+# ${...}, resolved once more; deeper is unresolved). Entries that resolve to the same version agree. No mvn help:evaluate.
+# Any other call: prints nothing, does nothing, exit 0.
 # The module list is read from the checkout's OWN HEAD (git show HEAD:.github/workflows/ci.yml), never a copy: the -pl list of the
 # `mvn install ... -DskipTests -pl <list> -am` lines whose list is a literal (letters, digits, _ . / , -). A line with a quoted or
 # variable list (the CI group plan) is not such a line. All such lines must name one list. Never a guessed list.
@@ -15,7 +19,8 @@
 # Prints `bootstrap: jbct plugin <ver> installed into .m2-local` and appends `jbct_bootstrap=<ver>` to the ticket on success;
 # `bootstrap: jbct plugin <ver> present` when the jar is there (no install).
 # Exit: 0 nothing to do, present, or installed; the bootstrap maven's own rc (after `bootstrap: jbct plugin <ver> FAILED rc=<n>`);
-#   82 root pom has no parsable own <version>; 83 ci.yml unreadable at HEAD or holds no literal `mvn install -DskipTests -pl <list> -am`
+#   82 root pom unreadable at HEAD or holds no jbct-maven-plugin entry with a <version>; 86 entries that resolve to different versions;
+#   87 the version has an unresolved ${...}; 83 ci.yml unreadable at HEAD or holds no literal `mvn install -DskipTests -pl <list> -am`
 #   line; 84 those lines name different lists; 85 the checkout's .mvn/maven.config has no -Dmaven.repo.local (the install would go to ~/.m2).
 set -uo pipefail
 CO=$1; MVN=$2; T=$3; shift 3
@@ -33,14 +38,57 @@ done
 
 refuse() { echo "bootstrap: REFUSED $2 (rc=$1)"; exit "$1"; }
 
-VER=$(python3 -I - "$CO/pom.xml" 2> /dev/null <<'PY'
-import sys, xml.etree.ElementTree as ET
-root = ET.parse(sys.argv[1]).getroot()
-v = [c.text.strip() for c in root if c.tag.rsplit('}', 1)[-1] == 'version' and c.text]
-print(v[0] if len(v) == 1 else '')
+PYSRC=$(cat <<'PY'
+import sys, re, xml.etree.ElementTree as ET
+def t(e): return e.tag.rsplit('}', 1)[-1]
+def kids(e, n): return [c for c in e if t(c) == n]
+def txt(e, n):
+    k = kids(e, n)
+    return k[0].text.strip() if len(k) == 1 and k[0].text else None
+try:
+    root = ET.fromstring(sys.stdin.read())
+except Exception:
+    print("82 root pom.xml at HEAD is unreadable"); sys.exit()
+props = {}
+for ps in kids(root, 'properties'):
+    for p in ps:
+        props[t(p)] = (p.text or '').strip()
+own = txt(root, 'version')
+def sub(v):
+    def one(m):
+        k = m.group(1)
+        if k == 'project.version' and own: return own
+        if k in props: return props[k]
+        raise KeyError(k)
+    return re.sub(r'\$\{([^}]*)\}', one, v)
+def resolve(v):
+    for _ in range(2):
+        if '${' not in v: break
+        v = sub(v)
+    if '${' in v: raise KeyError(v)
+    return v
+found = []
+for b in kids(root, 'build'):
+    sections = kids(b, 'plugins') + [pl for pm in kids(b, 'pluginManagement') for pl in kids(pm, 'plugins')]
+    for ps in sections:
+        for pl in kids(ps, 'plugin'):
+            if txt(pl, 'groupId') == 'org.pragmatica-lite' and txt(pl, 'artifactId') == 'jbct-maven-plugin':
+                found.append(txt(pl, 'version'))
+if not found or any(f is None for f in found):
+    print("82 root pom.xml at HEAD has no org.pragmatica-lite:jbct-maven-plugin entry with a <version>"); sys.exit()
+try:
+    vs = sorted(set(resolve(f) for f in found))
+except KeyError as e:
+    print("87 jbct-maven-plugin <version> has an unresolved ${...} (%s)" % e); sys.exit()
+if len(vs) != 1:
+    print("86 jbct-maven-plugin entries resolve to different versions: " + " ".join(vs)); sys.exit()
+print("OK " + vs[0])
 PY
-) || VER=""
-[[ $VER =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || refuse 82 "root pom.xml has no parsable own <version> (got '${VER}')"
+)
+POMRES=$(git -C "$CO" show HEAD:pom.xml 2> /dev/null | python3 -I -c "$PYSRC" 2> /dev/null) || POMRES="82 cannot resolve the jbct-maven-plugin version"
+[ -n "$POMRES" ] || POMRES="82 cannot resolve the jbct-maven-plugin version"
+case $POMRES in OK\ *) VER=${POMRES#OK } ;; *) refuse "${POMRES%% *}" "${POMRES#* }" ;; esac
+[[ $VER =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || refuse 82 "jbct-maven-plugin version '${VER}' is not a plain version"
 
 JAR=$CO/.m2-local/org/pragmatica-lite/jbct-maven-plugin/$VER/jbct-maven-plugin-$VER.jar
 [ ! -f "$JAR" ] || { echo "bootstrap: jbct plugin $VER present"; exit 0; }
