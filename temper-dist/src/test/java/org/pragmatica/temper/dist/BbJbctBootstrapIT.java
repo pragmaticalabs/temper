@@ -565,6 +565,8 @@ class BbJbctBootstrapIT {
 
         BbFixtures.executable(bare.resolve("bb-build"), stripped);
         Files.copy(tools.resolve("bb-queue-lib.sh"), bare.resolve("bb-queue-lib.sh"));
+        BbFixtures.executable(bare.resolve("bb-jbct-bootstrap"),
+                              Files.readString(tools.resolve("bb-jbct-bootstrap")));  // present, so only the missing CALL is under test
         var r = run(checkout(false), Map.of(), bare.resolve("bb-build"), "-B", "jbct:check");
 
         assertThat(r.installs()).isEmpty();
