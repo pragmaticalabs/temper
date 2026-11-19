@@ -14,7 +14,7 @@
 #   which guard fired: (a) HEAD differs from the manifest, (b) a module on the classpath has a different working-tree digest,
 #   (c) a recorded jar or classes-dir digest differs (or an in-checkout classpath entry was never recorded), (d) the classpath
 #   holds a reactor artifact resolved from a repository layout (an .m2-local or ~/.m2 SNAPSHOT jar, in or out of the checkout). No record at all is refused too. No override exists.
-import hashlib, os, re, subprocess, sys, xml.etree.ElementTree as ET
+import hashlib, json, os, re, signal, subprocess, sys, xml.etree.ElementTree as ET
 
 REFUSED = 12
 SKIP_DIRS = {'.git', '.m2-local', '.bb', 'node_modules'}
@@ -31,10 +31,21 @@ def sha_file(path):
     return h.hexdigest()
 
 
-def digest_lines(pairs):
+def mode_of(path):
+    """'l' symlink, 'x' any exec bit, '-' otherwise, 'm' missing: a chmod +x changes behaviour without changing content."""
+    if os.path.islink(path):
+        return 'l'
+    try:
+        return 'x' if os.stat(path).st_mode & 0o111 else '-'
+    except OSError:
+        return 'm'
+
+
+def digest_lines(triples):
+    """one JSON array [path, mode, sha] per line, sorted: a tab or newline inside a name cannot make two different trees one byte stream."""
     h = hashlib.sha256()
-    for rel, sha in sorted(pairs):
-        h.update(('%s\t%s\n' % (rel, sha)).encode())
+    for line in sorted(json.dumps(list(t)) for t in triples):
+        h.update((line + '\n').encode())
     return h.hexdigest()
 
 
@@ -45,26 +56,56 @@ def path_digest(path):
         for root, _, files in os.walk(path):
             for name in files:
                 full = os.path.join(root, name)
-                pairs.append((os.path.relpath(full, path), sha_file(full)))
+                pairs.append((os.path.relpath(full, path), mode_of(full), sha_file(full)))
         return digest_lines(pairs)
     if os.path.isfile(path):
         return sha_file(path)
     return 'absent'
 
 
-def tree_digest(co, module):
-    out = subprocess.run(['git', '-C', co, 'ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', module],
+class BadName(Exception):
+    pass
+
+
+def tracked(co, pathspec):
+    """tracked + untracked non-ignored files under pathspec, as str; a name that is not valid UTF-8 raises BadName (rc 12, never a traceback)."""
+    out = subprocess.run(['git', '-C', co, 'ls-files', '-z', '--cached', '--others', '--exclude-standard', '--'] + pathspec,
                          stdout=subprocess.PIPE, check=True).stdout
-    pairs = []
+    names = []
     for raw in set(out.split(b'\0')):
         if not raw:
             continue
-        rel = raw.decode('utf-8', 'surrogateescape')
-        if rel == '.bb' or rel.startswith('.bb/'):
-            continue
+        try:
+            rel = raw.decode('utf-8')
+        except UnicodeDecodeError:
+            raise BadName('a file name is not valid UTF-8: %r' % raw)
+        if rel != '.bb' and not rel.startswith('.bb/'):
+            names.append(rel)
+    return names
+
+
+def file_triples(co, names):
+    triples = []
+    for rel in names:
         full = os.path.join(co, rel)
-        pairs.append((rel, sha_file(full) if os.path.isfile(full) or os.path.islink(full) else 'MISSING'))
-    return digest_lines(pairs)
+        present = os.path.isfile(full) or os.path.islink(full)
+        triples.append((rel, mode_of(full), sha_file(full) if present else 'MISSING'))
+    return triples
+
+
+def tree_digest(co, module):
+    return digest_lines(file_triples(co, tracked(co, [module])))
+
+
+def module_dirs(co):
+    return sorted(os.path.relpath(d, co) for d in poms(co) if d != co)
+
+
+def root_digest(co):
+    """the reactor root: every file outside every module directory (root pom, .mvn/, ...), plus every pom.xml anywhere (parent poms)."""
+    mods = module_dirs(co)
+    names = [n for n in tracked(co, []) if owner(mods, n) is None or n.endswith('/pom.xml')]
+    return digest_lines(file_triples(co, names))
 
 
 def head(co):
@@ -106,7 +147,7 @@ def coordinates(co):
 
 
 def read_manifest(co):
-    m = {'head': None, 'reactor': [], 'tree': {}, 'entry': {}}
+    m = {'head': None, 'reactor': [], 'root': None, 'tree': {}, 'entry': {}}
     with open(os.path.join(co, '.bb', 'cp', 'manifest'), encoding='utf-8') as f:
         for line in f:
             parts = line.rstrip('\n').split(' ')
@@ -114,10 +155,12 @@ def read_manifest(co):
                 m['head'] = parts[1]
             elif parts[0] == 'reactor':
                 m['reactor'].append(parts[1])
+            elif parts[0] == 'root':
+                m['root'] = parts[1]
             elif parts[0] == 'tree':
                 m['tree'][parts[1]] = parts[2]
             elif parts[0] == 'entry':
-                m['entry'].setdefault(parts[1], {})[parts[2]] = parts[3]
+                m['entry'].setdefault(parts[1], {})[' '.join(parts[2:-1])] = parts[-1]
     return m
 
 
@@ -159,6 +202,11 @@ def check(co, module):
                 refuse(module, 'd', 'classpath holds %s, a reactor artifact resolved from a maven repository, not from this build' % e)
     own = {module + '/target/classes', module + '/target/test-classes'}
     in_co = {os.path.relpath(e, co) for e in entries if inside(co, e)}
+    try:
+        if m['root'] is None or root_digest(co) != m['root']:
+            refuse(module, 'b', 'the reactor root (root pom, .mvn/, parent poms, every file outside the modules) has a working-tree digest that differs from the recorded build')
+    except BadName as e:
+        refuse(module, 'b', str(e))
     owners = {module}
     for rel in in_co:
         o = owner(m['tree'], rel)
@@ -167,7 +215,11 @@ def check(co, module):
     for o in sorted(owners):
         if o not in m['tree']:
             refuse(module, 'b', 'module %s on the classpath has no recorded working-tree digest' % o)
-        if tree_digest(co, o) != m['tree'][o]:
+        try:
+            now_digest = tree_digest(co, o)
+        except BadName as e:
+            refuse(module, 'b', 'module %s: %s' % (o, e))
+        if now_digest != m['tree'][o]:
             refuse(module, 'b', 'module %s has a working-tree digest that differs from the recorded build' % o)
     recorded = m['entry'].get(module, {})
     for rel in sorted(own | in_co):
@@ -207,7 +259,19 @@ def record(co, args):
     open(marker, 'w').close()
     os.utime(marker, (os.stat(marker).st_atime, os.stat(marker).st_mtime - 2))
     cmd = [mvn, '-o', '-B', '-q'] + selection(args) + ['test-compile', 'dependency:build-classpath', '-Dmdep.outputFile=target/bb-cp.txt']
-    if subprocess.run(cmd, cwd=co, env=env).returncode != 0:
+    mvn_proc = subprocess.Popen(cmd, cwd=co, env=env, start_new_session=True)
+
+    def on_term(signum, frame):  # the hook's timeout: take maven (own process group) down with us, leave no record
+        try:
+            os.killpg(mvn_proc.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        subprocess.run(['rm', '-rf', cur, new, old])
+        sys.stderr.write('bb-cp-record: terminated, record removed\n')
+        os._exit(124)
+
+    signal.signal(signal.SIGTERM, on_term)
+    if mvn_proc.wait() != 0:
         raise RuntimeError('maven exited non-zero: ' + ' '.join(cmd[1:]))
     modules = []
     for d in poms(co):
@@ -217,10 +281,12 @@ def record(co, args):
     modules = sorted(m for m in modules if m != '.')
     if not modules:
         raise RuntimeError('no module wrote target/bb-cp.txt')
-    lines = ['head ' + head(co)] + ['reactor ' + c for c in coordinates(co)]
+    lines = ['head ' + head(co)] + ['reactor ' + c for c in coordinates(co)] + ['root ' + root_digest(co)]
     trees, entries = {}, []
     for mod in modules:
-        cp = open(os.path.join(co, mod, 'target', 'bb-cp.txt'), encoding='utf-8').read().strip()
+        out = os.path.join(co, mod, 'target', 'bb-cp.txt')
+        cp = open(out, encoding='utf-8').read().strip()
+        os.remove(out)  # maven's transient output; the record lives only under .bb/cp
         with open(os.path.join(new, cp_name(mod) + '.cp'), 'w', encoding='utf-8') as f:
             f.write(cp + '\n')
         rels = {mod + '/target/classes', mod + '/target/test-classes'}

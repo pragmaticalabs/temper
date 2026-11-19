@@ -14,7 +14,7 @@ walk and closures. bb-build gains `--since` and the manifest write (§2). Failsa
 - Every green bb-build writes `.bb/cp/<module>.cp` per built module, from `dependency:build-classpath`, with reactor
   modules resolved to `target/classes`. It also writes `.bb/cp/manifest`: head SHA, plus per module its working-tree digest
   and the digest of each reactor jar or classes dir on its classpath. Digest = sha256 over the sorted list of
-  `(relative path, sha256(file))` lines. The working-tree digest covers the module's tracked and untracked non-ignored files.
+  JSON `[relative path, mode (exec bit), sha256(file)]` lines (a tab or newline in a name cannot collide; a non-UTF-8 name is refused, rc 12). The working-tree digest covers the module's tracked and untracked non-ignored files. A reactor-root digest (`root` line) covers every file outside the module directories plus every pom.xml (root pom, `.mvn/`, parent poms). The hook is bounded (`BB_CP_RECORD_TIMEOUT`, default 300 s; on timeout no record is left and the rc is unchanged); the classpath files are moved from `target/bb-cp.txt` into `.bb/cp/`.
 - Surefire config comes from the module's effective pom, read at build time (`help:effective-pom`) and stored in
   `.bb/cp/<module>.sf`. Supported and reproduced: argLine (with @{…} late replacement resolved), systemPropertyVariables,
   groups/excludedGroups (as tags), configurationParameters, and junit-platform.properties (on test-classes as now).
@@ -22,14 +22,14 @@ walk and closures. bb-build gains `--since` and the manifest write (§2). Failsa
   key): another forkCount, reuseForks=false, a provider other than junit-platform, an unknown surefire key, javaagent paths
   outside the seed.
 - The launch is one queue ticket (cap, port group, netns slot and memory floor all as now). It runs the JUnit Platform
-  Console Launcher (pinned version and sha256, from the seed) on `test-classes:classes:cp` with `-Daether.requireDocker=true`.
+  Console Launcher (pinned version and sha256, from the seed) on `test-classes:classes:cp` with `-Daether.requireDocker=true` unless `BB_REQUIRE_DOCKER=0` is given at enqueue (the same explicit override as bb-build, #31, recorded in the ticket as `requireDocker=0`).
   Verdict = the java exit status. bb-test tickets are never deduped.
 - Reports: the launcher's legacy XML (`--reports-dir`, format pinned to that launcher version) goes to
   `target/bb-test-reports/<ticket>/`, never into surefire-reports, so earlier bb-build reports are not double-counted.
   The testcase counter is passed that dir explicitly.
 ## 3. Stale-jar guard (runs before every bb-test launch; refuse = rc 12, nothing queued, the reason names the module)
 - A content check, not mtimes (CTO-accepted): git checkout resets mtimes, so an mtime check can pass on stale content.
-- Refuse when: (a) HEAD differs from manifest.head; (b) a module on the classpath has a working-tree digest that differs
+- Refuse when: (a) HEAD differs from manifest.head; (b) a module on the classpath, or the reactor root, has a working-tree digest that differs
   from the manifest; (c) a recorded jar or classes-dir digest no longer matches; (d) the classpath holds a reactor artifact
   from outside this checkout (an .m2-local SNAPSHOT jar). `BB_STALE_OK=1` is refused. The only way past is a rebuild.
 - Mutation flow: bb-mutate applies the mutant, which changes the module's working-tree digest, so a bare bb-test refuses
