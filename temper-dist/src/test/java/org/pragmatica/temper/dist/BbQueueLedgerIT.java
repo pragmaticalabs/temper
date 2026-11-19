@@ -51,8 +51,8 @@ class BbQueueLedgerIT {
         BbFixtures.executable(tools.resolve("bb-cp-record"), "#!/bin/sh\nexit 0\n");
         // the launch: `quick` exits at once, anything else is a JAVA process that holds until <dir>/<name>.go exists
         BbFixtures.executable(tools.resolve("launch"),
-                              "#!/bin/bash\n[ \"$1\" = quick ] && exit 0\nexec \"$HOLD_JAVA\" -cp \"$HOLD_CP\" " + Hold.class.getName()
-                             + " \"$HOLD_DIR/$1\"\n");
+                              "#!/bin/bash\n[ \"$1\" = quick ] && exit 0\nexec \"$HOLD_JAVA\" -cp \"$HOLD_CP\" '" + Hold.class.getName()
+                             + "' \"$HOLD_DIR/$1\"\n");  // single-quoted: the nested class name holds a '$'
         capFile = Files.writeString(dir.resolve("max-reactors"), "1\n");
         Files.writeString(dir.resolve("loadavg"), "0.00 0.00 0.00 1/1 1\n");
         Files.writeString(dir.resolve("meminfo"), "MemAvailable:   67108864 kB\n");
