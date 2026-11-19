@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+# bb-test <checkout-dir> <module> <Class[#method]>... [--repeat N]   (bb-test lane, design §2/§3)
+# Re-runs selected tests of ONE module without a maven pass: the JUnit Platform Console Launcher on
+# <module>/target/test-classes:<module>/target/classes:<cp recorded by the last green bb-build (.bb/cp/<module>.cp)>, with
+# -Daether.requireDocker=true. The launch is ONE queue ticket (cap, port group, netns slot, memory floor, load gate as for a build),
+# enqueued through bb-build (BB_LAUNCH makes the waiter run this script's __launch mode instead of maven), and NEVER deduped.
+# VERDICT = the java exit status (the ticket's rc, read with bb-wait/bb-await as for a build). --fail-if-no-tests: a selection that
+# matches nothing is red (java exit 2). Reports: <module>/target/bb-test-reports/<ticket>/ (with --repeat N>1: .../run<i>/), the
+# launcher's legacy XML, never surefire-reports; a count line (bb-testcount) is appended to .bb/build.log after each run.
+# STALE-JAR GUARD (rc 12, nothing queued; run again at launch, after any queue wait): bb-cp-record check. BB_STALE_OK (any value) is
+# refused. LAUNCHER: junit-platform-console-standalone 1.13.4, sha256-pinned, read from the host seed
+# (~/work/temper-m2-seed/org/junit/platform/...); absent or wrong sha = rc 14, the path and sha named; nothing is installed here.
+# Call rc: 0 queued (as bb-build); 2 usage; 12 stale-jar guard; 14 launcher jar absent/not the pin; others from bb-build (3, 4).
+# Mutation flow (§3) and BB_LOAD (§4) are not implemented here.
+set -euo pipefail
+SELF=$(readlink -f "$0"); HERE=$(dirname "$SELF")
+LAUNCHER_VERSION=1.13.4
+LAUNCHER_SHA=${BB_TEST_LAUNCHER_SHA:-3fdfc37e29744a9a67dd5365e81467e26fbde0b7aa204e6f8bbe79eeaa7ae892}
+LAUNCHER_JAR=${BB_TEST_LAUNCHER_JAR:-$HOME/work/temper-m2-seed/org/junit/platform/junit-platform-console-standalone/$LAUNCHER_VERSION/junit-platform-console-standalone-$LAUNCHER_VERSION.jar}
+SEL_RE='^[A-Za-z_$][A-Za-z0-9_.$]*(#[A-Za-z_$][A-Za-z0-9_$]*)?$'
+
+sha256_of() { if command -v sha256sum > /dev/null; then sha256sum "$1"; else shasum -a 256 "$1"; fi | cut -d' ' -f1; }
+launcher_ok() {
+  [ -f "$LAUNCHER_JAR" ] && [ "$(sha256_of "$LAUNCHER_JAR")" = "$LAUNCHER_SHA" ] && return 0
+  echo "bb-test: launcher jar missing or not the pin (rc 14): expected $LAUNCHER_JAR with sha256 $LAUNCHER_SHA (junit-platform-console-standalone $LAUNCHER_VERSION); add it to the host seed, nothing is installed by bb-test" >&2
+  return 14
+}
+
+if [ "${1:-}" = __launch ]; then
+  # ---- the queue ticket's job: runs where maven would, in the checkout. args: <module> <repeat> <selector>... [-D...] ----
+  shift
+  CO=$(pwd); MOD=$1; REPEAT=$2; shift 2
+  . "$HERE/bb-queue-lib.sh"
+  TICKET=""; N=0
+  for f in "$Q"/running/*; do [ -f "$f" ] && [ "$(field "$f" co)" = "$CO" ] && { TICKET=${f##*/}; N=$((N + 1)); }; done
+  [ "$N" = 1 ] || { echo "bb-test: cannot name this run's ticket ($N running tickets for $CO)" >&2; exit 1; }
+  "$HERE/bb-cp-record" check "$CO" "$MOD" || exit $?
+  launcher_ok || exit $?
+  JVM=(); SELS=()
+  for a in "$@"; do
+    case "$a" in
+      -D*) JVM+=("$a");;
+      *#*) SELS+=(--select-method "$a");;
+      *) SELS+=(--select-class "$a");;
+    esac
+  done
+  JAVA=${BB_TEST_JAVA:-${JAVA_HOME:-/usr/lib/jvm/java-25-openjdk-amd64}/bin/java}
+  CP="$CO/$MOD/target/test-classes:$CO/$MOD/target/classes:$(cat "$CO/.bb/cp/${MOD//\//__}.cp")"
+  RC=0
+  for i in $(seq "$REPEAT"); do
+    D=$CO/$MOD/target/bb-test-reports/$TICKET; [ "$REPEAT" = 1 ] || D=$D/run$i
+    mkdir -p "$D"
+    set +e
+    (cd "$CO/$MOD" && "$JAVA" ${JVM[@]+"${JVM[@]}"} -jar "$LAUNCHER_JAR" execute --disable-banner --fail-if-no-tests \
+        --class-path "$CP" --reports-dir "$D" "${SELS[@]}")
+    r=$?
+    set -e
+    echo "bb-test: run $i/$REPEAT java exit $r; $("$HERE/bb-testcount" "$D" 2>&1 | tr '\n' ' ')"
+    [ "$r" -le "$RC" ] || RC=$r
+  done
+  exit "$RC"
+fi
+
+[ $# -ge 3 ] || { echo "usage: bb-test <checkout> <module> <Class[#method]>... [--repeat N]" >&2; exit 2; }
+if [ -n "${BB_STALE_OK+x}" ]; then
+  echo "bb-test: BB_STALE_OK is refused (rc 12); the only way past a stale-jar refusal is a rebuild (bb-build)" >&2; exit 12
+fi
+CO=$1; MOD=${2%/}; shift 2
+[ -d "$CO" ] || { echo "bb-test: no such checkout: $CO" >&2; exit 2; }
+CO=$(cd "$CO" && pwd)
+[[ $MOD =~ ^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$ ]] && [[ $MOD != *..* ]] || { echo "bb-test: module must be a relative path below the checkout: $MOD" >&2; exit 2; }
+REPEAT=1; SELS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --repeat) [[ ${2:-} =~ ^[1-9][0-9]?$ ]] || { echo "bb-test: --repeat needs 1..99" >&2; exit 2; }; REPEAT=$2; shift 2;;
+    *) [[ $1 =~ $SEL_RE ]] || { echo "bb-test: not a Class[#method] selector: $1" >&2; exit 2; }; SELS+=("$1"); shift;;
+  esac
+done
+[ ${#SELS[@]} -gt 0 ] || { echo "usage: bb-test <checkout> <module> <Class[#method]>... [--repeat N]" >&2; exit 2; }
+"$HERE/bb-cp-record" check "$CO" "$MOD" || exit $?
+launcher_ok || exit $?
+. "$HERE/bb-queue-lib.sh"
+GROUP=${BB_PORT_GROUP:-}
+if [ -z "$GROUP" ]; then
+  GROUP=$(python3 "$HERE/bb-portgroup.py" "$PGM" "$CO" -pl "$MOD" test 2> /dev/null) || GROUP="1 classifier failed"
+  GROUP=${GROUP%% *}; case "$GROUP" in 0|1) ;; *) GROUP=1;; esac
+fi
+BB_LAUNCH=$SELF BB_NO_CP_RECORD=1 BB_DEDUP=0 BB_PORT_GROUP=$GROUP exec "$HERE/bb-build" "$CO" __launch "$MOD" "$REPEAT" "${SELS[@]}"
