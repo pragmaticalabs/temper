@@ -10,7 +10,11 @@
 # STALE-JAR GUARD (rc 12, nothing queued; run again at launch, after any queue wait): bb-cp-record check. BB_STALE_OK (any value) is
 # refused. LAUNCHER: junit-platform-console-standalone 1.13.4, sha256-pinned, read from the host seed
 # (~/work/temper-m2-seed/org/junit/platform/...); absent or wrong sha = rc 14, the path and sha named; nothing is installed here.
-# Call rc: 0 queued (as bb-build); 2 usage; 12 stale-jar guard; 14 launcher jar absent/not the pin; others from bb-build (3, 4).
+# VERSION GUARD (rc 15, checked with the launcher, at enqueue and at launch): the junit-platform version the checkout builds against,
+# read from its root pom.xml (<junit-platform.version>, else <junit.version> 5.N.P read as platform 1.N.P), must equal LAUNCHER_VERSION.
+# A different version = rc 15 naming both; a version that cannot be read (no property, not a literal x.y.z) = rc 15, fail closed, "cannot be determined".
+# Call rc: 0 queued (as bb-build); 2 usage; 12 stale-jar guard; 14 launcher jar absent/not the pin; 15 checkout's junit-platform version differs from
+# the launcher's or is undeterminable; others from bb-build (3, 4).
 # Mutation flow (§3) and BB_LOAD (§4) are not implemented here.
 set -euo pipefail
 SELF=$(readlink -f "$0"); HERE=$(dirname "$SELF")
@@ -26,6 +30,27 @@ launcher_ok() {
   return 14
 }
 
+platform_version_of() {  # <checkout>: the junit-platform version its root pom pins, or nothing
+  local pom=$1/pom.xml v
+  [ -f "$pom" ] || return 0
+  v=$(sed -n 's|.*<junit-platform\.version>[[:space:]]*\([^<[:space:]]*\)[[:space:]]*</junit-platform\.version>.*|\1|p' "$pom" | head -n 1)
+  if [ -z "$v" ]; then
+    v=$(sed -n 's|.*<junit\.version>[[:space:]]*5\.\([0-9][0-9]*\.[0-9][0-9]*\)[[:space:]]*</junit\.version>.*|1.\1|p' "$pom" | head -n 1)
+  fi
+  [[ $v =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && echo "$v"
+  return 0
+}
+version_ok() {  # <checkout>
+  local v; v=$(platform_version_of "$1")
+  if [ -z "$v" ]; then
+    echo "bb-test: the junit-platform version of $1 cannot be determined (rc 15): no literal <junit-platform.version> or <junit.version> 5.N.P in its root pom.xml; refusing, the launcher is $LAUNCHER_VERSION" >&2
+    return 15
+  fi
+  [ "$v" = "$LAUNCHER_VERSION" ] && return 0
+  echo "bb-test: the checkout's junit-platform version is $v but the launcher is $LAUNCHER_VERSION (rc 15); refusing: a launcher of another version can run the tests differently from maven" >&2
+  return 15
+}
+
 if [ "${1:-}" = __launch ]; then
   # ---- the queue ticket's job: runs where maven would, in the checkout. args: <module> <repeat> <selector>... [-D...] ----
   shift
@@ -35,6 +60,7 @@ if [ "${1:-}" = __launch ]; then
   for f in "$Q"/running/*; do [ -f "$f" ] && [ "$(field "$f" co)" = "$CO" ] && { TICKET=${f##*/}; N=$((N + 1)); }; done
   [ "$N" = 1 ] || { echo "bb-test: cannot name this run's ticket ($N running tickets for $CO)" >&2; exit 1; }
   "$HERE/bb-cp-record" check "$CO" "$MOD" || exit $?
+  version_ok "$CO" || exit $?
   launcher_ok || exit $?
   JVM=(); SELS=()
   for a in "$@"; do
@@ -78,6 +104,7 @@ while [ $# -gt 0 ]; do
 done
 [ ${#SELS[@]} -gt 0 ] || { echo "usage: bb-test <checkout> <module> <Class[#method]>... [--repeat N]" >&2; exit 2; }
 "$HERE/bb-cp-record" check "$CO" "$MOD" || exit $?
+version_ok "$CO" || exit $?
 launcher_ok || exit $?
 . "$HERE/bb-queue-lib.sh"
 GROUP=${BB_PORT_GROUP:-}

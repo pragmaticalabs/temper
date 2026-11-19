@@ -19,7 +19,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 class BbTestGuardIT {
     private static final Path REPORTS = Path.of("src", "test", "resources", "bb", "launcher-reports").toAbsolutePath();
 
-    private static final String ROOT_POM = "<project><modelVersion>4.0.0</modelVersion><groupId>g</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging></project>";
+    private static final String ROOT_POM = "<project><modelVersion>4.0.0</modelVersion><groupId>g</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><properties><junit.version>5.13.4</junit.version></properties></project>";
 
     @TempDir
     Path tmp;
@@ -181,6 +181,44 @@ class BbTestGuardIT {
         assertThat(run.rc()).isEqualTo(14);
         assertThat(run.stderr()).contains(missing.toString(),
                                           "3fdfc37e29744a9a67dd5365e81467e26fbde0b7aa204e6f8bbe79eeaa7ae892");
+    }
+
+    private BbFixtures.Outcome bbTestWithRootPom(String pom, Path launcher) throws Exception {
+        Files.writeString(co.resolve("pom.xml"), pom);
+        git("add", "-A");
+        git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "pom");
+        recorded();
+
+        return BbFixtures.run(List.of(BbFixtures.OPS_BB.resolve("bb-test").toString(),
+                                      co.toString(),
+                                      "app",
+                                      "SomeTest"),
+                              Map.of("BB_TEST_LAUNCHER_JAR", launcher.toString()),
+                              null,
+                              null);
+    }
+
+    @Test
+    void versionGuard_aCheckoutOnAnotherJunitPlatformVersion_isRefusedWithRc15_namingBoth() throws Exception {
+        var run = bbTestWithRootPom(ROOT_POM.replace("5.13.4", "5.12.2"), tmp.resolve("no-launcher.jar"));
+
+        assertThat(run.rc()).as(run.stderr()).isEqualTo(15);
+        assertThat(run.stderr()).contains("1.12.2", "1.13.4");
+    }
+
+    @Test
+    void versionGuard_anUndeterminableVersion_isRefusedWithRc15_failClosed() throws Exception {
+        var run = bbTestWithRootPom(ROOT_POM.replace("5.13.4", "${some.var}"), tmp.resolve("no-launcher.jar"));
+
+        assertThat(run.rc()).as(run.stderr()).isEqualTo(15);
+        assertThat(run.stderr()).contains("cannot be determined");
+    }
+
+    @Test
+    void versionGuard_theMatchingVersion_passesTheCheck_andReachesTheLauncherCheck() throws Exception {
+        var run = bbTestWithRootPom(ROOT_POM, tmp.resolve("no-launcher.jar"));
+
+        assertThat(run.rc()).as(run.stderr()).isEqualTo(14);
     }
 
     @Test
