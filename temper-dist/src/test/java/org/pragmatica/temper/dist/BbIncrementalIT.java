@@ -19,7 +19,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /// `ops/bb/bb-modules.py` and `bb-build --since` (design docs/bb-build-once-design.md §1, control 9) on a fixture reactor:
 /// `build-parent` (pom packaging, parent of every module), `m` (the changed leaf), `u` (a leaf), `d` -> m, u, `x` -> d, `y` -> u, `z`.
-/// The expected `-pl` strings are literal fixtures. Dependent D of M has a second upstream U, so S for a change in M must hold U.
+/// The `-pl` list is ALWAYS sorted lexicographically by module path (`sorted()` in bb-modules.py select(), the only producer), so `build-parent` sorts after `bdep`/`blib`. The expected `-pl` strings are literal fixtures. Dependent D of M has a second upstream U, so S for a change in M must hold U.
 ///
 /// Probes (2026-11-19): close upstream over C instead of C u amd(C) in select() -> [#leafChange_selectsTheLeafItsDependents_andTheirOtherUpstreams]
 /// red; skip the aggregator/parent/pom-packaging FULL -> [#parentPomChange_runsTheFullReactor] red; skip the unmapped-path FULL ->
