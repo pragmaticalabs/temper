@@ -120,13 +120,13 @@ class BbInstallIT {
             return walk.sorted()
                        .map(path -> {
                                 try {
-                                return path.getFileName()
-                                     + " " + Files.size(path)
-                                     + " " + BbFixtures.md5(path)
-                                     + " " + PosixFilePermissions.toString(Files.getPosixFilePermissions(path));
-                            } catch (IOException e) {
-                                throw new IllegalStateException(e);
-                            }
+                                    return path.getFileName()
+                                         + " " + Files.size(path)
+                                         + " " + BbFixtures.md5(path)
+                                         + " " + PosixFilePermissions.toString(Files.getPosixFilePermissions(path));
+                                } catch (IOException e) {
+                                    throw new IllegalStateException(e);
+                                }
                             })
                        .collect(Collectors.toList());
         }
@@ -197,6 +197,8 @@ class BbInstallIT {
         assertThat(pin("BB_LIB_PREMEM")).isEqualTo(BbFixtures.md5(prev("bb-queue-lib.sh.premem")));
         assertThat(pin("BB_QUEUE_PREMEM")).isEqualTo(BbFixtures.md5(prev("bb-queue.premem")));
         assertThat(pin("BB_BUILD_PRECAP")).isEqualTo(BbFixtures.md5(prev("bb-build.precap")));
+        assertThat(pin("BB_BUILD_PRESINCE")).isEqualTo(BbFixtures.md5(prev("bb-build.presince")));
+        assertThat(pin("BB_PORTGROUP_PRESINCE")).isEqualTo(BbFixtures.md5(prev("bb-portgroup.py.presince")));
         assertThat(pin("BB_LIB_PRECAP")).isEqualTo(BbFixtures.md5(prev("bb-queue-lib.sh.precap")));
         assertThat(pin("BB_QUEUE_PRECAP")).isEqualTo(BbFixtures.md5(prev("bb-queue.precap")));
         assertThat(pin("BB_HOLD_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-hold")));
@@ -476,6 +478,25 @@ class BbInstallIT {
         }
     }
 
+    /// The bb-build and bb-portgroup.py before `--since` (BB_BUILD_PRESINCE, BB_PORTGROUP_PRESINCE) are accepted sources and are replaced, backed up under their md5.
+    @Test
+    void aHostRunningThePreSinceBuild_isUpdatedToTheOneWithSince() throws Exception {
+        var tools = host("h1");
+
+        assertThat(install("builder@h1").rc()).isZero();
+        Files.write(tools.resolve("bb-build"), prev("bb-build.presince"));
+        Files.write(tools.resolve("bb-portgroup.py"), prev("bb-portgroup.py.presince"));
+        var run = install("builder@h1");
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        assertThat(run.stdout()).contains("installed builder@h1 bb-build before=" + pin("BB_BUILD_PRESINCE")
+                                         + " after=" + pin("BB_BUILD_NEW"),
+                                          "installed builder@h1 bb-portgroup.py before=" + pin("BB_PORTGROUP_PRESINCE")
+                                         + " after=" + pin("BB_PORTGROUP_NEW"));
+        assertThat(tools.resolve("bb-build.bak-" + pin("BB_BUILD_PRESINCE"))).hasBinaryContent(prev("bb-build.presince"));
+        assertThat(tools.resolve("bb-portgroup.py.bak-" + pin("BB_PORTGROUP_PRESINCE"))).hasBinaryContent(prev("bb-portgroup.py.presince"));
+    }
+
     /// The bb-netns-run of 2026-11-11 (BB_NETNS_PREV, no docker socket in the container; live on c3/c4/d1) is an accepted source and is replaced, backed up under its md5.
     @Test
     void aHostRunningThePreviousNetnsRun_isUpdatedToTheOneThatReachesDocker() throws Exception {
@@ -579,6 +600,7 @@ class BbInstallIT {
                                                                  + "|" + pin("BB_BUILD_PREVIA")
                                                                  + "|" + pin("BB_BUILD_PREMEM")
                                                                  + "|" + pin("BB_BUILD_PRECAP")
+                                                                 + "|" + pin("BB_BUILD_PRESINCE")
                                                                  + "|" + pin("BB_BUILD_NEW"));
         assertThat(listing(good)).isEqualTo(goodBefore);
         assertThat(listing(diverged)).isEqualTo(divergedBefore);

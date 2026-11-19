@@ -12,9 +12,9 @@
 #   everything before <target>, and then no config is read.
 # Phase 0, local: the ten files of ops/bb (next to this script) named below must be the pinned reviewed files, else exit 65
 #   with no ssh made.
-# Phase 1, read-only, EVERY target first: installed bb-build is one of BB_BUILD_OLD|MID|PREV|LIVE|PRE31|PRERC|PREVIA|PREMEM|PRECAP|NEW, bb-queue-lib.sh one of BB_LIB_OLD|PREV|PRERC|PREMEM|PRECAP|NEW,
+# Phase 1, read-only, EVERY target first: installed bb-build is one of BB_BUILD_OLD|MID|PREV|LIVE|PRE31|PRERC|PREVIA|PREMEM|PRECAP|PRESINCE|NEW, bb-queue-lib.sh one of BB_LIB_OLD|PREV|PRERC|PREMEM|PRECAP|NEW,
 #   bb-queue one of BB_QUEUE_OLD|PREV|LIVE|PRE31|PRERC|PREVIA|PREMEM|PRECAP|NEW, bb-tickets is absent, BB_TICKETS_OLD|PRE31|NEW, bb-hold is absent, BB_HOLD_OLD (the 2026-11-09
-#   host snapshot) or BB_HOLD_NEW, bb-wait is absent, BB_WAIT_PRERC or its NEW, bb-await is absent or BB_AWAIT_NEW, bb-netns-run is absent, BB_NETNS_PREV or BB_NETNS_NEW, bb-portgroup.py is absent, BB_PORTGROUP_PREV or BB_PORTGROUP_NEW, bb-mutate is absent, BB_MUTATE_OLD, BB_MUTATE_PREVIA or BB_MUTATE_NEW. Any mismatch prints `refused <target> <file> installed=<md5|absent>
+#   host snapshot) or BB_HOLD_NEW, bb-wait is absent, BB_WAIT_PRERC or its NEW, bb-await is absent or BB_AWAIT_NEW, bb-netns-run is absent, BB_NETNS_PREV or BB_NETNS_NEW, bb-portgroup.py is absent, BB_PORTGROUP_PREV, BB_PORTGROUP_PRESINCE or BB_PORTGROUP_NEW, bb-mutate is absent, BB_MUTATE_OLD, BB_MUTATE_PREVIA or BB_MUTATE_NEW. Any mismatch prints `refused <target> <file> installed=<md5|absent>
 #   expected=<pin>[|<pin>...]` (every accepted pin except `absent`, in the order above) for every mismatch on every target and exits 65 having written nothing anywhere; an unreachable target is 69.
 # Phase 2, per target and per file to change (bb-mutate, bb-tickets, bb-hold, bb-wait, bb-await, bb-netns-run, bb-portgroup.py, bb-queue-lib.sh, bb-queue,
 #   then bb-build: the helpers and the lib before the tools that call or source them), one remote `bash -s` script: receive the file as
@@ -55,7 +55,8 @@ readonly BB_BUILD_PRERC=50920a7137f237aaa512d84d117ad4f2   # live on all four ho
 readonly BB_BUILD_PREVIA=01e0bc34ea0effa8a8273a781f8ea52d   # live from the 2026-11-13 install: no via= ticket field (issue #46)
 readonly BB_BUILD_PREMEM=eb10b2f4ea6c244444e95aa56bcf7e09
 readonly BB_BUILD_PRECAP=8478b2174ce3ff6de293b55a283e3ce7   # the #53 version: comments only differ (issue #56)
-readonly BB_BUILD_NEW=12c68a554862caa672f7211456dfc84c
+readonly BB_BUILD_PRESINCE=12c68a554862caa672f7211456dfc84c   # the #56 version: no --since (docs/bb-build-once-design.md section 1)
+readonly BB_BUILD_NEW=848e11b98fb1b10705de810e25f96103
 readonly BB_TICKETS_OLD=472cd816644fe0ee0902b8da3d33de8e   # before the per-ticket progressAt (issue #10)
 readonly BB_TICKETS_PRE31=e1aeba98541ba781295001f956b08c8d   # live since 2026-11-12: drops a ticket key with a capital letter
 readonly BB_TICKETS_NEW=6174119f0cd567c5dc462d1e063c6214
@@ -68,7 +69,8 @@ readonly BB_AWAIT_NEW=56523085fccf5678eb7c208e7352c11b
 readonly BB_NETNS_PREV=9661165d4ef938ea43eec5b8d2d619d9   # 2026-11-11: no docker socket in the container; live on c3/c4/d1
 readonly BB_NETNS_NEW=bf05b7c51c2f7863ee685a195273e195
 readonly BB_PORTGROUP_PREV=a93ade2ff7dddcc75cee3d4169a08499   # the 2026-11-09 host snapshot, live on c4/d1 since 2026-11-11
-readonly BB_PORTGROUP_NEW=884caf3cf37b12cf5cf1d97e96f76a4c
+readonly BB_PORTGROUP_PRESINCE=884caf3cf37b12cf5cf1d97e96f76a4c   # before the pom walk and closures were factored out for bb-modules.py
+readonly BB_PORTGROUP_NEW=8ad1c6dbe2044f984814c2b19645c48b
 readonly BB_MUTATE_OLD=f9bfbd37c5feafe67995f6716e8fecb0   # the host snapshot, identical on all four hosts: batch credit unsound for multi-module specs
 readonly BB_MUTATE_PREVIA=2c341d44d428ba445db7ea03ee90af64   # the batch-sound version (#41): does not export BB_VIA (issue #46)
 readonly BB_MUTATE_NEW=130f094861c0f835869ff42230d7bffb
@@ -100,12 +102,12 @@ new_of() {
 }
 accepted_of() {  # the md5s a host may hold besides absent, in the order the refusal names them
   case $1 in
-    bb-build) echo "$BB_BUILD_OLD $BB_BUILD_MID $BB_BUILD_PREV $BB_BUILD_LIVE $BB_BUILD_PRE31 $BB_BUILD_PRERC $BB_BUILD_PREVIA $BB_BUILD_PREMEM $BB_BUILD_PRECAP $BB_BUILD_NEW" ;;
+    bb-build) echo "$BB_BUILD_OLD $BB_BUILD_MID $BB_BUILD_PREV $BB_BUILD_LIVE $BB_BUILD_PRE31 $BB_BUILD_PRERC $BB_BUILD_PREVIA $BB_BUILD_PREMEM $BB_BUILD_PRECAP $BB_BUILD_PRESINCE $BB_BUILD_NEW" ;;
     bb-queue-lib.sh) echo "$BB_LIB_OLD $BB_LIB_PREV $BB_LIB_PRERC $BB_LIB_PREMEM $BB_LIB_PRECAP $BB_LIB_NEW" ;;
     bb-queue) echo "$BB_QUEUE_OLD $BB_QUEUE_PREV $BB_QUEUE_LIVE $BB_QUEUE_PRE31 $BB_QUEUE_PRERC $BB_QUEUE_PREVIA $BB_QUEUE_PREMEM $BB_QUEUE_PRECAP $BB_QUEUE_NEW" ;;
     bb-hold) echo "$BB_HOLD_OLD $BB_HOLD_NEW" ;;
     bb-tickets) echo "$BB_TICKETS_OLD $BB_TICKETS_PRE31 $BB_TICKETS_NEW" ;;
-    bb-portgroup.py) echo "$BB_PORTGROUP_PREV $BB_PORTGROUP_NEW" ;;
+    bb-portgroup.py) echo "$BB_PORTGROUP_PREV $BB_PORTGROUP_PRESINCE $BB_PORTGROUP_NEW" ;;
     bb-netns-run) echo "$BB_NETNS_PREV $BB_NETNS_NEW" ;;
     bb-wait) echo "$BB_WAIT_PRERC $BB_WAIT_NEW" ;;
     bb-await) echo "$BB_AWAIT_NEW" ;;
