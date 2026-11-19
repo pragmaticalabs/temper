@@ -558,7 +558,7 @@ class BbJbctBootstrapIT {
     void negativeControl_hookRemoved_theMainRunHasNoBootstrap_andTheCheckGoesRed() throws Exception {
         var stripped = Files.readAllLines(tools.resolve("bb-build"))
                             .stream()
-                            .filter(l -> !l.contains("bb-jbct-bootstrap\" \"$CO\""))
+                            .filter(l -> !l.contains("\"$HELPER\" \"$CO\""))
                             .collect(Collectors.joining("\n", "", "\n"));
         // its own directory and the name bb-build: the queue finds a waiter by the text "bb-build __run <id>"
         var bare = Files.createDirectories(dir.resolve("nohook"));
