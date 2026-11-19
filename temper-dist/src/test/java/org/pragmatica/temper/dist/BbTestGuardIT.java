@@ -198,11 +198,21 @@ class BbTestGuardIT {
                               null);
     }
 
+    private static final String POM_HEAD = "<project><modelVersion>4.0.0</modelVersion><groupId>g</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging>";
+
+    private BbFixtures.Outcome versionOf(String pomBody) throws Exception {
+        return bbTestWithRootPom(POM_HEAD + pomBody + "</project>", tmp.resolve("no-launcher.jar"));
+    }
+
+    private void refused15(BbFixtures.Outcome run) {
+        assertThat(run.rc()).as(run.stderr()).isEqualTo(15);
+    }
+
     @Test
     void versionGuard_aCheckoutOnAnotherJunitPlatformVersion_isRefusedWithRc15_namingBoth() throws Exception {
         var run = bbTestWithRootPom(ROOT_POM.replace("5.13.4", "5.12.2"), tmp.resolve("no-launcher.jar"));
 
-        assertThat(run.rc()).as(run.stderr()).isEqualTo(15);
+        refused15(run);
         assertThat(run.stderr()).contains("1.12.2", "1.13.4");
     }
 
@@ -210,7 +220,7 @@ class BbTestGuardIT {
     void versionGuard_anUndeterminableVersion_isRefusedWithRc15_failClosed() throws Exception {
         var run = bbTestWithRootPom(ROOT_POM.replace("5.13.4", "${some.var}"), tmp.resolve("no-launcher.jar"));
 
-        assertThat(run.rc()).as(run.stderr()).isEqualTo(15);
+        refused15(run);
         assertThat(run.stderr()).contains("cannot be determined");
     }
 
@@ -219,6 +229,201 @@ class BbTestGuardIT {
         var run = bbTestWithRootPom(ROOT_POM, tmp.resolve("no-launcher.jar"));
 
         assertThat(run.rc()).as(run.stderr()).isEqualTo(14);
+    }
+
+    @Test
+    void versionGuard_aCommentedOutPlatformProperty_isNotRead() throws Exception {
+        var run = versionOf("<properties><!-- <junit-platform.version>1.13.4</junit-platform.version> --><junit.version>5.12.2</junit.version></properties>");
+
+        refused15(run);
+        assertThat(run.stderr()).contains("1.12.2");
+    }
+
+    @Test
+    void versionGuard_twoDefinitions_areRefused_evenWhenTheFirstMatches() throws Exception {
+        refused15(versionOf("<properties><junit-platform.version>1.13.4</junit-platform.version><junit-platform.version>1.12.0</junit-platform.version></properties>"));
+    }
+
+    @Test
+    void versionGuard_aPropertyOutsideProjectProperties_isNotRead() throws Exception {
+        var run = versionOf("<dependencyManagement><junit-platform.version>1.13.4</junit-platform.version></dependencyManagement>");
+
+        refused15(run);
+        assertThat(run.stderr()).contains("cannot be determined");
+    }
+
+    @Test
+    void versionGuard_aPropertyReference_isRefused() throws Exception {
+        refused15(versionOf("<properties><junit-platform.version>${junit.platform}</junit-platform.version></properties>"));
+    }
+
+    @Test
+    void versionGuard_aSixDotXJunitVersion_isRefused() throws Exception {
+        refused15(versionOf("<properties><junit.version>6.0.0</junit.version></properties>"));
+    }
+
+    @Test
+    void versionGuard_aSnapshotVersion_isRefused() throws Exception {
+        refused15(versionOf("<properties><junit-platform.version>1.13.4-SNAPSHOT</junit-platform.version></properties>"));
+    }
+
+    @Test
+    void versionGuard_aCrlfPomWithTheMatchingVersion_isAccepted() throws Exception {
+        var pom = POM_HEAD
+                + "\r\n<properties>\r\n<junit.version>\r\n  5.13.4 \r\n</junit.version>\r\n</properties>\r\n</project>\r\n";
+        var run = bbTestWithRootPom(pom, tmp.resolve("no-launcher.jar"));
+
+        assertThat(run.rc()).as(run.stderr()).isEqualTo(14);
+    }
+
+    private BbFixtures.Outcome launchDirect(String pom) throws Exception {
+        // what the queue's waiter runs for a bb-test ticket, with the enqueue-time check out of the way: __launch in the checkout,
+        // with one running ticket naming it
+        Files.writeString(co.resolve("pom.xml"), pom);
+        git("add", "-A");
+        git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "pom");
+        recorded();
+        var running = Files.createDirectories(tmp.resolve("q").resolve("running"));
+
+        Files.writeString(running.resolve("T1"), "id=T1\nco=" + co + "\n");
+
+        return BbFixtures.run(List.of(BbFixtures.OPS_BB.resolve("bb-test").toString(),
+                                      "__launch",
+                                      "app",
+                                      "1",
+                                      "SomeTest"),
+                              Map.of("BB_TEST_QUEUE_ROOT",
+                                     tmp.resolve("q").toString(),
+                                     "BB_TEST_LAUNCHER_JAR",
+                                     tmp.resolve("no-launcher.jar").toString()),
+                              co,
+                              null);
+    }
+
+    @Test
+    void launchTime_aCheckoutOnAnotherJunitPlatformVersion_isRefusedWithRc15() throws Exception {
+        var run = launchDirect(ROOT_POM.replace("5.13.4", "5.12.2"));
+
+        assertThat(run.rc()).as(run.stderr()).isEqualTo(15);
+        assertThat(run.stderr()).contains("1.12.2", "1.13.4");
+    }
+
+    @Test
+    void launchTime_theMatchingVersion_reachesTheLauncherCheck() throws Exception {
+        assertThat(launchDirect(ROOT_POM).rc()).isEqualTo(14);
+    }
+
+    @Test
+    void control3c_aClasspathEntryTheManifestNeverRecorded_isRefusedUnderC() throws Exception {
+        recorded();
+        var manifest = co.resolve(".bb").resolve("cp").resolve("manifest");
+        var kept = Files.readAllLines(manifest)
+                        .stream()
+                        .filter(l -> !l.startsWith("entry app lib/target/classes "))
+                        .toList();
+
+        assertThat(kept).hasSize(Files.readAllLines(manifest).size() - 1);
+        Files.write(manifest, kept);
+        var run = check();
+
+        assertThat(run.rc()).isEqualTo(12);
+        assertThat(run.stderr()).contains("guard (c)", "lib/target/classes was never recorded");
+    }
+
+    @Test
+    void record_leavesNoTargetBbCpTxt_andKeepsTheClasspathUnderDotBb() throws Exception {
+        recorded();
+        assertThat(co.resolve("lib/target/bb-cp.txt")).doesNotExist();
+        assertThat(co.resolve("app/target/bb-cp.txt")).doesNotExist();
+        assertThat(co.resolve(".bb/cp/app.cp")).exists();
+        assertThat(co.resolve(".bb/cp/lib.cp")).exists();
+    }
+
+    @Test
+    void digest_rootPomEditedAfterTheBuild_isRefusedUnderB_namingTheReactorRoot() throws Exception {
+        recorded();
+        Files.writeString(co.resolve("pom.xml"), ROOT_POM.replace("<version>1</version>", "<version>2</version>"));
+        var run = check();
+
+        assertThat(run.rc()).isEqualTo(12);
+        assertThat(run.stderr()).contains("guard (b)", "reactor root");
+    }
+
+    @Test
+    void digest_aFileUnderDotMvnAddedAfterTheBuild_isRefusedUnderB_namingTheReactorRoot() throws Exception {
+        recorded();
+        Files.createDirectories(co.resolve(".mvn"));
+        Files.writeString(co.resolve(".mvn").resolve("jvm.config"),
+                          "-Dx=1");
+        var run = check();
+
+        assertThat(run.rc()).isEqualTo(12);
+        assertThat(run.stderr()).contains("reactor root");
+    }
+
+    @Test
+    void digest_aParentPomNotOnTheClasspathEditedAfterTheBuild_isRefusedUnderB_namingTheReactorRoot() throws Exception {
+        Files.createDirectories(co.resolve("parent"));
+        Files.writeString(co.resolve("parent").resolve("pom.xml"),
+                          "<project><modelVersion>4.0.0</modelVersion></project>");
+        git("add", "-A");
+        git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "parent");
+        recorded();
+        Files.writeString(co.resolve("parent").resolve("pom.xml"),
+                          "<project><modelVersion>4.0.0</modelVersion><version>9</version></project>");
+        var run = check();
+
+        assertThat(run.rc()).isEqualTo(12);
+        assertThat(run.stderr()).contains("reactor root");
+    }
+
+    @Test
+    void digest_anExecBitFlippedAfterTheBuild_isRefusedUnderB() throws Exception {
+        recorded();
+        var src = co.resolve("lib").resolve("src").resolve("A.java");
+
+        Files.setPosixFilePermissions(src, java.nio.file.attribute.PosixFilePermissions.fromString("rwxr-xr-x"));
+        var run = check();
+
+        assertThat(run.rc()).isEqualTo(12);
+        assertThat(run.stderr()).contains("module lib", "guard (b)");
+    }
+
+    private static String sha256(String text) throws Exception {
+        return java.util.HexFormat.of()
+                                  .formatHex(java.security.MessageDigest.getInstance("SHA-256")
+                                                                        .digest(text.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+    }
+
+    @Test
+    void digest_oneFileNamedLikeTwoDigestLines_isNotTheSameTreeAsTwoFiles() throws Exception {
+        // under "path<TAB>sha<LF>" lines, {lib/x: A, lib/y: B} and the single file "lib/x<TAB>sha(A)<LF>lib/y" (a directory named "x<TAB>sha(A)<LF>lib" holding y): B hash alike
+        var lib = co.resolve("lib");
+
+        Files.writeString(lib.resolve("x"), "A");
+        Files.writeString(lib.resolve("y"), "B");
+        recorded();
+        Files.delete(lib.resolve("x"));
+        Files.delete(lib.resolve("y"));
+        var weird = Files.createDirectories(lib.resolve("x\t" + sha256("A") + "\nlib"));
+
+        Files.writeString(weird.resolve("y"), "B");
+        var run = check();
+
+        assertThat(run.rc()).isEqualTo(12);
+        assertThat(run.stderr()).contains("guard (b)");
+    }
+
+    @Test
+    void digest_aNonUtf8FileName_isRefusedWithRc12_andAMessage_neverATraceback() throws Exception {
+        recorded();
+        var made = BbFixtures.run(List.of("bash", "-c", "touch lib/$'\\xff'.txt"), Map.of(), co, null);
+
+        assertThat(made.rc()).as(made.stderr()).isZero();
+        var run = check();
+
+        assertThat(run.rc()).isEqualTo(12);
+        assertThat(run.stderr()).contains("not valid UTF-8").doesNotContain("Traceback");
     }
 
     @Test
