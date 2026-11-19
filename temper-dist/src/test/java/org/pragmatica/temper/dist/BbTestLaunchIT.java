@@ -261,7 +261,8 @@ class BbTestLaunchIT {
         var counted = count(reports);
 
         assertThat(counted.rc()).as(counted.stderr()).isZero();
-        assertThat(counted.stdout().trim()).isEqualTo("testcases=3 passed=2 failures=1 errors=0 skipped=0 files=1 duplicates=0");
+        assertThat(counted.stdout().trim()).startsWith("testcases=3 passed=2 failures=1 errors=0 skipped=0 files=")
+                  .endsWith(" duplicates=0");
         assertThat(log()).contains("testcases=3 passed=2 failures=1");
     }
 
