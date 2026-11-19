@@ -352,6 +352,19 @@ class BbJbctBootstrapIT {
         assertThat(r.installs()).containsExactly("install -B -DskipTests -pl " + LIST + " -am");
     }
 
+    @Test
+    void realMainShape_pickedListIsThePluginsOne_versionIsMainsRc4() throws Exception {
+        var r = run(checkout(resource("/bb/jbct-bootstrap-main-ci.yml"),
+                             resource("/bb/jbct-bootstrap-main-pom.xml"),
+                             false),
+                    "-B",
+                    "jbct:check");
+
+        assertThat(r.rc()).isZero();
+        assertThat(r.log()).contains("bootstrap: jbct plugin 1.0.0-rc4 installed into .m2-local");
+        assertThat(r.installs()).containsExactly("install -B -DskipTests -pl " + LIST + " -am");
+    }
+
     private static String resource(String name) throws IOException {
         try (var in = BbJbctBootstrapIT.class.getResourceAsStream(name)) {
             assertThat(in).as(name).isNotNull();
