@@ -197,6 +197,7 @@ class BbInstallIT {
         assertThat(pin("BB_LIB_PREMEM")).isEqualTo(BbFixtures.md5(prev("bb-queue-lib.sh.premem")));
         assertThat(pin("BB_QUEUE_PREMEM")).isEqualTo(BbFixtures.md5(prev("bb-queue.premem")));
         assertThat(pin("BB_BUILD_PRECAP")).isEqualTo(BbFixtures.md5(prev("bb-build.precap")));
+        assertThat(pin("BB_BUILD_PRECP")).isEqualTo(BbFixtures.md5(prev("bb-build.precp")));
         assertThat(pin("BB_LIB_PRECAP")).isEqualTo(BbFixtures.md5(prev("bb-queue-lib.sh.precap")));
         assertThat(pin("BB_QUEUE_PRECAP")).isEqualTo(BbFixtures.md5(prev("bb-queue.precap")));
         assertThat(pin("BB_HOLD_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-hold")));
@@ -476,6 +477,22 @@ class BbInstallIT {
         }
     }
 
+    /// The bb-build of issue #56 (BB_BUILD_PRECP: no bb-cp-record hook, no BB_LAUNCH) is an accepted source and is replaced, backed up under its md5.
+    @Test
+    void aHostRunningThePreBbTestBuild_isUpdatedToTheOneWithTheClasspathRecord() throws Exception {
+        var tools = host("h1");
+
+        assertThat(install("builder@h1").rc()).isZero();
+        Files.write(tools.resolve("bb-build"), prev("bb-build.precp"));
+
+        var run = install("builder@h1");
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        assertThat(run.stdout()).contains("installed builder@h1 bb-build before=" + pin("BB_BUILD_PRECP") + " after=" + pin("BB_BUILD_NEW"));
+        assertThat(tools.resolve("bb-build")).hasBinaryContent(Files.readAllBytes(OPS_BB.resolve("bb-build")));
+        assertThat(tools.resolve("bb-build.bak-" + pin("BB_BUILD_PRECP"))).hasBinaryContent(prev("bb-build.precp"));
+    }
+
     /// The bb-netns-run of 2026-11-11 (BB_NETNS_PREV, no docker socket in the container; live on c3/c4/d1) is an accepted source and is replaced, backed up under its md5.
     @Test
     void aHostRunningThePreviousNetnsRun_isUpdatedToTheOneThatReachesDocker() throws Exception {
@@ -579,6 +596,7 @@ class BbInstallIT {
                                                                  + "|" + pin("BB_BUILD_PREVIA")
                                                                  + "|" + pin("BB_BUILD_PREMEM")
                                                                  + "|" + pin("BB_BUILD_PRECAP")
+                                                                 + "|" + pin("BB_BUILD_PRECP")
                                                                  + "|" + pin("BB_BUILD_NEW"));
         assertThat(listing(good)).isEqualTo(goodBefore);
         assertThat(listing(diverged)).isEqualTo(divergedBefore);

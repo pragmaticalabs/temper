@@ -31,6 +31,9 @@
 # already ended) is finalized as orphaned with NO rc: bb-wait exits 70, and .bb/rc is not read into it. .bb/rc is a read-only (444) copy
 # written before the ticket is finalized, replaced only by rm/rename (write_rc in the lib), never by `>`.
 # GUARANTEE: the verdict comes from mvn's exit status, never from the checkout; any later disagreement in the checkout is detected (RC-MISMATCH, exit 71); deliberate tampering with queue/done by the same uid stays possible.
+# BB-TEST (2026-11, bb-test lane): a GREEN build then runs bb-cp-record (offline test-compile + dependency:build-classpath; writes .bb/cp/<module>.cp and
+# .bb/cp/manifest for bb-test's stale-jar guard); its failure is logged and never changes rc. BB_LAUNCH=<cmd> makes the waiter run <cmd> instead of maven
+# (bb-test's own __launch mode); such a ticket sets BB_NO_CP_RECORD=1 and BB_DEDUP=0.
 # Every ticket reaching done/ appends one line to ~/work/bb-ticket-log.tsv. `bb-wait <ticket>` blocks until it finishes (exit = rc).
 # TICKET OWNER FIELDS (T3, 2026-11): the ticket gains optional key=value lines after group_reason= and before args= (readers
 # take the LAST line of a key, so every existing reader ignores them): session_pid, session_start (epoch s) and session_label
@@ -50,7 +53,7 @@ if [ "${1:-}" = --detached ]; then
 fi
 if [ "${1:-}" != __run ] && [ "${BB_QUEUE:-1}" = 0 ]; then exec "$(dirname "$SELF")/bb-build-direct" "$@"; fi
 . "$(dirname "$SELF")/bb-queue-lib.sh"
-MVN=${BB_TEST_MVN:-$HOME/tools/maven/bin/mvn}
+MVN=${BB_LAUNCH:-${BB_TEST_MVN:-$HOME/tools/maven/bin/mvn}}   # BB_LAUNCH: bb-test enqueues a ticket whose job is its own __launch mode, not maven
 
 if [ "${1:-}" = __run ]; then
   # ---- waiter: one detached process per ticket; becomes the maven job wrapper when granted ----
@@ -84,6 +87,7 @@ if [ "${1:-}" = __run ]; then
       env -u HCLOUD_TOKEN JAVA_HOME=/usr/lib/jvm/java-25-openjdk-amd64 "$MVN" "$@" ${RDF[@]+"${RDF[@]}"} > "$B/build.log" 2>&1
     fi
     rc=$?; date +%s > "$B/end"
+    [ "$rc" != 0 ] || "$(dirname "$SELF")/bb-cp-record" record "$CO" "$@" >> "$B/build.log" 2>&1 || true   # bb-test lane: classpath + manifest of a GREEN build; never changes rc
     write_rc "$B" "$rc"   # convenience copy for pollers, 444; the ticket's rc= comes from this subshell's exit status below
     exit "$rc"
   ) 8>&- &

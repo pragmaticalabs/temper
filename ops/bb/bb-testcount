@@ -1,0 +1,40 @@
+#!/usr/bin/env python3
+# bb-testcount <reports-dir>  (bb-test lane, control 7) -- counts the <testcase> elements of every TEST-*.xml DIRECTLY in <reports-dir>
+# (legacy XML, as the JUnit Platform Console Launcher writes it with --reports-dir). Prints one line:
+#   testcases=N passed=P failures=F errors=E skipped=S files=K duplicates=D
+# A testcase counts once per element (never the tests= attribute); failures/errors/skipped count testcases with that child.
+# Exit 0 = counted; 4 = no TEST-*.xml or no testcase at all (an empty or wrong dir is never "0 failures"); 3 = a (classname, name)
+# pair occurs twice (another run's report landed in the same dir: the count would be double). The directory is always an explicit
+# argument: bb-test never points this at a surefire/failsafe dir.
+import glob, os, sys, xml.etree.ElementTree as ET
+
+
+def main(argv):
+    if len(argv) != 1 or not os.path.isdir(argv[0]):
+        sys.stderr.write('usage: bb-testcount <reports-dir>\n')
+        return 2
+    files = sorted(glob.glob(os.path.join(argv[0], 'TEST-*.xml')))
+    n = f = e = s = dup = 0
+    seen = set()
+    for path in files:
+        for case in ET.parse(path).getroot().iter('testcase'):
+            kinds = {c.tag for c in case}
+            n += 1
+            f += 'failure' in kinds
+            e += 'error' in kinds
+            s += 'skipped' in kinds
+            key = (case.get('classname'), case.get('name'))
+            dup += key in seen
+            seen.add(key)
+    print('testcases=%d passed=%d failures=%d errors=%d skipped=%d files=%d duplicates=%d' % (n, n - f - e - s, f, e, s, len(files), dup))
+    if not files or n == 0:
+        sys.stderr.write('bb-testcount: no testcase in %s\n' % argv[0])
+        return 4
+    if dup:
+        sys.stderr.write('bb-testcount: %d duplicate testcase(s) in %s\n' % (dup, argv[0]))
+        return 3
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))
