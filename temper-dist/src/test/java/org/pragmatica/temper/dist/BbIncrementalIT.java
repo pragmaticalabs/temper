@@ -84,6 +84,14 @@ class BbIncrementalIT {
                  .toString();
     }
 
+    private static String with(String pom, String extraXml) {
+        return pom.replace("</project>\n", extraXml + "\n</project>\n");
+    }
+
+    private static String depOn(String artifactId, String extra) {
+        return "<dependency><groupId>g</groupId><artifactId>" + artifactId + "</artifactId>" + extra + "</dependency>";
+    }
+
     private static void git(Path co, String... args) throws Exception {
         var command = new ArrayList<>(List.of("git", "-C", co.toString(), "-c", "user.name=t", "-c", "user.email=t@t"));
 
@@ -104,7 +112,7 @@ class BbIncrementalIT {
 
         write(co,
               "pom.xml",
-              pom("root", null, "pom", List.of(), List.of("build-parent", "m", "u", "d", "x", "y", "z")));
+              pom("root", null, "pom", List.of(), List.of("build-parent", "m", "u", "d", "x", "y", "z", "plib", "pdep", "glib", "gdep", "elib", "edep", "blib", "bdep", "tlib", "tdep", "nlib", "nest")));
         write(co,
               "build-parent/pom.xml",
               pom("build-parent", null, "pom", List.of(), List.of()));
@@ -126,7 +134,35 @@ class BbIncrementalIT {
         write(co,
               "z/pom.xml",
               pom("z", "build-parent", "jar", List.of(), List.of()));
-        for (var module : List.of("m", "u", "d", "x", "y", "z")) {
+        for (var lib : List.of("plib", "glib", "elib", "blib", "tlib", "nlib")) {
+            write(co, lib + "/pom.xml", pom(lib, "build-parent", "jar", List.of(), List.of()));
+        }
+
+        // one dependent per edge kind maven orders the reactor by, each with exactly that edge and no top-level <dependencies>
+        write(co,
+              "pdep/pom.xml",
+              with(pom("pdep", "build-parent", "jar", List.of(), List.of()),
+                   "<profiles><profile><id>p</id><dependencies>" + depOn("plib", "") + "</dependencies></profile></profiles>"));
+        write(co,
+              "gdep/pom.xml",
+              with(pom("gdep", "build-parent", "jar", List.of(), List.of()),
+                   "<build><plugins><plugin><groupId>x</groupId><artifactId>some-plugin</artifactId><dependencies>" + depOn("glib", "")
+                   + "</dependencies></plugin></plugins></build>"));
+        write(co,
+              "edep/pom.xml",
+              with(pom("edep", "build-parent", "jar", List.of(), List.of()),
+                   "<build><extensions><extension><groupId>g</groupId><artifactId>elib</artifactId><version>1</version></extension></extensions></build>"));
+        write(co,
+              "bdep/pom.xml",
+              with(pom("bdep", "build-parent", "jar", List.of(), List.of()),
+                   "<build><plugins><plugin><groupId>g</groupId><artifactId>blib</artifactId></plugin></plugins></build>"));
+        write(co,
+              "tdep/pom.xml",
+              with(pom("tdep", "build-parent", "jar", List.of(), List.of()),
+                   "<dependencies>" + depOn("tlib", "<type>test-jar</type><classifier>tests</classifier><scope>test</scope>") + "</dependencies>"));
+        write(co, "nest/pom.xml", pom("nest", "build-parent", "pom", List.of(), List.of("inner")));
+        write(co, "nest/inner/pom.xml", pom("inner", "build-parent", "jar", List.of("nlib"), List.of()));
+        for (var module : List.of("m", "u", "d", "x", "y", "z", "plib", "glib", "elib", "blib", "tlib", "nlib", "nest/inner")) {
             write(co, module + "/src/main/java/A.java", "class A {}\n");
         }
 
@@ -167,7 +203,7 @@ class BbIncrementalIT {
         var co = reactor("leaf");
 
         commit(co, "m/src/main/java/A.java", "class A { int changed; }\n");
-        assertThat(selected(co)).isEqualTo("d,m,u,x");
+        assertThat(selected(co)).isEqualTo("build-parent,d,m,u,x");
     }
 
     @Test
@@ -175,7 +211,7 @@ class BbIncrementalIT {
         var co = reactor("top");
 
         commit(co, "x/src/main/java/A.java", "class A { int changed; }\n");
-        assertThat(selected(co)).isEqualTo("d,m,u,x");
+        assertThat(selected(co)).isEqualTo("build-parent,d,m,u,x");
     }
 
     @Test
@@ -183,7 +219,7 @@ class BbIncrementalIT {
         var co = reactor("lone");
 
         commit(co, "z/src/main/java/A.java", "class A { int changed; }\n");
-        assertThat(selected(co)).isEqualTo("z");
+        assertThat(selected(co)).isEqualTo("build-parent,z");
     }
 
     @Test
@@ -193,7 +229,7 @@ class BbIncrementalIT {
         commit(co,
                "y/pom.xml",
                pom("y", "build-parent", "jar", List.of("u"), List.of()) + "<!-- edit -->\n");
-        assertThat(selected(co)).isEqualTo("u,y");
+        assertThat(selected(co)).isEqualTo("build-parent,u,y");
     }
 
     @Test
@@ -201,7 +237,7 @@ class BbIncrementalIT {
         var co = reactor("untracked");
 
         write(co, "y/src/main/java/New.java", "class New {}\n");
-        assertThat(selected(co)).isEqualTo("u,y");
+        assertThat(selected(co)).isEqualTo("build-parent,u,y");
     }
 
     @Test
@@ -210,7 +246,7 @@ class BbIncrementalIT {
 
         write(co, "z/src/main/java/A.java", "class A { int dirty; }\n");
         write(co, "x/target/out.class", "ignored\n");
-        assertThat(selected(co)).isEqualTo("z");
+        assertThat(selected(co)).isEqualTo("build-parent,z");
     }
 
     @Test
@@ -220,7 +256,7 @@ class BbIncrementalIT {
         commit(co,
                "pom.xml",
                Files.readString(co.resolve("pom.xml")) + "<!-- edit -->\n");
-        assertThat(selected(co)).isEqualTo("FULL");
+        assertThat(selected(co)).isEqualTo("FULL root-pom");
     }
 
     @Test
@@ -230,7 +266,7 @@ class BbIncrementalIT {
         commit(co,
                "build-parent/pom.xml",
                pom("build-parent", null, "pom", List.of(), List.of()) + "<!-- edit -->\n");
-        assertThat(selected(co)).isEqualTo("FULL");
+        assertThat(selected(co)).isEqualTo("FULL parent:build-parent/pom.xml");
     }
 
     @Test
@@ -238,7 +274,7 @@ class BbIncrementalIT {
         var co = reactor("mvnconf");
 
         commit(co, ".mvn/maven.config", "-T1\n");
-        assertThat(selected(co)).isEqualTo("FULL");
+        assertThat(selected(co)).isEqualTo("FULL mvn-config:.mvn/maven.config");
     }
 
     @Test
@@ -246,7 +282,7 @@ class BbIncrementalIT {
         var co = reactor("unmapped");
 
         commit(co, "docs/readme.md", "docs edited\n");
-        assertThat(selected(co)).isEqualTo("FULL");
+        assertThat(selected(co)).isEqualTo("FULL unmapped:docs/readme.md");
     }
 
     @Test
@@ -255,7 +291,7 @@ class BbIncrementalIT {
 
         commit(co, "docs/readme.md", "docs edited\n");
         commit(co, "z/src/main/java/A.java", "class A { int changed; }\n");
-        assertThat(selected(co)).isEqualTo("FULL");
+        assertThat(selected(co)).isEqualTo("FULL unmapped:docs/readme.md");
     }
 
     @Test
@@ -263,7 +299,65 @@ class BbIncrementalIT {
         var co = reactor("broken");
 
         commit(co, "z/pom.xml", "<project>not closed\n");
-        assertThat(selected(co)).isEqualTo("FULL");
+        assertThat(selected(co)).isEqualTo("FULL unreadable-reactor:ParseError");
+    }
+
+    @Test
+    void reactorParent_isAnUpstreamOfItsChildren() throws Exception {
+        var co = reactor("parentedge");
+
+        commit(co, "z/src/main/java/A.java", "class A { int changed; }\n");
+        assertThat(selected(co)).isEqualTo("build-parent,z");
+    }
+
+    @Test
+    void profileOnlyDependency_isAnEdge() throws Exception {
+        var co = reactor("profiledep");
+
+        commit(co, "plib/src/main/java/A.java", "class A { int changed; }\n");
+        assertThat(selected(co)).isEqualTo("build-parent,pdep,plib");
+    }
+
+    @Test
+    void pluginDependency_isAnEdge() throws Exception {
+        var co = reactor("plugindep");
+
+        commit(co, "glib/src/main/java/A.java", "class A { int changed; }\n");
+        assertThat(selected(co)).isEqualTo("build-parent,gdep,glib");
+    }
+
+    @Test
+    void buildExtension_isAnEdge() throws Exception {
+        var co = reactor("extension");
+
+        commit(co, "elib/src/main/java/A.java", "class A { int changed; }\n");
+        assertThat(selected(co)).isEqualTo("build-parent,edep,elib");
+    }
+
+    @Test
+    void buildPlugin_isAnEdge() throws Exception {
+        var co = reactor("plugin");
+
+        commit(co, "blib/src/main/java/A.java", "class A { int changed; }\n");
+        assertThat(selected(co)).isEqualTo("build-parent,bdep,blib");
+    }
+
+    @Test
+    void testJarDependent_isAnEdge() throws Exception {
+        var co = reactor("testjar");
+
+        commit(co, "tlib/src/main/java/A.java", "class A { int changed; }\n");
+        assertThat(selected(co)).isEqualTo("build-parent,tdep,tlib");
+    }
+
+    @Test
+    void nestedModulesTree_isWalked_inBothDirections() throws Exception {
+        var co = reactor("nested");
+
+        commit(co, "nlib/src/main/java/A.java", "class A { int changed; }\n");
+        assertThat(selected(co)).isEqualTo("build-parent,nest/inner,nlib");
+        commit(co, "nest/inner/src/main/java/A.java", "class A { int changed; }\n");
+        assertThat(selected(co)).isEqualTo("build-parent,nest/inner,nlib");
     }
 
     @Test
@@ -353,10 +447,11 @@ class BbIncrementalIT {
         var lines = ticket(queue, out);
 
         assertThat(out.rc()).as(out.stderr()).isZero();
-        assertThat(out.stdout()).contains("--since base -> -pl d,m,u,x (4 modules)");
-        assertThat(value(lines, "args")).isEqualTo("-pl d\\,m\\,u\\,x -B test ");  // the ticket holds printf %q words
+        assertThat(out.stdout()).contains("--since base -> -pl build-parent,d,m,u,x (5 modules)");
+        assertThat(value(lines, "args")).isEqualTo("-pl build-parent\\,d\\,m\\,u\\,x -B test ");  // the ticket holds printf %q words
         assertThat(value(lines, "since")).isEqualTo("base");
-        assertThat(value(lines, "modules")).isEqualTo("4");
+        assertThat(value(lines, "modules")).isEqualTo("5");
+        assertThat(value(lines, "since_reason")).isNull();
         var keys = lines.stream().map(l -> l.substring(0, l.indexOf('='))).toList();
 
         assertThat(keys.indexOf("since")).isEqualTo(keys.indexOf("group_reason") + 1);
@@ -378,6 +473,22 @@ class BbIncrementalIT {
         assertThat(value(lines, "args")).isEqualTo("-B test ");
         assertThat(value(lines, "modules")).isEqualTo("FULL");
         assertThat(value(lines, "since")).isEqualTo("base");
+        assertThat(value(lines, "since_reason")).isEqualTo("root-pom");
+        assertThat(out.stdout()).contains("--since base -> FULL reactor (root-pom)");
+    }
+
+    @Test
+    void since_unmappedPath_recordsItsOwnReason() throws Exception {
+        assumeTrue(BbFixtures.linux(), "bb-build needs GNU tools, flock and pgrep");
+        var co = reactor("unmappedtkt");
+
+        commit(co, "docs/readme.md", "docs edited\n");
+        var queue = dir.resolve("q");
+        var out = bb(queue, "--since", "base", co.toString(), "-B", "test");
+        var lines = ticket(queue, out);
+
+        assertThat(value(lines, "modules")).isEqualTo("FULL");
+        assertThat(value(lines, "since_reason")).isEqualTo("unmapped:docs/readme.md");
     }
 
     @Test
@@ -406,7 +517,7 @@ class BbIncrementalIT {
         git(co, "clone", "-q", co.toString(), twin.toString());
         var queue = dir.resolve("q");
         var first = bb(queue, "--since", "base", co.toString(), "-B", "test");
-        var second = bb(queue, twin.toString(), "-pl", "d,m,u,x", "-B", "test");
+        var second = bb(queue, twin.toString(), "-pl", "build-parent,d,m,u,x", "-B", "test");
 
         assertThat(first.rc()).as(first.stderr()).isZero();
         assertThat(second.rc()).as(second.stdout() + second.stderr()).isEqualTo(7);

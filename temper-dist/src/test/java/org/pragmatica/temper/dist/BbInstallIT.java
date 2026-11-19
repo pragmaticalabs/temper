@@ -206,6 +206,8 @@ class BbInstallIT {
         assertThat(pin("BB_AWAIT_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-await")));
         assertThat(pin("BB_NETNS_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-netns-run")));
         assertThat(pin("BB_PORTGROUP_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-portgroup.py")));
+        assertThat(pin("BB_MODULES_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-modules.py")));
+        assertThat(pin("BB_BUILD_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-build")));
         assertThat(pin("BB_MUTATE_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-mutate")));
         assertThat(pin("BB_MUTATE_OLD")).isEqualTo(BbFixtures.md5(prev("bb-mutate")));
     }
@@ -224,7 +226,8 @@ class BbInstallIT {
                                                           "bb-wait",
                                                           "bb-await",
                                                           "bb-netns-run",
-                                                          "bb-portgroup.py");
+                                                          "bb-portgroup.py",
+                                                          "bb-modules.py");
 
     @Test
     void success_installsAllFourFiles_keepsBackups_andASecondRunChangesNothing() throws Exception {
@@ -242,6 +245,7 @@ class BbInstallIT {
                                                                     "installed builder@h1 bb-await before=absent after=" + pin("BB_AWAIT_NEW"),
                                                                     "installed builder@h1 bb-netns-run before=absent after=" + pin("BB_NETNS_NEW"),
                                                                     "installed builder@h1 bb-portgroup.py before=absent after=" + pin("BB_PORTGROUP_NEW"),
+                                                                    "installed builder@h1 bb-modules.py before=absent after=" + pin("BB_MODULES_NEW"),
                                                                     "installed builder@h1 bb-queue-lib.sh before=" + BbFixtures.BB_LIB_OLD
                                                                    + " after=" + pin("BB_LIB_NEW"),
                                                                     "installed builder@h1 bb-queue before=" + BbFixtures.BB_QUEUE_OLD
@@ -285,6 +289,7 @@ class BbInstallIT {
                                                                      "unchanged builder@h1 bb-await " + pin("BB_AWAIT_NEW"),
                                                                      "unchanged builder@h1 bb-netns-run " + pin("BB_NETNS_NEW"),
                                                                      "unchanged builder@h1 bb-portgroup.py " + pin("BB_PORTGROUP_NEW"),
+                                                                     "unchanged builder@h1 bb-modules.py " + pin("BB_MODULES_NEW"),
                                                                      "unchanged builder@h1 bb-queue-lib.sh " + pin("BB_LIB_NEW"),
                                                                      "unchanged builder@h1 bb-queue " + pin("BB_QUEUE_NEW"),
                                                                      "unchanged builder@h1 bb-build " + pin("BB_BUILD_NEW"));
@@ -557,6 +562,7 @@ class BbInstallIT {
                              "bb-await",
                              "bb-netns-run",
                              "bb-portgroup.py",
+                             "bb-modules.py",
                              "bb-mutate")) {
             Files.copy(OPS_BB.resolve(f), tools.resolve(f), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
         }
@@ -566,6 +572,33 @@ class BbInstallIT {
 
         assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
         assertThat(run.stdout().lines()).allMatch(l -> l.startsWith("unchanged "));
+        assertThat(listing(tools)).isEqualTo(before);
+    }
+
+    /// bb-build calls bb-modules.py for --since: the helper must be on the host before the caller is replaced, so no host ever runs a bb-build that needs a missing one.
+    @Test
+    void bbModules_isInstalledBeforeBbBuild_andNamedAsPhaseOneAcceptsAbsentOrNew() throws Exception {
+        host("h1");
+        var run = install("builder@h1");
+        var order = run.stdout().lines().map(l -> l.split(" ")[2]).toList();
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        assertThat(order).contains("bb-modules.py", "bb-build");
+        assertThat(order.indexOf("bb-modules.py")).isLessThan(order.indexOf("bb-build"));
+    }
+
+    @Test
+    void aWrongBbModules_isRefused_namingAbsentAsAcceptedAndThePin_andWritesNothing() throws Exception {
+        var tools = host("h1");
+
+        Files.writeString(tools.resolve("bb-modules.py"), "a diverged modules helper\n");
+        var before = listing(tools);
+        var run = install("builder@h1");
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isEqualTo(65);
+        assertThat(run.stdout().lines().toList()).containsExactly("refused builder@h1 bb-modules.py installed="
+                                                                 + BbFixtures.md5("a diverged modules helper\n".getBytes())
+                                                                 + " expected=" + pin("BB_MODULES_NEW"));
         assertThat(listing(tools)).isEqualTo(before);
     }
 
@@ -697,6 +730,7 @@ class BbInstallIT {
                                 "bb-await",
                                 "bb-netns-run",
                                 "bb-portgroup.py",
+                                "bb-modules.py",
                                 "bb-mutate",
                                 "install-bb-fields.sh")) {
             Files.copy(OPS_BB.resolve(name), copy.resolve(name));
