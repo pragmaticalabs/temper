@@ -622,6 +622,7 @@ class BbInstallIT {
                                                                  + "|" + pin("BB_BUILD_PREVIA")
                                                                  + "|" + pin("BB_BUILD_PREMEM")
                                                                  + "|" + pin("BB_BUILD_PRECAP")
+                                                                 + "|" + pin("BB_BUILD_PREJBCT")
                                                                  + "|" + pin("BB_BUILD_NEW"));
         assertThat(listing(good)).isEqualTo(goodBefore);
         assertThat(listing(diverged)).isEqualTo(divergedBefore);

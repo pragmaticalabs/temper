@@ -339,9 +339,12 @@ class BbJbctBootstrapIT {
                             .stream()
                             .filter(l -> !l.contains("bb-jbct-bootstrap\" \"$CO\""))
                             .collect(Collectors.joining("\n", "", "\n"));
+        // its own directory and the name bb-build: the queue finds a waiter by the text "bb-build __run <id>"
+        var bare = Files.createDirectories(dir.resolve("nohook"));
 
-        BbFixtures.executable(tools.resolve("bb-build-nohook"), stripped);
-        var r = run(checkout(false), Map.of(), tools.resolve("bb-build-nohook"), "-B", "jbct:check");
+        BbFixtures.executable(bare.resolve("bb-build"), stripped);
+        Files.copy(tools.resolve("bb-queue-lib.sh"), bare.resolve("bb-queue-lib.sh"));
+        var r = run(checkout(false), Map.of(), bare.resolve("bb-build"), "-B", "jbct:check");
 
         assertThat(r.installs()).isEmpty();
         assertThat(r.mains()).hasSize(1);
