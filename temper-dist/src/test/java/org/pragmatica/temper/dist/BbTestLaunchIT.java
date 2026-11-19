@@ -274,6 +274,8 @@ class BbTestLaunchIT {
         assertThat(run.rc()).as(log()).isZero();
         assertThat(log()).contains("REQUIRE_DOCKER=true");
         assertThat(run.doneText()).doesNotContain("requireDocker=0");
+        assertThat(log()).contains("requireDocker=true;");
+        assertThat(run.doneText().lines().toList()).contains("requireDockerEffective=true");
     }
 
     @Test
@@ -283,7 +285,8 @@ class BbTestLaunchIT {
 
         assertThat(run.rc()).as(log()).isZero();
         assertThat(log()).contains("REQUIRE_DOCKER=null");
-        assertThat(run.doneText().lines().toList()).contains("requireDocker=0");
+        assertThat(run.doneText().lines().toList()).contains("requireDocker=0", "requireDockerEffective=false");
+        assertThat(log()).contains("requireDocker=false;").doesNotContain("requireDocker=true;");
     }
 
     @Test

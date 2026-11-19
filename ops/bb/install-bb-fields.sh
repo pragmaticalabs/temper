@@ -56,7 +56,7 @@ readonly BB_BUILD_PREVIA=01e0bc34ea0effa8a8273a781f8ea52d   # live from the 2026
 readonly BB_BUILD_PREMEM=eb10b2f4ea6c244444e95aa56bcf7e09
 readonly BB_BUILD_PRECAP=8478b2174ce3ff6de293b55a283e3ce7   # the #53 version: comments only differ (issue #56)
 readonly BB_BUILD_PRECP=12c68a554862caa672f7211456dfc84c   # the #56 version: no bb-cp-record hook, no BB_LAUNCH (bb-test lane)
-readonly BB_BUILD_NEW=25c516ae23b9aeef97ad78adfe7a5de6
+readonly BB_BUILD_NEW=54e84608c6a5a0ec2ce0b7fe32220b28
 readonly BB_TICKETS_OLD=472cd816644fe0ee0902b8da3d33de8e   # before the per-ticket progressAt (issue #10)
 readonly BB_TICKETS_PRE31=e1aeba98541ba781295001f956b08c8d   # live since 2026-11-12: drops a ticket key with a capital letter
 readonly BB_TICKETS_NEW=6174119f0cd567c5dc462d1e063c6214
@@ -72,7 +72,7 @@ readonly BB_PORTGROUP_PREV=a93ade2ff7dddcc75cee3d4169a08499   # the 2026-11-09 h
 readonly BB_PORTGROUP_NEW=884caf3cf37b12cf5cf1d97e96f76a4c
 # The bb-test lane helpers: absent on every host before their first install. No trailing comment on a pin line: bb-drift reads it by pattern.
 readonly BB_CPRECORD_NEW=3e4acfc4f69116c60b7f43c300e40754
-readonly BB_TEST_NEW=0af8576b8bf6beba939cac363f22970a
+readonly BB_TEST_NEW=5f16ce943a89fc551c6f32b9f97bca6e
 readonly BB_TESTCOUNT_NEW=7ef8a4c3eba2a517146eed6d7ac31511
 readonly BB_MUTATE_OLD=f9bfbd37c5feafe67995f6716e8fecb0   # the host snapshot, identical on all four hosts: batch credit unsound for multi-module specs
 readonly BB_MUTATE_PREVIA=2c341d44d428ba445db7ea03ee90af64   # the batch-sound version (#41): does not export BB_VIA (issue #46)

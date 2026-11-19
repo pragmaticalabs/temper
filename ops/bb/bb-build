@@ -232,6 +232,7 @@ PRN=$(ownerval BB_PR '^[1-9][0-9]{0,9}$') && OWNER_FIELDS+="pr=$PRN"$'\n'
 VIA=$(ownerval BB_VIA "$LABEL_RE") && OWNER_FIELDS+="via=$VIA"$'\n'   # who submitted: bb-mutate sets bb-mutate:<spec>:<mutant> (issue #46); additive
 OWNER_FIELDS+="output=$B/build.log"$'\n'
 [ "${BB_REQUIRE_DOCKER:-1}" = 1 ] || OWNER_FIELDS+="requireDocker=0"$'\n'
+[ -z "${BB_LAUNCH:-}" ] || OWNER_FIELDS+="requireDockerEffective=$([ "${BB_REQUIRE_DOCKER:-1}" = 1 ] && echo true || echo false)"$'\n'   # bb-test tickets only (CTO 2026-11-19): a count without Testcontainers must never read as a full one
 [ -z "$DETACHED_READER" ] || OWNER_FIELDS+="detached_reader=$DETACHED_READER"$'\n'
 
 ID=$(date +%s%N)-$$

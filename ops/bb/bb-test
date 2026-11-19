@@ -17,8 +17,9 @@
 # "cannot be determined".
 # Call rc: 0 queued (as bb-build); 2 usage; 12 stale-jar guard; 14 launcher jar absent/not the pin; 15 checkout's junit-platform version differs from
 # the launcher's or is undeterminable; others from bb-build (3, 4).
-# REQUIRE DOCKER (marked guess, lead 2026-11-19): the launch runs with -Daether.requireDocker=true (bb-build appends it to every ticket's args) unless
-# BB_REQUIRE_DOCKER=0 is given at enqueue: the same explicit override as bb-build (#31), recorded in the ticket as requireDocker=0 (bb-tickets shows it).
+# REQUIRE DOCKER (CTO ruling 2026-11-19): the launch runs with -Daether.requireDocker=true (bb-build appends it to every ticket's args) unless
+# BB_REQUIRE_DOCKER=0 is given at enqueue: the same explicit override as bb-build (#31), recorded in the ticket as requireDocker=0 (bb-tickets shows it). On condition (CTO): the ticket (requireDockerEffective=true|false) AND each result line
+# (requireDocker=true|false) state it, so a count with Testcontainers skipped never passes for a full one.
 # Mutation flow (§3) and BB_LOAD (§4) are not implemented here.
 set -euo pipefail
 SELF=$(readlink -f "$0"); HERE=$(dirname "$SELF")
@@ -92,7 +93,8 @@ if [ "${1:-}" = __launch ]; then
   done
   JAVA=${BB_TEST_JAVA:-${JAVA_HOME:-/usr/lib/jvm/java-25-openjdk-amd64}/bin/java}
   CP="$CO/$MOD/target/test-classes:$CO/$MOD/target/classes:$(cat "$CO/.bb/cp/${MOD//\//__}.cp")"
-  RC=0
+  RC=0; RD=false
+  for j in ${JVM[@]+"${JVM[@]}"}; do [ "$j" != -Daether.requireDocker=true ] || RD=true; done
   for i in $(seq "$REPEAT"); do
     D=$CO/$MOD/target/bb-test-reports/$TICKET; [ "$REPEAT" = 1 ] || D=$D/run$i
     mkdir -p "$D"
@@ -101,7 +103,7 @@ if [ "${1:-}" = __launch ]; then
         --class-path "$CP" --reports-dir "$D" "${SELS[@]}")
     r=$?
     set -e
-    echo "bb-test: run $i/$REPEAT java exit $r; $("$HERE/bb-testcount" "$D" 2>&1 | tr '\n' ' ')"
+    echo "bb-test: run $i/$REPEAT java exit $r; requireDocker=$RD; $("$HERE/bb-testcount" "$D" 2>&1 | tr '\n' ' ')"
     [ "$r" -le "$RC" ] || RC=$r
   done
   exit "$RC"
