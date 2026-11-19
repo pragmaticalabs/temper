@@ -339,7 +339,7 @@ class BbIncrementalIT {
         var co = reactor("plugin");
 
         commit(co, "blib/src/main/java/A.java", "class A { int changed; }\n");
-        assertThat(selected(co)).isEqualTo("build-parent,bdep,blib");
+        assertThat(selected(co)).isEqualTo("bdep,blib,build-parent");
     }
 
     @Test
