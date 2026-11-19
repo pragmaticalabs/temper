@@ -675,6 +675,22 @@ class BbTemperHostIT {
         assertThat(Files.readString(spaced.resolve(".temper/bb-bind/t3-x")).strip()).isEqualTo("cloudbb-3");
     }
 
+    /// The direct path of a jumped host (2026-11-19) pins the host key through the same quoted option: a space in HOME must not split it.
+    @Test
+    void cloudHost_withASpaceInHome_directPath_quotesTheKnownHostsPath_andHasNoProxy() throws Exception {
+        var spaced = Files.createDirectories(dir.resolve("ho me"));
+
+        TestHosts.write(spaced);
+        var run = checkout(hosts(c4()), "HOME", spaced.toString(), "BB_HOST", "cloudbb-3", "BB_PATH", "direct");
+
+        assertThat(run.rc()).as(run.err()).isZero();
+        var args = sshCalls().get(0);
+
+        assertThat(args).contains("UserKnownHostsFile=\"" + spaced + "/" + TestHosts.KNOWN + "\"",
+                                  "StrictHostKeyChecking=yes");
+        assertThat(args).noneSatisfy(a -> assertThat(a).startsWith("ProxyCommand="));
+    }
+
     /// ssh's own failure (255) is reported as such, not as "exists".
     @Test
     void checkout_whenSshItselfFails_reportsTheConnectionFailure_notExists() throws Exception {
