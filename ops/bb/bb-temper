@@ -110,6 +110,10 @@ auto_hosts() {  # auto_hosts: AUTO = the hosts with pick auto, in file order (th
 # A cache hit costs one `true` on the cached path (every verb, via confirm_path; the host pick alone trusts it), never a probe of the other path;
 # the cached path failing drops the cache and probes the other one. Each call prints `bb-temper: <host> via direct|jump(<jump>)`
 # on stderr. bb-submit gets BB_SSH_PROXY only on the jump path; BB_KNOWN_HOSTS on both.
+# CONTROL MASTERS: every ssh to a jumped host (probe, command, scp) runs with ControlMaster=auto ControlPersist=10m and a route-specific
+# ControlPath, ~/.ssh/cm/bbd-%C (direct) or bbj-%C (jump), so a live master of one route never answers the other, nor an alias's
+# master at ~/.ssh/cm/%C. The probe goes through the same socket, so a hit means "this route answered". ~/.ssh/cm is created 0700.
+# The ProxyCommand's inner ssh to the jump host uses ControlPath=none. Hosts without a jump (bigboy, user@host) are unchanged.
 PATH_DIR=$HOME/.temper/bb-path
 PATH_TTL=${BB_PATH_TTL:-30}
 [[ $PATH_TTL =~ ^[0-9]+$ ]] || { echo "$PROG: BB_PATH_TTL must be minutes (digits)" >&2; exit 2; }
@@ -125,9 +129,17 @@ apply_path() {  # apply_path direct|jump: SSHO and the bb-submit variables for t
   export BB_KNOWN_HOSTS=$KNOWNF
   # the paths sit inside ssh -o values (the ProxyCommand one is re-read by a shell), so they are double-quoted: a HOME with spaces
   SSHO+=(-o "UserKnownHostsFile=\"$KNOWNF\"" -o StrictHostKeyChecking=yes)
+  # One master socket per ROUTE: ssh's %C hashes host/port/user, not the ProxyCommand, so a master made over the jump (or by an alias
+  # in ~/.ssh/config with ControlPath ~/.ssh/cm/%C) would answer the "direct" probe and make the label, cache and pin false.
+  # The prefix (bbd- / bbj-) keeps the routes apart; the command line beats any ControlPath in ~/.ssh/config.
+  [ -d "$HOME/.ssh" ] || mkdir -m 700 "$HOME/.ssh" 2> /dev/null || true
+  [ -d "$HOME/.ssh/cm" ] || mkdir -m 700 "$HOME/.ssh/cm" 2> /dev/null || true
+  SSHO+=(-o ControlMaster=auto -o "ControlPath=\"$HOME/.ssh/cm/bb${1:0:1}-%C\"" -o ControlPersist=10m)
   if [ "$1" = jump ]; then
     export BB_SSH_PROXY=$JUMP
-    SSHO+=(-o "ProxyCommand=ssh -i \"$KEY\" -o BatchMode=yes -o ConnectTimeout=15 -W %h:%p $JUMP")
+    # The inner ssh to the jump host takes no master: the outer master already amortises that hop, and a second persistent
+    # process (or a socket shared with an alias-made master) would only blur which route answered.
+    SSHO+=(-o "ProxyCommand=ssh -i \"$KEY\" -o BatchMode=yes -o ControlMaster=no -o ControlPath=none -o ConnectTimeout=15 -W %h:%p $JUMP")
   fi
 }
 path_label() { if [ "$1" = jump ]; then echo "jump($JUMP)"; else echo direct; fi; }
@@ -142,20 +154,28 @@ probe_path() {  # probe_path direct|jump: a no-op `true` over that path; non-zer
   return "$rc"
 }
 cache_get() {  # cache_get <name>: print the cached path when it is younger than the TTL
-  local f=$PATH_DIR/$1 p= t=
+  local f=$PATH_DIR/$1 p= t= now
   [ -f "$f" ] || return 1
   read -r p t < "$f" || true
   case $p in direct|jump) ;; *) return 1 ;; esac
-  [[ $t =~ ^[0-9]+$ ]] || return 1
-  [ $(( $(date +%s) - t )) -lt $((PATH_TTL * 60)) ] && [ "$t" -le "$(date +%s)" ] || return 1
+  [[ $t =~ ^[0-9]{1,12}$ ]] || return 1  # 12 digits: a longer number wraps 64-bit arithmetic and would pass as fresh
+  now=$(date +%s)
+  [ "$t" -le $((now + 60)) ] && [ $((now - t)) -lt $((PATH_TTL * 60)) ] || return 1  # not from the future (60 s of clock skew allowed)
   printf '%s\n' "$p"
 }
-cache_put() { mkdir -p "$PATH_DIR"; printf '%s %s\n' "$1" "$(date +%s)" > "$PATH_DIR/$NAME.tmp.$$"; mv "$PATH_DIR/$NAME.tmp.$$" "$PATH_DIR/$NAME"; }
+# cache_put never fails the run: an unwritable ~/.temper costs the cache (one warning line), not the build. It removes its own tmp file on
+# failure and sweeps tmp files of killed runs (older than 5 min; a fresh one may belong to a concurrent run). No trap: the verbs own EXIT.
+cache_put() {
+  local t=$PATH_DIR/$NAME.tmp.$$
+  { mkdir -p "$PATH_DIR" && find "$PATH_DIR" -maxdepth 1 -name "$NAME.tmp.*" -mmin +5 -exec rm -f {} + \
+      && printf '%s %s\n' "$1" "$(date +%s)" > "$t" && mv "$t" "$PATH_DIR/$NAME"; } 2> /dev/null \
+    || { rm -f "$t" 2> /dev/null; echo "bb-temper: warning: cannot write the path cache $PATH_DIR/$NAME; continuing uncached" >&2; }
+}
 choose_path() {  # choose_path [<excluded path>]: set PATHSEL and the ssh options for the jumped host $NAME
   local c p failed=
   PATHSRC=
   if [ "${BB_PATH:-auto}" != auto ]; then
-    probe_path "$BB_PATH" || die 69 "$NAME unreachable via $(path_label "$BB_PATH"): BB_PATH=$BB_PATH forces that path, no fallback to the other"
+    probe_path "$BB_PATH" || { die 69 "$NAME unreachable via $(path_label "$BB_PATH"): BB_PATH=$BB_PATH forces that path, no fallback to the other"; return; }
     apply_path "$BB_PATH"; PATHSRC=forced; return 0
   fi
   if [ -z "${1:-}" ] && c=$(cache_get "$NAME"); then apply_path "$c"; PATHSRC=cache; return 0; fi
@@ -188,7 +208,7 @@ setup_host() {
   esac
   if [ -n "$i" ] && [ "${H_JUMP[i]}" != - ]; then
     JUMP=${H_JUMP[i]} KNOWNF=${H_KNOWN[i]}
-    apply_path direct; choose_path
+    apply_path direct; choose_path || return
     [ "${CONFIRM:-1}" = 0 ] || confirm_path
   else
     apply_path direct
@@ -246,7 +266,9 @@ bound=; [ ! -f "$BIND" ] || bound=$(head -n 1 "$BIND")
 # pick_host: print the chosen host key on stdout, the "host ..." line on stderr (or "fallback"); never fails.
 pick_host() {
   local json out verdict detail
-  CONFIRM=0 setup_host "${AUTO[0]}"  # the pick trusts a cached path; the chosen host is confirmed below
+  # This runs inside $(...): a die here would end the subshell and abort the caller, so die returns instead and the pick falls back.
+  die() { echo "bb-temper: $2" >&2; return "$1"; }
+  if ! CONFIRM=0 setup_host "${AUTO[0]}"; then echo "bb-temper: host ${AUTO[0]} (fallback: cannot reach it to read the controller)" >&2; echo "${AUTO[0]}"; return; fi  # the pick trusts a cached path; the chosen host is confirmed below
   if [ -n "${BB_HOSTS_CMD:-}" ]; then json=$(bash -c "$BB_HOSTS_CMD" 2> /dev/null) || json=
   else json=$(rsh 'curl -sf -m 5 -H "Authorization: Bearer $(cat ~/.config/temper/read-token)" http://localhost:7070/api/v1/hosts' 2> /dev/null) || json=; fi
   if [ -z "$json" ]; then echo "bb-temper: host ${AUTO[0]} (fallback: controller unreachable)" >&2; echo "${AUTO[0]}"; return; fi
