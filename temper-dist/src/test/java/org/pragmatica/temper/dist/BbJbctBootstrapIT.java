@@ -281,11 +281,11 @@ class BbJbctBootstrapIT {
         var co = checkout(false);
 
         Files.writeString(co.resolve(".github/workflows/ci.yml"),
-                          ci("mvn install -B -DskipTests -pl other/a,other/b -am"));
+                          ci("mvn install -B -DskipTests -pl other/a,jbct/jbct-maven-plugin -am"));
         git(co, "commit", "-qam", "new list");
         var r = run(co, "-B", "jbct:check");
 
-        assertThat(r.installs()).containsExactly("install -B -DskipTests -pl other/a,other/b -am");
+        assertThat(r.installs()).containsExactly("install -B -DskipTests -pl other/a,jbct/jbct-maven-plugin -am");
     }
 
     @Test
