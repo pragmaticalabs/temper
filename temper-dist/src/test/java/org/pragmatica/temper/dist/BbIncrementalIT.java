@@ -345,7 +345,7 @@ class BbIncrementalIT {
 
         assertThat(out.rc()).as(out.stderr()).isZero();
         assertThat(out.stdout()).contains("--since base -> -pl d,m,u,x (4 modules)");
-        assertThat(value(lines, "args")).isEqualTo("-pl d,m,u,x -B test ");
+        assertThat(value(lines, "args")).isEqualTo("-pl d\\,m\\,u\\,x -B test ");  // the ticket holds printf %q words
         assertThat(value(lines, "since")).isEqualTo("base");
         assertThat(value(lines, "modules")).isEqualTo("4");
         var keys = lines.stream().map(l -> l.substring(0, l.indexOf('='))).toList();
