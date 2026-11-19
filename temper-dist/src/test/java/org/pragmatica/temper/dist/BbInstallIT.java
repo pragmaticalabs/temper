@@ -120,13 +120,13 @@ class BbInstallIT {
             return walk.sorted()
                        .map(path -> {
                                 try {
-                                return path.getFileName()
-                                     + " " + Files.size(path)
-                                     + " " + BbFixtures.md5(path)
-                                     + " " + PosixFilePermissions.toString(Files.getPosixFilePermissions(path));
-                            } catch (IOException e) {
-                                throw new IllegalStateException(e);
-                            }
+                                    return path.getFileName()
+                                         + " " + Files.size(path)
+                                         + " " + BbFixtures.md5(path)
+                                         + " " + PosixFilePermissions.toString(Files.getPosixFilePermissions(path));
+                                } catch (IOException e) {
+                                    throw new IllegalStateException(e);
+                                }
                             })
                        .collect(Collectors.toList());
         }
@@ -207,6 +207,31 @@ class BbInstallIT {
         assertThat(pin("BB_PORTGROUP_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-portgroup.py")));
         assertThat(pin("BB_MUTATE_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-mutate")));
         assertThat(pin("BB_MUTATE_OLD")).isEqualTo(BbFixtures.md5(prev("bb-mutate")));
+        assertThat(pin("BB_CPRECORD_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-cp-record")));
+        assertThat(pin("BB_TEST_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-test")));
+        assertThat(pin("BB_TESTCOUNT_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-testcount")));
+    }
+
+    /// The bb-test lane helpers go in before bb-build (which calls bb-cp-record); a host holding a stranger's bb-test is refused, naming the one pin and
+    /// `absent` is accepted. Mutation: drop a helper from accepted_of's new_of fallback or from FILES -> red.
+    @Test
+    void theBbTestLaneHelpers_areInstalledBeforeBbBuild_andAStrangersCopyIsRefused() throws Exception {
+        var tools = host("h1");
+        var run = install("builder@h1");
+        var lines = run.stdout().lines().toList();
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        assertThat(lines.stream().filter(l -> l.contains(" bb-cp-record ")).findFirst().orElseThrow()).isEqualTo("installed builder@h1 bb-cp-record before=absent after=" + pin("BB_CPRECORD_NEW"));
+        assertThat(lines.indexOf("installed builder@h1 bb-cp-record before=absent after=" + pin("BB_CPRECORD_NEW"))).isLessThan(lines.indexOf("installed builder@h1 bb-build before=" + BbFixtures.BB_BUILD_OLD
+                                                                                                                                             + " after=" + pin("BB_BUILD_NEW")));
+        Files.writeString(tools.resolve("bb-test"), "a stranger's bb-test\n");
+        var before = listing(tools);
+        var refused = install("builder@h1");
+
+        assertThat(refused.rc()).isEqualTo(65);
+        assertThat(refused.stdout().trim()).isEqualTo("refused builder@h1 bb-test installed=" + BbFixtures.md5("a stranger's bb-test\n".getBytes())
+                                                     + " expected=" + pin("BB_TEST_NEW"));
+        assertThat(listing(tools)).isEqualTo(before);
     }
 
     /// The 2026-11-09 repo version of bb-build, bb-queue-lib.sh or bb-queue (what cloudbb-3 holds), vendored verbatim as `bb/<name>.prev`.
@@ -218,7 +243,10 @@ class BbInstallIT {
         }
     }
 
-    private static final List<String> NEW_FILES = List.of("bb-mutate",
+    private static final List<String> NEW_FILES = List.of("bb-cp-record",
+                                                          "bb-test",
+                                                          "bb-testcount",
+                                                          "bb-mutate",
                                                           "bb-hold",
                                                           "bb-wait",
                                                           "bb-await",
@@ -234,7 +262,10 @@ class BbInstallIT {
         var first = install("builder@h1");
 
         assertThat(first.rc()).as(first.stdout() + first.stderr()).isZero();
-        assertThat(first.stdout().lines().toList()).containsExactly("installed builder@h1 bb-mutate before=absent after=" + pin("BB_MUTATE_NEW"),
+        assertThat(first.stdout().lines().toList()).containsExactly("installed builder@h1 bb-cp-record before=absent after=" + pin("BB_CPRECORD_NEW"),
+                                                                    "installed builder@h1 bb-test before=absent after=" + pin("BB_TEST_NEW"),
+                                                                    "installed builder@h1 bb-testcount before=absent after=" + pin("BB_TESTCOUNT_NEW"),
+                                                                    "installed builder@h1 bb-mutate before=absent after=" + pin("BB_MUTATE_NEW"),
                                                                     "installed builder@h1 bb-tickets before=absent after=" + pin("BB_TICKETS_NEW"),
                                                                     "installed builder@h1 bb-hold before=absent after=" + pin("BB_HOLD_NEW"),
                                                                     "installed builder@h1 bb-wait before=absent after=" + pin("BB_WAIT_NEW"),
@@ -277,7 +308,10 @@ class BbInstallIT {
         var second = install("builder@h1");
 
         assertThat(second.rc()).as(second.stdout() + second.stderr()).isZero();
-        assertThat(second.stdout().lines().toList()).containsExactly("unchanged builder@h1 bb-mutate " + pin("BB_MUTATE_NEW"),
+        assertThat(second.stdout().lines().toList()).containsExactly("unchanged builder@h1 bb-cp-record " + pin("BB_CPRECORD_NEW"),
+                                                                     "unchanged builder@h1 bb-test " + pin("BB_TEST_NEW"),
+                                                                     "unchanged builder@h1 bb-testcount " + pin("BB_TESTCOUNT_NEW"),
+                                                                     "unchanged builder@h1 bb-mutate " + pin("BB_MUTATE_NEW"),
                                                                      "unchanged builder@h1 bb-tickets " + pin("BB_TICKETS_NEW"),
                                                                      "unchanged builder@h1 bb-hold " + pin("BB_HOLD_NEW"),
                                                                      "unchanged builder@h1 bb-wait " + pin("BB_WAIT_NEW"),
@@ -484,11 +518,11 @@ class BbInstallIT {
 
         assertThat(install("builder@h1").rc()).isZero();
         Files.write(tools.resolve("bb-build"), prev("bb-build.precp"));
-
         var run = install("builder@h1");
 
         assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
-        assertThat(run.stdout()).contains("installed builder@h1 bb-build before=" + pin("BB_BUILD_PRECP") + " after=" + pin("BB_BUILD_NEW"));
+        assertThat(run.stdout()).contains("installed builder@h1 bb-build before=" + pin("BB_BUILD_PRECP")
+                                         + " after=" + pin("BB_BUILD_NEW"));
         assertThat(tools.resolve("bb-build")).hasBinaryContent(Files.readAllBytes(OPS_BB.resolve("bb-build")));
         assertThat(tools.resolve("bb-build.bak-" + pin("BB_BUILD_PRECP"))).hasBinaryContent(prev("bb-build.precp"));
     }
@@ -553,7 +587,10 @@ class BbInstallIT {
                              "bb-await",
                              "bb-netns-run",
                              "bb-portgroup.py",
-                             "bb-mutate")) {
+                             "bb-mutate",
+                             "bb-cp-record",
+                             "bb-test",
+                             "bb-testcount")) {
             Files.copy(OPS_BB.resolve(f), tools.resolve(f), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
         }
 
@@ -694,6 +731,9 @@ class BbInstallIT {
                                 "bb-netns-run",
                                 "bb-portgroup.py",
                                 "bb-mutate",
+                                "bb-cp-record",
+                                "bb-test",
+                                "bb-testcount",
                                 "install-bb-fields.sh")) {
             Files.copy(OPS_BB.resolve(name), copy.resolve(name));
         }
