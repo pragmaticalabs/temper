@@ -186,7 +186,7 @@ class BbTestGuardIT {
     private BbFixtures.Outcome bbTestWithRootPom(String pom, Path launcher) throws Exception {
         Files.writeString(co.resolve("pom.xml"), pom);
         git("add", "-A");
-        git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "pom");
+        git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "pom");
         recorded();
 
         return BbFixtures.run(List.of(BbFixtures.OPS_BB.resolve("bb-test").toString(),
