@@ -40,7 +40,7 @@
 # maven args or the dedup key). A malformed value never blocks a build: "bb-build: ignoring BB_<NAME>: not <regex>" on stderr,
 # the field is omitted. Old callers set none of these.
 # JBCT BOOTSTRAP (2026-11-19, feat/bb-jbct-bootstrap): a run that asks for a jbct:* goal, an org.pragmatica-lite:jbct-maven-plugin:* goal or the jbct
-# profile, in a checkout whose .m2-local lacks the jbct-maven-plugin jar of its own root-pom version, first runs CI's bootstrap
+# profile, in a checkout whose .m2-local lacks the jbct-maven-plugin jar of its effective version (the root pom's plugin entry), first runs CI's bootstrap
 # (`mvn install -B -DskipTests -pl <ci.yml list at HEAD> -am`) inside the same ticket, same cap and port group, before the main maven
 # (bb-jbct-bootstrap holds the rules and its exit codes: failure -> the ticket's rc is the bootstrap's and the main maven does not run;
 # 82-85 are refusals). build.log carries `bootstrap: jbct plugin <ver> installed into .m2-local|present|FAILED rc=<n>`; the ticket carries
