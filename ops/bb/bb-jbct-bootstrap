@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# bb-jbct-bootstrap <checkout> <mvn> <ticket-file> [the main run's mvn args...]
+# Called by bb-build's job subshell right before the main maven of a ticket (feat/bb-jbct-bootstrap, 2026-11-19). Output goes to the
+# caller's build.log. In a pragmatica checkout `mvn jbct:check` fails with "Could not find artifact org.pragmatica-lite:jbct-maven-plugin
+# :jar:<project.version>": the plugin version is ${project.version} (a release not on central) and maven resolves a CLI-goal plugin before
+# the reactor builds it, so `package jbct:check` in one invocation does not help. CI's answer is a separate first invocation; this is that.
+# Needed only when BOTH hold: (1) the args ask for a jbct:* goal, an org.pragmatica-lite:jbct-maven-plugin:* goal or the jbct profile
+# (-Pjbct, -P a,jbct, --activate-profiles; "!jbct" / "-jbct" deactivate and do not count), and (2)
+# <checkout>/.m2-local/org/pragmatica-lite/jbct-maven-plugin/<ver>/jbct-maven-plugin-<ver>.jar is absent. <ver> is the root pom's own
+# project <version> (not the parent's, not a dependency's). Any other call: prints nothing, does nothing, exit 0.
+# The module list is read from the checkout's OWN HEAD (git show HEAD:.github/workflows/ci.yml), never a copy: the -pl list of the
+# `mvn install ... -DskipTests -pl <list> -am` lines whose list is a literal (letters, digits, _ . / , -). A line with a quoted or
+# variable list (the CI group plan) is not such a line. All such lines must name one list. Never a guessed list.
+# The bootstrap is `mvn install -B -DskipTests -pl <list> -am` in the checkout, into its own .m2-local (maven.config), never ~/.m2.
+# Prints `bootstrap: jbct plugin <ver> installed into .m2-local` and appends `jbct_bootstrap=<ver>` to the ticket on success;
+# `bootstrap: jbct plugin <ver> present` when the jar is there (no install).
+# Exit: 0 nothing to do, present, or installed; the bootstrap maven's own rc (after `bootstrap: jbct plugin <ver> FAILED rc=<n>`);
+#   82 root pom has no parsable own <version>; 83 ci.yml unreadable at HEAD or holds no literal `mvn install -DskipTests -pl <list> -am`
+#   line; 84 those lines name different lists; 85 the checkout's .mvn/maven.config has no -Dmaven.repo.local (the install would go to ~/.m2).
+set -uo pipefail
+CO=$1; MVN=$2; T=$3; shift 3
+
+wants=0; prof=0
+for a in "$@"; do
+  if [ "$prof" = 1 ]; then prof=0; a="-P$a"; fi
+  case $a in
+    jbct:*|org.pragmatica-lite:jbct-maven-plugin:*) wants=1 ;;
+    -P|--activate-profiles) prof=1 ;;
+    -P*|--activate-profiles=*) for p in $(printf '%s' "${a#-P}" | sed 's/^--activate-profiles=//' | tr ',' ' '); do [ "$p" != jbct ] || wants=1; done ;;
+  esac
+done
+[ "$wants" = 1 ] || exit 0
+
+refuse() { echo "bootstrap: REFUSED $2 (rc=$1)"; exit "$1"; }
+
+VER=$(python3 -I - "$CO/pom.xml" 2> /dev/null <<'PY'
+import sys, xml.etree.ElementTree as ET
+root = ET.parse(sys.argv[1]).getroot()
+v = [c.text.strip() for c in root if c.tag.rsplit('}', 1)[-1] == 'version' and c.text]
+print(v[0] if len(v) == 1 else '')
+PY
+) || VER=""
+[[ $VER =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || refuse 82 "root pom.xml has no parsable own <version> (got '${VER}')"
+
+JAR=$CO/.m2-local/org/pragmatica-lite/jbct-maven-plugin/$VER/jbct-maven-plugin-$VER.jar
+[ ! -f "$JAR" ] || { echo "bootstrap: jbct plugin $VER present"; exit 0; }
+
+CI=$(git -C "$CO" show HEAD:.github/workflows/ci.yml 2> /dev/null) || refuse 83 "cannot read .github/workflows/ci.yml at the checkout's HEAD"
+LISTS=$(printf '%s\n' "$CI" | grep -E 'mvn[[:space:]]+install' | grep -E -e '-DskipTests' \
+        | sed -nE 's/.*[[:space:]]-pl[[:space:]]+([A-Za-z0-9_.\/,-]+)[[:space:]]+-am([[:space:]].*)?$/\1/p' | sort -u)
+[ -n "$LISTS" ] || refuse 83 "ci.yml at HEAD has no literal 'mvn install -DskipTests -pl <list> -am' line"
+[ "$(printf '%s\n' "$LISTS" | awk 'END { print NR }')" = 1 ] || refuse 84 "ci.yml at HEAD names different -pl lists: $(printf '%s' "$LISTS" | tr '\n' ' ')"
+
+grep -q '^-Dmaven\.repo\.local=' "$CO/.mvn/maven.config" 2> /dev/null || refuse 85 "$CO/.mvn/maven.config has no -Dmaven.repo.local (the install would write ~/.m2)"
+
+cd "$CO" || exit 1
+env -u HCLOUD_TOKEN JAVA_HOME=${BB_JAVA_HOME:-/usr/lib/jvm/java-25-openjdk-amd64} "$MVN" install -B -DskipTests -pl "$LISTS" -am
+rc=$?
+if [ "$rc" != 0 ]; then echo "bootstrap: jbct plugin $VER FAILED rc=$rc"; exit "$rc"; fi
+echo "bootstrap: jbct plugin $VER installed into .m2-local"
+printf 'jbct_bootstrap=%s\n' "$VER" >> "$T"
