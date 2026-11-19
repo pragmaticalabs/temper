@@ -23,7 +23,10 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 ///
 /// Probes (2026-11-19): close upstream over C instead of C u amd(C) in select() -> [#leafChange_selectsTheLeafItsDependents_andTheirOtherUpstreams]
 /// red; skip the aggregator/parent/pom-packaging FULL -> [#parentPomChange_runsTheFullReactor] red; skip the unmapped-path FULL ->
-/// [#unmappedPathBesideAModuleChange_runsTheFullReactor] red (the empty-S fallback alone already yields FULL for a lone unmapped path, so only the mixed case pins this guard).
+/// [#unmappedPath_runsTheFullReactor], [#unmappedPathBesideAModuleChange_runsTheFullReactor] and [#since_unmappedPath_recordsItsOwnReason] red
+/// (without the guard the empty-S fallback answers `FULL empty-set`; the asserted REASON pins each fallback on its own).
+/// Edge probes (inc2): drop the profile edges -> [#profileOnlyDependency_isAnEdge] red; drop the plugin-dependency edges -> [#pluginDependency_isAnEdge] red.
+/// `FULL empty-set` is a defensive branch no input reaches (a changed module is always in S), so no test pins it.
 class BbIncrementalIT {
     private static final Path MODULES = BbFixtures.OPS_BB.resolve("bb-modules.py");
     private static final Path BB_BUILD = BbFixtures.OPS_BB.resolve("bb-build");
@@ -112,7 +115,29 @@ class BbIncrementalIT {
 
         write(co,
               "pom.xml",
-              pom("root", null, "pom", List.of(), List.of("build-parent", "m", "u", "d", "x", "y", "z", "plib", "pdep", "glib", "gdep", "elib", "edep", "blib", "bdep", "tlib", "tdep", "nlib", "nest")));
+              pom("root",
+                  null,
+                  "pom",
+                  List.of(),
+                  List.of("build-parent",
+                          "m",
+                          "u",
+                          "d",
+                          "x",
+                          "y",
+                          "z",
+                          "plib",
+                          "pdep",
+                          "glib",
+                          "gdep",
+                          "elib",
+                          "edep",
+                          "blib",
+                          "bdep",
+                          "tlib",
+                          "tdep",
+                          "nlib",
+                          "nest")));
         write(co,
               "build-parent/pom.xml",
               pom("build-parent", null, "pom", List.of(), List.of()));
@@ -135,19 +160,22 @@ class BbIncrementalIT {
               "z/pom.xml",
               pom("z", "build-parent", "jar", List.of(), List.of()));
         for (var lib : List.of("plib", "glib", "elib", "blib", "tlib", "nlib")) {
-            write(co, lib + "/pom.xml", pom(lib, "build-parent", "jar", List.of(), List.of()));
+            write(co,
+                  lib + "/pom.xml",
+                  pom(lib, "build-parent", "jar", List.of(), List.of()));
         }
-
         // one dependent per edge kind maven orders the reactor by, each with exactly that edge and no top-level <dependencies>
         write(co,
               "pdep/pom.xml",
               with(pom("pdep", "build-parent", "jar", List.of(), List.of()),
-                   "<profiles><profile><id>p</id><dependencies>" + depOn("plib", "") + "</dependencies></profile></profiles>"));
+                   "<profiles><profile><id>p</id><dependencies>" + depOn("plib", "")
+                  + "</dependencies></profile></profiles>"));
         write(co,
               "gdep/pom.xml",
               with(pom("gdep", "build-parent", "jar", List.of(), List.of()),
-                   "<build><plugins><plugin><groupId>x</groupId><artifactId>some-plugin</artifactId><dependencies>" + depOn("glib", "")
-                   + "</dependencies></plugin></plugins></build>"));
+                   "<build><plugins><plugin><groupId>x</groupId><artifactId>some-plugin</artifactId><dependencies>" + depOn("glib",
+                                                                                                                            "")
+                  + "</dependencies></plugin></plugins></build>"));
         write(co,
               "edep/pom.xml",
               with(pom("edep", "build-parent", "jar", List.of(), List.of()),
@@ -159,10 +187,28 @@ class BbIncrementalIT {
         write(co,
               "tdep/pom.xml",
               with(pom("tdep", "build-parent", "jar", List.of(), List.of()),
-                   "<dependencies>" + depOn("tlib", "<type>test-jar</type><classifier>tests</classifier><scope>test</scope>") + "</dependencies>"));
-        write(co, "nest/pom.xml", pom("nest", "build-parent", "pom", List.of(), List.of("inner")));
-        write(co, "nest/inner/pom.xml", pom("inner", "build-parent", "jar", List.of("nlib"), List.of()));
-        for (var module : List.of("m", "u", "d", "x", "y", "z", "plib", "glib", "elib", "blib", "tlib", "nlib", "nest/inner")) {
+                   "<dependencies>" + depOn("tlib",
+                                            "<type>test-jar</type><classifier>tests</classifier><scope>test</scope>")
+                  + "</dependencies>"));
+        write(co,
+              "nest/pom.xml",
+              pom("nest", "build-parent", "pom", List.of(), List.of("inner")));
+        write(co,
+              "nest/inner/pom.xml",
+              pom("inner", "build-parent", "jar", List.of("nlib"), List.of()));
+        for (var module : List.of("m",
+                                  "u",
+                                  "d",
+                                  "x",
+                                  "y",
+                                  "z",
+                                  "plib",
+                                  "glib",
+                                  "elib",
+                                  "blib",
+                                  "tlib",
+                                  "nlib",
+                                  "nest/inner")) {
             write(co, module + "/src/main/java/A.java", "class A {}\n");
         }
 
