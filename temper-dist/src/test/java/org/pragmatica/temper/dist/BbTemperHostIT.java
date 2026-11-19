@@ -102,7 +102,7 @@ class BbTemperHostIT {
         bin = Files.createDirectories(dir.resolve("bin"));
         TestHosts.write(home);
         MacScripts.executable(bin.resolve("ssh"),
-                              "[ \"${@: -1}\" = true ] && exit 0  # bb-temper's path probe (2026-11-19); BbTemperPathIT covers it\nfor a in \"$@\"; do printf '%s\\n' \"$a\" >> \"$STUBS/ssh.args\"; done\necho -- >> \"$STUBS/ssh.args\"\n"
+                              "[ \"${@: -1}\" = true ] && { echo probe >> \"$STUBS/probe.log\"; exit 0; }  # bb-temper's path probe (2026-11-19): counted apart from the real calls\nfor a in \"$@\"; do printf '%s\\n' \"$a\" >> \"$STUBS/ssh.args\"; done\necho -- >> \"$STUBS/ssh.args\"\n"
                              + "exit \"$(cat \"$STUBS/ssh.rc\" 2> /dev/null || echo 0)\"\n");
         MacScripts.executable(bin.resolve("scp"), "exit 0\n");
         var gitInit = BbFixtures.process("git", "-c", "user.email=t@t", "-c", "user.name=t", "init", "-q")
@@ -191,6 +191,15 @@ class BbTemperHostIT {
 
     private String bound() throws IOException {
         return Files.readString(binding()).strip();
+    }
+
+    /// bb-temper's path probes (`ssh ... true`) the stub saw: they are not real calls, so they are counted on their own.
+    private long probes() throws IOException {
+        var file = dir.resolve("probe.log");
+
+        return Files.exists(file)
+               ? Files.readAllLines(file).size()
+               : 0;
     }
 
     private List<List<String>> sshCalls() throws IOException {
@@ -376,6 +385,7 @@ class BbTemperHostIT {
         assertThat(run.rc()).as(run.err()).isZero();
         assertThat(bound()).isEqualTo("bigboy");
         assertThat(sshCalls()).isNotEmpty().allSatisfy(call -> assertThat(call).contains(BIGBOY));
+        assertThat(probes()).as("bigboy has no jump, so no path probe").isZero();
         assertThat(run.err()).contains("bb-temper: host bigboy (fallback: controller unreachable)");
     }
 
@@ -668,7 +678,9 @@ class BbTemperHostIT {
         assertThat(run.rc()).as(run.err()).isZero();
         var args = sshCalls().get(0);
 
-        assertThat(args).contains("UserKnownHostsFile=\"" + spaced + "/" + TestHosts.KNOWN + "\"");
+        assertThat(args).contains("UserKnownHostsFile=\"" + spaced + "/" + TestHosts.KNOWN + "\"",
+                                  "ControlPath=\"" + spaced + "/.ssh/cm/bbj-%C\"");
+        assertThat(probes()).isEqualTo(1);
         assertThat(args).anySatisfy(a -> assertThat(a).startsWith("ProxyCommand=ssh -i \"" + spaced
                                                                  + "/" + TestHosts.KEY
                                                                  + "\" "));
@@ -687,7 +699,9 @@ class BbTemperHostIT {
         var args = sshCalls().get(0);
 
         assertThat(args).contains("UserKnownHostsFile=\"" + spaced + "/" + TestHosts.KNOWN + "\"",
-                                  "StrictHostKeyChecking=yes");
+                                  "StrictHostKeyChecking=yes",
+                                  "ControlPath=\"" + spaced + "/.ssh/cm/bbd-%C\"");
+        assertThat(probes()).as("one direct probe, forced by BB_PATH, no cache read").isEqualTo(1);
         assertThat(args).noneSatisfy(a -> assertThat(a).startsWith("ProxyCommand="));
     }
 

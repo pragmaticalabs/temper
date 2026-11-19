@@ -43,7 +43,7 @@ class BbSubmitIT {
         // ssh.err (optional) goes to stderr; with ssh.exec present the remote command (the last argument) runs locally,
         // with this test's HOME as the remote home, so a row can pin what the remote shell code does.
         MacScripts.executable(bin.resolve("ssh"),
-                              "[ \"${@: -1}\" = true ] && exit 0  # bb-temper's path probe (2026-11-19); BbTemperPathIT covers it\nfor a in \"$@\"; do printf '%s\\n' \"$a\" >> \"$STUBS/ssh.args\"; done\necho -- >> \"$STUBS/ssh.args\"\n"
+                              "[ \"${@: -1}\" = true ] && { echo probe >> \"$STUBS/probe.log\"; exit 0; }  # bb-temper's path probe (2026-11-19): counted apart from the real calls\nfor a in \"$@\"; do printf '%s\\n' \"$a\" >> \"$STUBS/ssh.args\"; done\necho -- >> \"$STUBS/ssh.args\"\n"
                              + "cat \"$STUBS/ssh.err\" >&2 2> /dev/null\n"
                              + "if [ -f \"$STUBS/ssh.exec\" ]; then for last; do :; done; exec bash -c \"$last\"; fi\n"
                              + "exit \"$(cat \"$STUBS/ssh.rc\" 2> /dev/null || echo 0)\"\n");
@@ -84,6 +84,15 @@ class BbSubmitIT {
         command.addAll(List.of(args));
 
         return MacScripts.run(command, env, dir);
+    }
+
+    /// bb-temper's path probes (`ssh ... true`) the stub saw: they are not real calls, so they are counted on their own.
+    private long probes() throws IOException {
+        var file = dir.resolve("probe.log");
+
+        return Files.exists(file)
+               ? Files.readAllLines(file).size()
+               : 0;
     }
 
     /// The stub's calls: one list of arguments per call.
@@ -354,6 +363,7 @@ class BbSubmitIT {
                               env("BB_SUBMIT", MacScripts.SUBMIT.toString(), "BB_AGENT", "t3wpm", "BB_HOST", "bigboy"));
 
         assertThat(run.out()).as(run.err()).isEqualTo("rc=0\n");
+        assertThat(probes()).as("bigboy has no jump, so no path probe").isZero();
         assertThat(remoteCommand()).matches("^BB_SESSION_PID=" + run.pid()
                                            + " BB_SESSION_START=\\d+ BB_SESSION_LABEL=CTO BB_AGENT=t3wpm BB_OWNER=t3 ~/tools/bb-build ~/work/co/t3-x -B$");
     }

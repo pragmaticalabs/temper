@@ -3,6 +3,8 @@ package org.pragmatica.temper.dist;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.FileTime;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -14,6 +16,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assumptions.assumeFalse;
 
 
 /// `ops/bb/bb-temper` path choice for a host behind a jump host (2026-11-19): direct first, jump on a CONNECT failure only,
@@ -37,16 +40,28 @@ class BbTemperPathIT {
         Files.writeString(home.resolve(TestHosts.KNOWN), "x ssh-ed25519 AAAA\n");
         Files.createDirectories(home.resolve(".temper/bb-bind"));
         Files.writeString(home.resolve(".temper/bb-bind/t3-x"), HOST + "\n");
+        // %C stands for the host here. A live master is a file at the ControlPath ssh would use: the command line's, else the
+        // one ~/.ssh/config would give (an alias with ControlPath ~/.ssh/cm/%C). A live master answers whatever the network does.
         MacScripts.executable(bin.resolve("ssh"),
                               """
-                path=direct; for a in "$@"; do case $a in ProxyCommand=*) path=jump ;; esac; done
+                path=direct; host=; cp=
+                for a in "$@"; do case $a in
+                  ProxyCommand=*) path=jump ;;
+                  ControlPath=*) cp=$(printf %s "${a#ControlPath=}" | tr -d '"') ;;
+                  *@*) [ -n "$host" ] || host=$a ;;
+                esac; done
+                [ -n "$cp" ] || cp=$HOME/.ssh/cm/%C
+                sock=${cp//%C/C-$host}
                 cmd=${@: -1}; kind=cmd; [ "$cmd" != true ] || kind=probe
                 echo "$path $kind" >> "$STUBS/calls.log"
                 echo "$path $*" >> "$STUBS/args.log"
-                case $(cat "$STUBS/$path.mode" 2> /dev/null || echo ok) in
-                  refuse) exit 255 ;;
-                  hang) sleep 30; exit 255 ;;
-                esac
+                if [ ! -e "$sock" ]; then
+                  case $(cat "$STUBS/$path.mode" 2> /dev/null || echo ok) in
+                    refuse) exit 255 ;;
+                    hang) sleep 30; exit 255 ;;
+                  esac
+                  mkdir -p "$(dirname "$sock")"; : > "$sock"
+                fi
                 [ "$kind" = probe ] && exit 0
                 exit "$(cat "$STUBS/cmd.rc" 2> /dev/null || echo 0)"
                 """);
@@ -69,6 +84,10 @@ class BbTemperPathIT {
     }
 
     private MacScripts.Result build(String... more) throws Exception {
+        return run(List.of("build", "t3-x", "-B"), more);
+    }
+
+    private MacScripts.Result run(List<String> verb, String... more) throws Exception {
         var env = new LinkedHashMap<>(MacScripts.env(Map.of("HOME",
                                                             home.toString(),
                                                             "PATH",
@@ -84,9 +103,11 @@ class BbTemperPathIT {
             env.put(more[i], more[i + 1]);
         }
 
-        return MacScripts.run(List.of("bash", MacScripts.BB_TEMPER.toString(), "build", "t3-x", "-B"),
-                              env,
-                              dir);
+        var command = new ArrayList<>(List.of("bash", MacScripts.BB_TEMPER.toString()));
+
+        command.addAll(verb);
+
+        return MacScripts.run(command, env, dir);
     }
 
     private List<String> calls() throws IOException {
@@ -95,6 +116,16 @@ class BbTemperPathIT {
         return Files.exists(file)
                ? Files.readAllLines(file)
                : List.of();
+    }
+
+    private String cacheDirListing() throws IOException {
+        try (var files = Files.list(home.resolve(".temper/bb-path"))) {
+            return files.map(f -> f.getFileName()
+                                   .toString())
+                        .sorted()
+                        .toList()
+                        .toString();
+        }
     }
 
     private long count(String call) throws IOException {
@@ -261,5 +292,135 @@ class BbTemperPathIT {
         assertThat(run.rc()).as(run.err()).isZero();
         assertThat(run.err()).doesNotContain(" via ");
         assertThat(calls()).containsExactly("direct cmd");
+    }
+
+    // ---- route-specific control masters (M1) ------------------------------------------------------------------------
+    @Test
+    void liveJumpMaster_doesNotSatisfyTheDirectProbe() throws Exception {
+        mode("direct", "refuse");
+        assertThat(build("BB_PATH", "jump").rc()).isZero();
+        Files.delete(dir.resolve("calls.log"));
+        var run = build();
+
+        assertThat(run.rc()).as(run.err()).isZero();
+        assertThat(run.err()).contains("via jump(");
+        assertThat(calls()).containsExactly("direct probe", "jump probe", "jump cmd");
+        assertThat(cached()).isEqualTo("jump");
+    }
+
+    @Test
+    void aliasMaster_atTheUnprefixedControlPath_doesNotSatisfyTheDirectProbe() throws Exception {
+        var alias = Files.createDirectories(home.resolve(".ssh/cm")).resolve("C-" + TestHosts.C3);
+
+        Files.createFile(alias);
+        mode("direct", "refuse");
+        var run = build();
+
+        assertThat(run.rc()).as(run.err()).isZero();
+        assertThat(calls()).containsExactly("direct probe", "jump probe", "jump cmd");
+    }
+
+    @Test
+    void controlPaths_areRouteSpecific_quoted_andTheInnerProxyHopTakesNoMaster() throws Exception {
+        var cm = "ControlPath=\"" + home + "/.ssh/cm/";
+
+        assertThat(build().rc()).isZero();
+        var direct = Files.readString(dir.resolve("args.log"));
+
+        assertThat(direct).contains(cm + "bbd-%C\"", "ControlMaster=auto", "ControlPersist=10m").doesNotContain("bbj-");
+        Files.delete(dir.resolve("args.log"));
+        assertThat(build("BB_PATH", "jump").rc()).isZero();
+        var jump = Files.readString(dir.resolve("args.log"));
+
+        assertThat(jump).contains(cm + "bbj-%C\"", "ControlMaster=auto").doesNotContain("bbd-");
+        assertThat(jump).contains("-o ControlMaster=no -o ControlPath=none -o ConnectTimeout=15 -W %h:%p");
+    }
+
+    @Test
+    void controlDirectory_isCreatedPrivate() throws Exception {
+        assertThat(Files.exists(home.resolve(".ssh"))).isFalse();
+        assertThat(build().rc()).isZero();
+        assertThat(PosixFilePermissions.toString(Files.getPosixFilePermissions(home.resolve(".ssh")))).isEqualTo("rwx------");
+        assertThat(PosixFilePermissions.toString(Files.getPosixFilePermissions(home.resolve(".ssh/cm")))).isEqualTo("rwx------");
+    }
+
+    // ---- the cache file ------------------------------------------------------------------------------------------
+    @Test
+    void cacheEpochTooLongForSafeArithmetic_isReprobed_notTrustedAsFresh() throws Exception {
+        Files.createDirectories(home.resolve(".temper/bb-path"));
+        Files.writeString(home.resolve(".temper/bb-path/" + HOST), "jump 99999999999999999999\n");
+        var run = build();
+
+        assertThat(run.rc()).as(run.err()).isZero();
+        assertThat(calls()).containsExactly("direct probe", "direct cmd");
+        assertThat(cached()).isEqualTo("direct");
+    }
+
+    @Test
+    void cacheEpochFromTheFuture_isReprobed() throws Exception {
+        cache("jump", -3600);
+        var run = build();
+
+        assertThat(run.rc()).as(run.err()).isZero();
+        assertThat(calls()).containsExactly("direct probe", "direct cmd");
+    }
+
+    @Test
+    void cachePutFailing_removesItsTmpFile_andWarnsOnce_runStillSucceeds() throws Exception {
+        MacScripts.executable(dir.resolve("bin/mv"), "exit 1\n");
+        var run = build();
+
+        assertThat(run.rc()).as(run.err()).isZero();
+        assertThat(cacheDirListing()).isEqualTo("[]");
+        assertThat(run.err().split("cannot write the path cache", -1)).hasSize(2);
+    }
+
+    @Test
+    void cachePut_sweepsTmpFilesOfKilledRuns_butNotAFreshOne() throws Exception {
+        var d = Files.createDirectories(home.resolve(".temper/bb-path"));
+        var stale = Files.createFile(d.resolve(HOST + ".tmp.4242"));
+        var fresh = Files.createFile(d.resolve(HOST + ".tmp.4343"));
+
+        Files.setLastModifiedTime(stale,
+                                  FileTime.from(Instant.now().minusSeconds(600)));
+        assertThat(build().rc()).isZero();
+        assertThat(stale).doesNotExist();
+        assertThat(fresh).exists();
+    }
+
+    @Test
+    void unwritableTemperDirectory_cachePutWarnsOnce_withoutMkdirOrMvNoise_andTheRunSucceeds() throws Exception {
+        var temper = home.resolve(".temper");
+
+        Files.setPosixFilePermissions(temper, PosixFilePermissions.fromString("r-xr-xr-x"));
+        try {
+            assumeFalse(Files.isWritable(temper), "running as a user that ignores directory modes");
+            var run = build();
+
+            assertThat(run.rc()).as(run.err()).isZero();
+            assertThat(run.err().split("cannot write the path cache", -1)).hasSize(2);
+            assertThat(run.err()).doesNotContain("mkdir:", "mv:", "Permission denied");
+        } finally {
+            Files.setPosixFilePermissions(temper, PosixFilePermissions.fromString("rwxr-xr-x"));
+        }
+    }
+
+    // ---- the host pick runs in $(...): a path failure there must fall back, not abort ------------------------------------
+    @Test
+    void pickWithBothPathsDown_printsTheFallbackLine_thenFailsOnTheRealSetup() throws Exception {
+        Files.delete(home.resolve(".temper/bb-bind/t3-x"));
+        Files.writeString(home.resolve(".config/bb-temper/hosts"),
+                          "key ~/" + TestHosts.KEY
+                         + "\nhost cloudbb-3 " + TestHosts.C3
+                         + " " + TestHosts.BIGBOY
+                         + " ~/" + TestHosts.KNOWN
+                         + " auto\n");
+        mode("direct", "refuse");
+        mode("jump", "refuse");
+        var run = run(List.of("checkout", "t3-y", "HEAD"));
+
+        assertThat(run.rc()).isEqualTo(69);
+        assertThat(run.err()).contains("host cloudbb-3 (fallback: cannot reach it to read the controller)")
+                  .contains("both failed to connect");
     }
 }
