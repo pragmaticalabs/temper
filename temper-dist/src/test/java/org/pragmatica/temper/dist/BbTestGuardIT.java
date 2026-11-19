@@ -397,7 +397,7 @@ class BbTestGuardIT {
 
     @Test
     void digest_oneFileNamedLikeTwoDigestLines_isNotTheSameTreeAsTwoFiles() throws Exception {
-        // under "path<TAB>sha<LF>" lines, {lib/x: A, lib/y: B} and the single file "lib/x<TAB>sha(A)<LF>lib/y" (a directory named "x<TAB>sha(A)<LF>lib" holding y): B hash alike
+        // under unencoded "path<TAB>mode<TAB>sha<LF>" lines, {lib/x: A, lib/y: B} and the single file "lib/x<TAB>-<TAB>sha(A)<LF>lib/y" (a directory named "x<TAB>-<TAB>sha(A)<LF>lib" holding y): B hash alike
         var lib = co.resolve("lib");
 
         Files.writeString(lib.resolve("x"), "A");
@@ -405,7 +405,7 @@ class BbTestGuardIT {
         recorded();
         Files.delete(lib.resolve("x"));
         Files.delete(lib.resolve("y"));
-        var weird = Files.createDirectories(lib.resolve("x\t" + sha256("A") + "\nlib"));
+        var weird = Files.createDirectories(lib.resolve("x\t-\t" + sha256("A") + "\nlib"));
 
         Files.writeString(weird.resolve("y"), "B");
         var run = check();
