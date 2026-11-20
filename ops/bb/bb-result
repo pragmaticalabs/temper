@@ -31,9 +31,14 @@
 #   be made); the verdict is the ticket's rc, not the XML (a build can be rc 0 with zero
 #   reports, or rc != 0 with none, as in a compile failure). "first failing" is the first by report path, then document order.
 #   The log is scanned in bounded chunks: its first 64 MB, then its last 16 MB; a first [ERROR] line elsewhere is reported as not found.
+#   A mvn run by hand in the checkout AFTER the ticket, outside bb-build, does not touch .bb/start: the ticket then still looks like the
+#   checkout's latest build, and that run's newer reports are counted as the ticket's. Only bb-build runs are told apart.
+#   Only regular files are read (a FIFO or device named TEST-*.xml is skipped). Every character that is not printable (ESC, NUL, DEL, C1,
+#   a byte that is not UTF-8) is printed as `?` in text and --json alike, so a log or a test message cannot drive the terminal.
 import json
 import os
 import re
+import stat
 import sys
 import time
 import xml.etree.ElementTree as ET
@@ -50,6 +55,21 @@ LOG_HEAD = 64 * 1024 * 1024
 LOG_TAIL = 16 * 1024 * 1024
 CHUNK = 1024 * 1024
 USAGE = 'usage: bb-result <ticket-id> [--json]   (the ticket= value bb-build printed)'
+
+
+def clean(s):
+    """Every char that is not printable (ESC, NUL, DEL, C1, U+FFFD from a bad byte, a lone surrogate) becomes `?`; tab stays."""
+    return ''.join(c if (c == '\t' or (c.isprintable() and c != '\ufffd')) else '?' for c in s)
+
+
+def clean_all(o):
+    if isinstance(o, str):
+        return clean(o)
+    if isinstance(o, list):
+        return [clean_all(x) for x in o]
+    if isinstance(o, dict):
+        return {k: clean_all(v) for k, v in o.items()}
+    return o
 
 
 def cut(s, n=LINE_CUT):
@@ -91,7 +111,8 @@ def find_reports(co, started):
                     if f.startswith('TEST-') and f.endswith('.xml'):
                         p = os.path.join(root, f)
                         try:
-                            if os.stat(p).st_mtime >= started:
+                            st = os.stat(p)
+                            if stat.S_ISREG(st.st_mode) and st.st_mtime >= started:   # a FIFO or device would block the parse
                                 found.append(p)
                                 dirs.add(root)
                         except OSError:
@@ -140,9 +161,16 @@ def parse_report(path):
     return counts, failing
 
 
-def first_error(log):
-    pat = re.compile(rb'^\[ERROR\][ \t]*(\S.*?)[ \t\r]*$')
+def error_text(ln):
+    """The line without trailing blanks when it is `[ERROR]` followed by something other than blanks, else None. Linear: no regex."""
+    if not ln.startswith(b'[ERROR]'):
+        return None
+    if not ln[7:].strip(b' \t\r'):
+        return None
+    return ln.rstrip(b' \t\r').decode('utf-8', 'replace')
 
+
+def first_error(log):
     def scan(f, start, limit):
         f.seek(start)
         left, carry = limit, b''
@@ -154,17 +182,12 @@ def first_error(log):
             lines = (carry + buf).split(b'\n')
             carry = lines.pop()
             for ln in lines:
-                if ln.startswith(b'[ERROR]'):
-                    m = pat.match(ln.rstrip(b'\r'))
-                    if m:
-                        return m.group(0).decode('utf-8', 'replace')
+                t = error_text(ln)
+                if t:
+                    return t
             if len(carry) > CHUNK:
                 carry = carry[:8192]   # a monster line: only its start matters
-        if carry.startswith(b'[ERROR]'):
-            m = pat.match(carry)
-            if m:
-                return m.group(0).decode('utf-8', 'replace')
-        return None
+        return error_text(carry)
 
     try:
         with open(log, 'rb') as f:
@@ -260,7 +283,7 @@ def main(argv):
                'wall': wall, 'started': int(started) if is_num(started) else None, 'ended': int(ended) if is_num(ended) else None,
                'co': co, 'log': log, 'tests': tests, 'reportDirs': dirs, 'reports': reports, 'failing': failing,
                'firstError': err, 'firstErrorNote': err_why}
-        print(json.dumps(out))
+        print(json.dumps(clean_all(out)))
         return 0
 
     lines = [head]
@@ -279,7 +302,7 @@ def main(argv):
         lines.append('first error: ' + err)
     elif err_why:
         lines.append('first error: ' + err_why)
-    print('\n'.join(cut(ln) for ln in lines))
+    print('\n'.join(cut(clean(ln)) for ln in lines))
     return 0
 
 

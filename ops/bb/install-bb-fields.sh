@@ -61,7 +61,7 @@ readonly BB_BUILD_NEW=24183c7d359b4030faeef894bbe4ba52
 # bb-jbct-bootstrap: absent on every host before its first install; bb-build calls it, so it is installed first.
 readonly BB_JBCTBOOT_NEW=3e5396ecee48b99949456cf805df1e60
 # bb-result: absent on every host before its first install. No trailing comment on a pin line: bb-drift reads it by pattern.
-readonly BB_RESULT_NEW=3ad17efe558315488c28b0edf0218cca
+readonly BB_RESULT_NEW=2b99dd5c414175c4fd40a9836da76298
 readonly BB_TICKETS_OLD=472cd816644fe0ee0902b8da3d33de8e   # before the per-ticket progressAt (issue #10)
 readonly BB_TICKETS_PRE31=e1aeba98541ba781295001f956b08c8d   # live since 2026-11-12: drops a ticket key with a capital letter
 readonly BB_TICKETS_NEW=6174119f0cd567c5dc462d1e063c6214

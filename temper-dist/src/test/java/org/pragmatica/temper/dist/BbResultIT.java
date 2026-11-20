@@ -10,6 +10,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 import org.junit.jupiter.api.BeforeEach;
@@ -28,6 +29,11 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 /// accept a bare `[ERROR]` as the first error -> [#aCompileFailure_hasNoReports_andTheFirstErrorComesFromTheLog]; drop the 300-char cut ->
 /// [#aLineOverThreeHundredChars_isCut]; exit 0 for a running ticket -> [#waitingAndRunning_exit3_unknown4_malformedId2]; keep only the first failing test in
 /// --json -> [#json_carriesEveryFailingTest_andTheFullDetail]; read the whole log at once -> [#aHugeLog_isReadInBoundedChunks].
+/// Second round (verifier vbres1): quadratic `[ERROR]` line (the old lazy regex) -> [#aLogLineOfTwoHundredThousandBlanks_isScannedInLinearTime];
+/// drop the testsuites-root branch -> [#aTestsuitesRoot_countsEveryTestsuiteInIt]; os.walk followlinks=True ->
+/// [#aSymlinkLoopAndASymlinkOutOfTheCheckout_areNotFollowed]; drop `.m2-local` from PRUNE -> [#aReportUnderM2Local_isNotCounted]; drop sorted() ->
+/// [#theFirstFailingTest_isTheOneFromTheFirstReportPathInSortedOrder]; print raw control bytes -> [#controlBytesInALogAndAMessage_areReplacedInTextAndJson];
+/// drop the regular-file test -> [#aFifoNamedLikeAReport_isSkippedNotRead].
 /// bb-build --help is covered by BbBuildFieldsIT.
 class BbResultIT {
     private static final Path BB_RESULT = BbFixtures.OPS_BB.resolve("bb-result");
@@ -351,6 +357,155 @@ class BbResultIT {
 
         assertThat(limited.rc()).as(limited.stderr()).isZero();
         assertThat(lines(limited).get(2)).startsWith("first error: no [ERROR] line in the first 64 MB or last 16 MB");
+    }
+
+    /// Like result(), but the script must end within `seconds` (a hang is a failure, not a stuck build).
+    private BbFixtures.Outcome resultWithin(int seconds, String... args) throws Exception {
+        var env = new HashMap<String, String>();
+
+        env.put("PATH", System.getenv("PATH"));
+        env.put("HOME", dir.toString());
+        env.put("BB_TEST_QUEUE_ROOT", queue.toString());
+        var command = new ArrayList<>(List.of("python3", BB_RESULT.toString()));
+
+        command.addAll(List.of(args));
+        var builder = BbFixtures.process(command, env);
+
+        builder.redirectErrorStream(false);
+        var out = Files.createTempFile(dir, "out", ".txt");
+        var err = Files.createTempFile(dir, "err", ".txt");
+
+        builder.redirectOutput(out.toFile());
+        builder.redirectError(err.toFile());
+        var process = builder.start();
+
+        if (!process.waitFor(seconds, TimeUnit.SECONDS)) {
+            process.destroyForcibly();
+            throw new AssertionError("bb-result did not finish within " + seconds + " s");
+        }
+
+        return new BbFixtures.Outcome(process.exitValue(), Files.readString(out), Files.readString(err));
+    }
+
+    @Test
+    void aLogLineOfTwoHundredThousandBlanks_isScannedInLinearTime() throws Exception {
+        done("4-1", "finished", "1");
+        bbFiles(STARTED, "[ERROR] a" + " ".repeat(200_000) + "b\n");
+        var t0 = System.nanoTime();
+        var run = resultWithin(20, "4-1");
+        var seconds = (System.nanoTime() - t0) / 1_000_000_000L;
+
+        assertThat(run.rc()).as(run.stderr()).isZero();
+        assertThat(lines(run).get(2)).startsWith("first error: [ERROR] a   ").endsWith("...");
+        assertThat(seconds).as("seconds for one 200 kB line").isLessThan(5);
+    }
+
+    @Test
+    void aTestsuitesRoot_countsEveryTestsuiteInIt() throws Exception {
+        done("4-2", "finished", "0");
+        bbFiles(STARTED, "");
+        report("a/target/surefire-reports/TEST-multi.xml",
+               "<?xml version=\"1.0\"?>\n<testsuites>\n<testsuite name=\"x\" tests=\"3\" failures=\"1\" errors=\"0\" skipped=\"0\">"
+              + failed("a.X", "bad", "failure", "m") + "</testsuite>\n<testsuite name=\"y\" tests=\"4\" failures=\"0\" errors=\"1\" skipped=\"2\"/>\n</testsuites>\n");
+        var run = result("4-2");
+
+        assertThat(lines(run)).contains("tests: 7 run, 1 failures, 1 errors, 2 skipped (1 report files)");
+    }
+
+    @Test
+    void aSymlinkLoopAndASymlinkOutOfTheCheckout_areNotFollowed() throws Exception {
+        done("4-3", "finished", "0");
+        bbFiles(STARTED, "");
+        report("a/target/surefire-reports/TEST-real.xml", suite(1, 0, 0, 0, ""));
+        Files.createSymbolicLink(co.resolve("a/loop"), co.resolve("a"));
+        Files.createSymbolicLink(co.resolve("loopUp"), co);
+        var outside = dir.resolve("outside");
+
+        Files.createDirectories(outside.resolve("target/surefire-reports"));
+        var foreign = outside.resolve("target/surefire-reports/TEST-out.xml");
+
+        Files.writeString(foreign, suite(50, 0, 0, 0, ""));
+        Files.setLastModifiedTime(foreign, FileTime.fromMillis((STARTED + 30) * 1000));
+        Files.createSymbolicLink(co.resolve("ext"), outside);
+        var run = resultWithin(60, "4-3");
+
+        assertThat(run.rc()).as(run.stderr()).isZero();
+        assertThat(lines(run)).contains("tests: 1 run, 0 failures, 0 errors, 0 skipped (1 report files)");
+    }
+
+    @Test
+    void aReportUnderM2Local_isNotCounted() throws Exception {
+        done("4-4", "finished", "0");
+        bbFiles(STARTED, "");
+        report("a/target/surefire-reports/TEST-real.xml", suite(1, 0, 0, 0, ""));
+        report(".m2-local/org/x/y/target/surefire-reports/TEST-m2.xml", suite(40, 0, 0, 0, ""));
+        var run = result("4-4");
+
+        assertThat(lines(run)).contains("tests: 1 run, 0 failures, 0 errors, 0 skipped (1 report files)");
+    }
+
+    @Test
+    void theFirstFailingTest_isTheOneFromTheFirstReportPathInSortedOrder() throws Exception {
+        done("4-5", "finished", "1");
+        bbFiles(STARTED, "");
+        // created in an order that is neither sorted nor reverse-sorted, so no directory listing order (creation, reverse creation, hash) is the sorted one
+        var created = List.of("m5", "m2", "m8", "m1", "m7", "m3", "m6", "m4");
+
+        for (var m : created) {
+            report(m + "/target/surefire-reports/TEST-" + m + ".xml", suite(1, 1, 0, 0, failed(m + ".T", "t" + m, "failure", "msg " + m)));
+        }
+
+        var text = result("4-5");
+        var json = result("4-5", "--json").stdout();
+
+        assertThat(lines(text).get(3)).isEqualTo("first failing: m1.T#tm1: msg m1");
+
+        var positions = new ArrayList<Integer>();
+
+        for (var i = 1; i <= 8; i++) {
+            positions.add(json.indexOf("\"name\": \"tm" + i + "\""));
+        }
+
+        assertThat(positions).as("failing tests in --json, sorted by report path").isSorted().doesNotContain(-1);
+    }
+
+    @Test
+    void controlBytesInALogAndAMessage_areReplacedInTextAndJson() throws Exception {
+        done("4-6", "finished", "1");
+        bbFiles(STARTED, "");
+        Files.write(co.resolve(".bb/build.log"), new byte[]{'[', 'E', 'R', 'R', 'O', 'R', ']', ' ', 'b', 'a', 'd', 0x1b, '[', '3', '1', 'm', 'r', 0, (byte) 0xff, ' ', 'e', 'n', 'd', '\n'});
+        var logRun = result("4-6");
+        var logJson = result("4-6", "--json");
+
+        assertThat(lines(logRun)).contains("first error: [ERROR] bad?[31mr?? end");
+        assertThat(logJson.stdout()).contains("bad?[31mr?? end").doesNotContain("\\u001b").doesNotContain("\\u0000");
+
+        done("4-7", "finished", "1");
+        report("a/target/surefire-reports/TEST-a.xml", suite(1, 1, 0, 0, failed("a.A", "t", "failure", "m\u007f\u009bz")));
+        var msgRun = result("4-7");
+        var msgJson = result("4-7", "--json");
+
+        assertThat(lines(msgRun).get(3)).isEqualTo("first failing: a.A#t: m??z");
+        assertThat(msgJson.stdout()).contains("\"message\": \"m??z\"");
+
+        for (var out : List.of(logRun.stdout(), logJson.stdout(), msgRun.stdout(), msgJson.stdout())) {
+            assertThat(out.chars().filter(c -> (c < 0x20 && c != '\n' && c != '\t') || c == 0x7f || (c >= 0x80 && c < 0xa0) || c == 0xfffd)).isEmpty();
+        }
+    }
+
+    @Test
+    void aFifoNamedLikeAReport_isSkippedNotRead() throws Exception {
+        done("4-8", "finished", "0");
+        bbFiles(STARTED, "");
+        report("a/target/surefire-reports/TEST-good.xml", suite(2, 0, 0, 0, ""));
+        var fifo = co.resolve("a/target/surefire-reports/TEST-x.xml");
+
+        assertThat(new ProcessBuilder("mkfifo", fifo.toString()).start().waitFor()).isZero();
+        Files.setLastModifiedTime(fifo, FileTime.fromMillis((STARTED + 30) * 1000));
+        var run = resultWithin(20, "4-8");
+
+        assertThat(run.rc()).as(run.stderr()).isZero();
+        assertThat(lines(run)).contains("tests: 2 run, 0 failures, 0 errors, 0 skipped (1 report files)");
     }
 
     @Test
