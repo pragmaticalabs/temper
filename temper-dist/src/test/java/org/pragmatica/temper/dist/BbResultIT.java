@@ -500,9 +500,9 @@ class BbResultIT {
         report("a/target/surefire-reports/TEST-good.xml", suite(2, 0, 0, 0, ""));
         var fifo = co.resolve("a/target/surefire-reports/TEST-x.xml");
 
-        assertThat(new ProcessBuilder("mkfifo", fifo.toString()).start().waitFor()).isZero();
+        assertThat(BbFixtures.process("mkfifo", fifo.toString()).start().waitFor()).isZero();
         // touch, not Files.setLastModifiedTime: the JDK opens the file first, and opening a FIFO with no peer blocks forever
-        assertThat(new ProcessBuilder("touch", "-d", "@" + (STARTED + 30), fifo.toString()).start().waitFor()).isZero();
+        assertThat(BbFixtures.process("touch", "-d", "@" + (STARTED + 30), fifo.toString()).start().waitFor()).isZero();
         var run = resultWithin(20, "4-8");
 
         assertThat(run.rc()).as(run.stderr()).isZero();
