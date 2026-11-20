@@ -128,6 +128,23 @@ class BbOffQueueReactorIT {
                   .containsExactly("420", "430");
     }
 
+    /// A queued port-group ticket with BB_PG_ISOLATE runs its mvn in a container `bb-<ticket id>` (label bb.ticket) through bb-netns-run, so
+    /// its ppid chain ends at containerd-shim, never at `bb-build __run` (seen live: cloudbb-6 pid 21520, ~/work/co/v3468b-m). It is the
+    /// queue's own, whatever its cwd; a launcher in another container is not. Mutation: match only `temper-*` names in offqueue_reactors ->
+    /// red.
+    @Test
+    void aNetnsTicketsReactor_isTheQueuesOwn_aLookAlikeContainerIsNot() throws Exception {
+        processes("  399     1 1000 /usr/bin/containerd-shim-runc-v2 -id x",
+                  "  400   399 1000 /sbin/docker-init -- /usr/bin/bash -c mvn",
+                  "  410   400 9000 /usr/bin/java -classpath boot " + marker,
+                  "  420   399 9000 /usr/bin/java -classpath boot " + marker);
+        proc("410", co.resolve("v3468b-m"), 10, "0::/system.slice/docker-" + ID_QUEUE + ".scope");
+        proc("420", co.resolve("v3468b-n"), 10, "0::/system.slice/docker-" + ID_OTHER + ".scope");
+        Files.writeString(dockerPs,
+                          ID_QUEUE + " bb-1795150033515302636-1530446\n" + ID_OTHER + " mybb-1795150033515302636-1\n");
+        assertThat(offq().lines().map(line -> line.split("\t") [0]).toList()).containsExactly("420");
+    }
+
     @Test
     void whenDockerCannotAnswer_aContainerisedLauncherIsListed_neverHidden() throws Exception {
         processes("  400     1 9000 /usr/bin/java -classpath boot " + marker);
