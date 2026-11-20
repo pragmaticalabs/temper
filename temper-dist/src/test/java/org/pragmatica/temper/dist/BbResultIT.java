@@ -335,15 +335,15 @@ class BbResultIT {
         assertThat(run.stdout().length()).isLessThan(1024);
         assertThat(seconds).as("seconds for a 50 MB log").isLessThan(20);
 
-        // a 300 MB log (sparse, no newline at all) under a 700 MB address-space limit: reading it whole cannot fit
+        // a 600 MB log (sparse, no newline at all) under a 400 MB address-space limit: reading it whole cannot fit (300 MB under 700 MB let the unbounded read pass)
         Files.delete(log);
         try (var raf = new RandomAccessFile(log.toFile(), "rw")) {
-            raf.setLength(300L * 1024 * 1024);
+            raf.setLength(600L * 1024 * 1024);
         }
 
         var limited = BbFixtures.run(List.of("bash",
                                              "-c",
-                                             "ulimit -v 700000; exec python3 \"$0\" 1-22",
+                                             "ulimit -v 400000; exec python3 \"$0\" 1-22",
                                              BB_RESULT.toString()),
                                      Map.of("PATH", System.getenv("PATH"), "HOME", dir.toString(), "BB_TEST_QUEUE_ROOT", queue.toString()),
                                      null,
