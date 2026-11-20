@@ -7,20 +7,26 @@ Spec (data only):
    "mutations": [{"id": "m1", "file": "rel/path.java", "kind": "lit"|"re", "old": "...", "new": "...",
                   "expect": ["TestClass#method", "TestClass"], "zone": "optional"}]}
 Outcomes: RED SURVIVED APPLY-INVALID CALL-REFUSED TIMEOUT NO-XML COMPILE-ERROR (+ BUILD-FAIL: build failed,
-no test failure, no compile error; never RED, never SURVIVED) and NOT-RUN: the mutant's expected tests did not run
-(or the run was aborted); NOT-RUN is neither detected nor survived and is tallied apart.
+no test failure, no compile error; never RED, never SURVIVED), NOT-RUN: the mutant's expected tests did not run
+(or the run was aborted), and UNPROVEN: the mutant hit a DERIVED per-mutant bound (see PER-MUTANT BOUND). NOT-RUN and UNPROVEN
+are neither detected nor survived and are tallied apart.
 CREDIT (multi-module soundness): a mutant is credited RED/SURVIVED only if, in ITS OWN module (a module whose control
 reports held the expected test class), a surefire/failsafe XML newer than the build marker names each expected class and
 has testcases > 0. A red module fails the reactor, so modules downstream of it never run and leave stale or no XML:
 their mutants are NOT-RUN, never SURVIVED. A NOT-RUN batch-mate is re-run singly (like an ambiguous batch); if it is NOT-RUN
 even singly it stays NOT-RUN. Batch builds of 2+ mutants add -fae, so modules not downstream of a red one still run.
 Never deletes .bb/rc, never writes ~/.m2, stdin unused. Exit: 0 ok | 2 control failed / usage / refused | 3 tree not restored | 4 queue-wait timeout (--timeout) or run abort
-| 5 complete, but some mutant is still NOT-RUN after the singles pass (neither detected nor survived: the tally line names them).
+| 5 complete, but some mutant is still NOT-RUN or UNPROVEN after the singles pass (neither detected nor survived: the verdict line names UNPROVEN ones).
 
 PER-MUTANT BOUND (T17): every mutant build gets a wall-clock bound measured from ITS OWN Maven start (.bb/start
-newer than the mutant marker), so queue wait is excluded. Default: 3x the control's Maven wall time (control
-.bb/end - .bb/start), floor 10 s (start/end have 1 s resolution). Override per spec with an absolute value: "build": {"mutantTimeoutSecs": 120}.
-On expiry the mutant is TIMEOUT, COUNTED AS DETECTED: the job's own process group (the setsid waiter whose ticket
+newer than the mutant marker), so queue wait is excluded. Default (DERIVED): 3x the control's Maven wall time (control
+.bb/end - .bb/start), floored at 180 s. Before the control build the production files the mutants edit are `touch`ed (mtime only, the
+tree stays porcelain-clean), so the control pays the same module recompile a mutant does; an untouched control compiles nothing
+(5 s) and its 3x bound killed mutants that were merely compiling. Override per spec with an absolute value, unfloored:
+"build": {"mutantTimeoutSecs": 120}. The log and verdict give the control's Maven seconds and whether the bound is derived or explicit.
+On expiry under an EXPLICIT bound the mutant is TIMEOUT, COUNTED AS DETECTED; under a DERIVED bound it is UNPROVEN (a derived bound
+is a guess, so a hang is not evidence that a test caught the mutant): NOT counted as detected, handled like NOT-RUN, listed in the
+verdict, exit 5. A batch that times out is re-run singly and the singles follow the same rule. The job's own process group (the setsid waiter whose ticket
 bb-build printed, hence maven and its forks) gets SIGTERM, then SIGKILL; java/maven processes with cwd inside the
 checkout that escaped the group are killed too; survivors abort the run (exit 4). .bb/rc is written as 124 (only if
 absent; maven's own rc never is 124) with .bb/end, so the next bb-build is accepted; `bb-queue reap` then releases
@@ -36,6 +42,7 @@ BB_BUILD = os.path.join(HOME, "tools", "bb-build")
 POLL = 5
 LIFECYCLE = {"clean", "validate", "compile", "test", "package", "verify", "install", "deploy", "integration-test"}
 LOG = None
+DERIVED_FLOOR_SECS = 180
 
 
 def log(msg):
@@ -142,6 +149,14 @@ def restore(co, files):
 
 
 # ---------------------------------------------------------------- build + collect
+def touch_mutated(co, ms):
+    """mtime-only touch of the files the mutants edit: the control then recompiles what a mutant recompiles, and git sees no change"""
+    files = sorted({m["file"] for m in ms})
+    for f in files:
+        os.utime(os.path.join(co, f))
+    return files
+
+
 def mvn_args(build, fae=False):
     a = []
     if build.get("pl"):
@@ -354,7 +369,7 @@ def run_build(co, owner, build, timeout_s, label, bound=None, fae=False):
             if left:
                 die(4, f"[{label}] could not stop the timed-out build; survivors {left}")
             return dict(kind="TIMEOUT", rc=None, cases=[], bad=[], files=[], secs=time.time() - t0, mvn_secs=time.time() - mvn_t0,
-                        detail=f"exceeded {int(bound)}s from its own Maven start; job killed (counted detected)")
+                        detail=f"exceeded {int(bound)}s from its own Maven start; job killed")
         if (mvn_t0 is None or bound is None) and time.time() - t0 > timeout_s:
             left = kill_job(co, ticket, label) if ticket else ["no-ticket"]
             if left:
@@ -441,6 +456,8 @@ def main():
             valid.append(m)
 
     # 2. control
+    touched = touch_mutated(co, valid)
+    log(f"control: touched {len(touched)} production file(s) so it pays the recompile a mutant pays")
     ctl = run_build(co, owner, build, timeout_s, "control")
     ctl_n = len(ctl["cases"])
     state["ctl_n"] = ctl_n
@@ -455,10 +472,15 @@ def main():
     if porcelain(co):
         die(3, "tree dirty after control build:\n" + porcelain(co))
     ctl_mvn = ctl.get("mvn_secs") or ctl["secs"]
-    bound = float(build["mutantTimeoutSecs"]) if build.get("mutantTimeoutSecs") else max(3 * ctl_mvn, 10)
-    state["verdict"] = f"RUNNING: control OK ({ctl_n} testcases); per-mutant bound {int(bound)}s"
+    explicit = bool(build.get("mutantTimeoutSecs"))
+    floor = float(os.environ.get("BB_MUTATE_BOUND_FLOOR_SECS", DERIVED_FLOOR_SECS))  # env: test hook only
+    bound = float(build["mutantTimeoutSecs"]) if explicit else max(3 * ctl_mvn, floor)
+    bound_desc = f"per-mutant bound {int(bound)}s ({'explicit' if explicit else 'derived'}; control maven {ctl_mvn}s)"
+    timeout_outcome = "TIMEOUT" if explicit else "UNPROVEN"
+    timeout_note = " (counted detected: explicit bound)" if explicit else " (UNPROVEN: derived bound, not counted as detected)"
+    state["verdict"] = f"RUNNING: control OK ({ctl_n} testcases); {bound_desc}"
     flush()
-    log(f"control OK: {ctl_n} testcases; control maven {ctl_mvn}s; per-mutant bound {int(bound)}s")
+    log(f"control OK: {ctl_n} testcases; {bound_desc}")
     # positive control for expectations: expected test must exist in the control run
     runnable = []
     for m in valid:
@@ -512,7 +534,7 @@ def main():
         singles_needed = False
         if res["kind"] == "TIMEOUT":
             if len(group) == 1:
-                rec(group[0], "TIMEOUT", secs=res["secs"], detail=res["detail"]); continue
+                rec(group[0], timeout_outcome, secs=res["secs"], detail=res["detail"] + timeout_note); continue
             singles_needed = True
         elif len(group) > 1:
             anyhit = any(classify(res, m)[1] for m in group)
@@ -530,7 +552,7 @@ def main():
             if e2:
                 rec(m, "APPLY-INVALID", detail=e2); return
             if r2["kind"] == "TIMEOUT":
-                rec(m, "TIMEOUT", secs=r2["secs"], detail=r2["detail"]); return
+                rec(m, timeout_outcome, secs=r2["secs"], detail=r2["detail"] + timeout_note); return
             if r2["kind"] == "ABORT":
                 state["verdict"] = "ABORTED after queue-wait timeout"
                 for g in batches[bi:]:
@@ -550,9 +572,13 @@ def main():
                 else:
                     finish(m, res, own[m["id"]], rec)
 
-    state["verdict"] = f"control OK ({ctl_n} testcases); per-mutant bound {int(bound)}s; complete"
+    state["verdict"] = f"control OK ({ctl_n} testcases); {bound_desc}; complete"
     if any(r["outcome"] == "TIMEOUT" for r in results.values()):
-        state["verdict"] += "  \nTIMEOUT = mutant exceeded the bound and was killed; counted as DETECTED"
+        state["verdict"] += "  \nTIMEOUT = mutant exceeded the EXPLICIT bound and was killed; counted as DETECTED"
+    unproven = [i for i, r in results.items() if r["outcome"] == "UNPROVEN"]
+    if unproven:
+        state["verdict"] += ("  \nUNPROVEN = mutant exceeded the DERIVED bound and was killed; NOT counted as detected, neither detected nor survived: "
+                            + ",".join(unproven))
     if any(r["outcome"] == "NOT-RUN" for r in results.values()):
         state["verdict"] += "  \nNOT-RUN = the mutant's expected tests did not run (or the run aborted); neither detected nor survived"
     flush()
@@ -562,8 +588,9 @@ def main():
     for r in results.values(): counts[r["outcome"]] = counts.get(r["outcome"], 0) + 1
     print(f"bb-mutate: sha={sha[:9]} control OK ({ctl_n} testcases); " +
           " ".join(f"{k}={v}" for k, v in sorted(counts.items())) +
-          ("; TIMEOUT counted as detected" if counts.get("TIMEOUT") else "") + f"; tree clean; results={out}/results.md")
-    sys.exit(5 if counts.get("NOT-RUN") else 0)
+          ("; TIMEOUT counted as detected" if counts.get("TIMEOUT") else "") +
+          (f"; UNPROVEN (not counted as detected): {','.join(unproven)}" if unproven else "") + f"; tree clean; results={out}/results.md")
+    sys.exit(5 if counts.get("NOT-RUN") or unproven else 0)
 
 
 def finish(m, res, own, rec):

@@ -191,6 +191,7 @@ class BbInstallIT {
         assertThat(pin("BB_BUILD_PREVIA")).isEqualTo(BbFixtures.md5(prev("bb-build.previa")));
         assertThat(pin("BB_QUEUE_PREVIA")).isEqualTo(BbFixtures.md5(prev("bb-queue.previa")));
         assertThat(pin("BB_MUTATE_PREVIA")).isEqualTo(BbFixtures.md5(prev("bb-mutate.previa")));
+        assertThat(pin("BB_MUTATE_PREBOUND")).isEqualTo(BbFixtures.md5(prev("bb-mutate.prebound")));
         assertThat(pin("BB_LIB_PRERC")).isEqualTo(BbFixtures.md5(prev("bb-queue-lib.sh.prerc")));
         assertThat(pin("BB_WAIT_PRERC")).isEqualTo(BbFixtures.md5(prev("bb-wait.prerc")));
         assertThat(pin("BB_BUILD_PREMEM")).isEqualTo(BbFixtures.md5(prev("bb-build.premem")));
@@ -562,6 +563,21 @@ class BbInstallIT {
                                          + " after=" + pin("BB_MUTATE_NEW"));
         assertThat(tools.resolve("bb-mutate")).hasBinaryContent(Files.readAllBytes(OPS_BB.resolve("bb-mutate")));
         assertThat(tools.resolve("bb-mutate.bak-" + pin("BB_MUTATE_OLD"))).hasBinaryContent(prev("bb-mutate"));
+    }
+
+    /// The bb-mutate live on all four hosts before the derived-bound fix (BB_MUTATE_PREBOUND) is an accepted source and is replaced, backed up under its md5.
+    @Test
+    void aHostRunningTheBbMutateWithTheUnfloorredBound_isUpdated() throws Exception {
+        var tools = host("h1");
+
+        Files.write(tools.resolve("bb-mutate"), prev("bb-mutate.prebound"));
+        var run = install("builder@h1");
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        assertThat(run.stdout()).contains("installed builder@h1 bb-mutate before=" + pin("BB_MUTATE_PREBOUND")
+                                         + " after=" + pin("BB_MUTATE_NEW"));
+        assertThat(tools.resolve("bb-mutate")).hasBinaryContent(Files.readAllBytes(OPS_BB.resolve("bb-mutate")));
+        assertThat(tools.resolve("bb-mutate.bak-" + pin("BB_MUTATE_PREBOUND"))).hasBinaryContent(prev("bb-mutate.prebound"));
     }
 
     /// c4/d1 shape: a host already holding the live set is accepted and nothing is written.

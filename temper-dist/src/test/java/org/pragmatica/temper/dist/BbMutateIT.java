@@ -27,6 +27,9 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 ///  - exit 0 although a mutant is NOT-RUN -> [#everyMutantNotRun_exitsFive], [#anEmptyReport_isNotRun_neverSurvived]
 ///  - drop the single re-run of a NOT-RUN batch-mate -> [#aDownstreamMutant_isNotRunInTheBatch_thenCreditedSingly]
 ///  - drop the expected-class test in `ran` -> [#aReportOfAnotherClass_isNotRun_neverSurvived]
+///  - a derived-bound TIMEOUT recorded as detected (`timeout_outcome = "TIMEOUT"`) -> [#aTimeoutUnderADerivedBound_isUnproven_notDetected]
+///  - drop the 180 s floor (`DERIVED_FLOOR_SECS`) -> [#aDerivedBound_isFlooredAt180Seconds_andLogsItsSource]
+///  - drop the control's touch (`touch_mutated`) -> [#theControl_touchesTheMutatedFiles_andTheTreeStaysClean]
 class BbMutateIT {
     private static final Path TOOL = BbFixtures.OPS_BB.resolve("bb-mutate");
 
@@ -44,6 +47,7 @@ class BbMutateIT {
         co = dir.resolve("work/co/x");
         var fake = BbFixtures.executable(home.resolve("tools/bb-build"), resource("fake-bb-build.py"));
 
+        BbFixtures.executable(home.resolve("tools/bb-queue"), "#!/bin/sh\nexit 0\n");
         assertThat(fake).exists();
         sh("""
            set -e
@@ -53,6 +57,7 @@ class BbMutateIT {
            printf '.bb/\\ntarget/\\n.m2-local/\\n' > .gitignore
            for m in A B C; do mkdir -p $m/src; echo ok > $m/src/f.txt; done
            git add -A && git -c user.name=t -c user.email=t@t commit -qm init
+           touch -t 200001010000 A/src/f.txt B/src/f.txt C/src/f.txt
            git init -q --bare "%2$s" && git remote add origin "%2$s" && git push -q origin HEAD:refs/heads/main && git fetch -q origin
            git checkout -q --detach
            """.formatted(co, dir.resolve("remote.git")));
@@ -167,6 +172,60 @@ class BbMutateIT {
         assertThat(vias.get(1)).hasSize(64);
     }
 
+    /// A build that never finishes under a DERIVED bound proves nothing (the bound is a guess): both mutants, run as a batch and
+    /// then singly, are UNPROVEN, named in the verdict, not detected, exit 5. The floor is shortened by the test hook only.
+    @Test
+    void aTimeoutUnderADerivedBound_isUnproven_notDetected() throws Exception {
+        var out = batchWith(null,
+                            "{}",
+                            Map.of("BB_MUTATE_BOUND_FLOOR_SECS", "1"),
+                            hanging(),
+                            mutation("mA", "A", "ATest", "MUT"),
+                            mutation("mC", "C", "CTest", "MUT"));
+
+        assertThat(out.outcomes()).containsEntry("mA", "UNPROVEN").containsEntry("mC", "UNPROVEN");
+        assertThat(out.rc()).isEqualTo(5);
+        assertThat(out.md()).contains("NOT counted as detected").contains("mA,mC");
+        assertThat(out.stdout()).contains("UNPROVEN (not counted as detected): mA,mC").doesNotContain("RED=");
+        assertThat(builds()).containsExactly("[] false", "[A,C] true", "[A] false", "[C] false");
+    }
+
+    /// The same hang under an explicit mutantTimeoutSecs is still TIMEOUT, counted detected, exit 0.
+    @Test
+    void aTimeoutUnderAnExplicitBound_isStillDetected() throws Exception {
+        var out = batchWith(null, "{\"mutantTimeoutSecs\":1}", Map.of(), hanging(), mutation("mA", "A", "ATest", "MUT"));
+
+        assertThat(out.outcomes()).containsEntry("mA", "TIMEOUT");
+        assertThat(out.rc()).isZero();
+        assertThat(out.md()).contains("counted as DETECTED").contains("1s (explicit; control maven");
+        assertThat(out.md()).doesNotContain("UNPROVEN");
+    }
+
+    /// Derived bound = max(3 x control, 180 s): a 0 s control gives 180, and the log names the control seconds and the source.
+    @Test
+    void aDerivedBound_isFlooredAt180Seconds_andLogsItsSource() throws Exception {
+        var out = batch(modules(null), mutation("mA", "A", "ATest", "MUT"));
+
+        assertThat(out.log()).contains("per-mutant bound 180s (derived; control maven ");
+        assertThat(out.md()).contains("per-mutant bound 180s (derived; control maven ");
+    }
+
+    /// The control touches the production files the mutants edit (A only here, not C), so its Maven run recompiles them like a
+    /// mutant's; the touch changes mtime only, so the tree is still clean (the tool exits 3 otherwise).
+    @Test
+    void theControl_touchesTheMutatedFiles_andTheTreeStaysClean() throws Exception {
+        var out = batch(modules(null), mutation("mA", "A", "ATest", "MUT"));
+
+        assertThat(out.rc()).isZero();
+        assertThat(Files.readAllLines(home.resolve("fresh.log")).getFirst()).isEqualTo("[A]");
+        assertThat(out.log()).contains("control: touched 1 production file(s)");
+        sh("cd '%s' && test -z \"$(git status --porcelain)\"".formatted(co));
+    }
+
+    private static String hanging() {
+        return modules(null).replace("{\"modules\"", "{\"hang\":true,\"modules\"");
+    }
+
     // ---- harness
     private String specName = "spec.json";
 
@@ -197,18 +256,28 @@ class BbMutateIT {
     }
 
     private Result batchWith(String tool, String scenario, String... mutations) throws Exception {
+        return batchWith(tool, "{}", Map.of(), scenario, mutations);
+    }
+
+    private Result batchWith(String tool,
+                             String buildJson,
+                             Map<String, String> extraEnv,
+                             String scenario,
+                             String... mutations) throws Exception {
         var script = tool == null
                      ? TOOL
                      : Files.writeString(dir.resolve("old-bb-mutate"), tool);
         var out = dir.resolve("out");
 
         Files.writeString(home.resolve("scenario.json"), scenario);
-        Files.writeString(dir.resolve(specName), "{\"build\":{},\"mutations\":[" + String.join(",", mutations) + "]}");
+        Files.writeString(dir.resolve(specName),
+                          "{\"build\":" + buildJson + ",\"mutations\":[" + String.join(",", mutations) + "]}");
         var env = new HashMap<String, String>();
 
         env.put("PATH", System.getenv("PATH"));
         env.put("HOME", home.toString());
         env.put("BB_OWNER", "t");
+        env.putAll(extraEnv);
         var run = BbFixtures.run(List.of("python3",
                                          script.toString(),
                                          co.toString(),
