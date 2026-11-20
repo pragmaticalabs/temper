@@ -135,7 +135,12 @@ class BbTestLaunchIT {
         for (var id : tickets) {
             BbFixtures.kill(BbFixtures.waiters(id));
         }
+        for (var pid : stalled) {   // F2-bound rows: a stand-in a regressed bound left running (the probe) dies with the row
+            ProcessHandle.of(pid).ifPresent(ProcessHandle::destroyForcibly);
+        }
     }
+
+    private final List<Long> stalled = new ArrayList<>();
 
     private Done enqueue(Map<String, String> extra, String... command) throws Exception {
         var all = new HashMap<>(env);
@@ -426,6 +431,98 @@ class BbTestLaunchIT {
         assertThat(rerun.rc()).as(rerun.doneText()).isZero();
         assertThat(co.resolve(".bb/refused")).doesNotExist();
         assertThat(bbResult(rerun.id()).stdout()).doesNotContain("REFUSED", "refused:");
+    }
+
+    // ---- F2-bound (CTO ruling via bto16): a stall the entry check cannot see is cut by a fail-closed timeout. The stand-ins ignore SIGTERM, so
+    // only the KILL of the whole process group `timeout` leads ends them (and their child); the expiry is a refusal on every surface.
+
+    private void assertTimeoutRefusal(Done run, String why, long seconds, List<Path> pidFiles) throws Exception {
+        assertThat(seconds).as("cut at the bound (3 s) + the 10 s KILL grace, not by the 600 s stall").isLessThan(45);
+        assertThat(run.rc()).as(run.doneText()).isEqualTo(15);
+        assertThat(Files.readString(co.resolve(".bb/rc")).strip()).isEqualTo("15");
+        assertThat(run.doneText()).contains("\nrefused=timeout: " + why, "\nverdict_source=guard\n").doesNotContain("verdict_source=java");
+        assertThat(Files.readString(co.resolve(".bb/refused"))).contains("timeout: " + why);
+        var row = Files.readAllLines(dir.resolve("ticket-log.tsv")).stream().filter(l -> l.contains("\t" + run.id() + "\t")).toList();
+
+        assertThat(row).hasSize(1);
+        assertThat(row.get(0).split("\t")[12]).as("the ledger's state column").isEqualTo("refused");
+        var text = bbResult(run.id()).stdout();
+
+        assertThat(text.lines().findFirst().orElseThrow()).contains("rc=15 verdict=REFUSED");
+        assertThat(text).contains("refused: timeout: " + why);
+        assertThat(bbResult(run.id(), "--json").stdout()).contains("\"verdict\": \"refused\"", "\"status\": \"refused\"");
+        for (var file : pidFiles) {
+            assertThat(file).as("the stand-in started").exists();
+            var pid = Long.parseLong(Files.readString(file).strip());
+
+            stalled.add(pid);
+            for (var i = 0; i < 50 && ProcessHandle.of(pid).isPresent(); i++) {
+                Thread.sleep(100);
+            }
+            assertThat(ProcessHandle.of(pid)).as("no process of the stalled group remains: " + file.getFileName()).isEmpty();
+        }
+    }
+
+    /// Probe: drop `timeout -k 10 "$s"` from bb-test's bounded() -> red: the stand-in java sleeps 600 s, the row's 120 s timeout fails it.
+    @Test
+    @Timeout(value = 120, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
+    void aJavaRunPastTheBound_isRefusedNamingTheTimeout_andItsWholeProcessGroupIsKilled() throws Exception {
+        var pid = dir.resolve("java.pid");
+        var java = BbFixtures.executable(dir.resolve("stub/stalled-java"),
+                                         "#!/usr/bin/env bash\ntrap '' TERM\nsleep 600 &\necho $! > \"" + pid + ".child\"\necho $$ > \"" + pid
+                                        + "\"\nwait\n");
+        var extra = Map.of("BB_TEST_TICKET_LOG", dir.resolve("ticket-log.tsv").toString());
+
+        assertThat(build(extra).rc()).as(log()).isZero();
+        var started = System.nanoTime();
+        var run = bbTest(Map.of("BB_TEST_TICKET_LOG", dir.resolve("ticket-log.tsv").toString(), "BB_TEST_JAVA", java.toString(),
+                                "BB_JAVA_TIMEOUT", "3"),
+                         "fx.CalcTest#passes");
+
+        assertTimeoutRefusal(run, "java run 1/1 did not finish within BB_JAVA_TIMEOUT=3s; its process group was killed",
+                             (System.nanoTime() - started) / 1_000_000_000L, List.of(pid, Path.of(pid + ".child")));
+        assertThat(Files.readString(co.resolve("fx/target/bb-test-reports").resolve(run.id() + ".refused").resolve("console.txt")))
+                  .as("java's own exit is recorded, never read as the verdict").contains("java exit 137");
+    }
+
+    /// The two classpath reads are bounded the same way (a python3 on PATH that stalls on one read's code, passing every other call through).
+    /// Probe: as above -> red (both rows).
+    @ParameterizedTest(name = "{0}")
+    @ValueSource(strings = {"classpath entry check", "resolved junit read"})
+    @Timeout(value = 120, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
+    void aClasspathReadPastTheBound_isRefusedNamingTheTimeout_andKilled(String read) throws Exception {
+        var real = Stream.of(System.getenv("PATH").split(":")).map(d -> Path.of(d, "python3")).filter(Files::isExecutable).findFirst().orElseThrow();
+        var pid = dir.resolve("read.pid");
+        var bin = Files.createDirectories(dir.resolve("stall-bin"));
+
+        BbFixtures.executable(bin.resolve("python3"),
+                              "#!/usr/bin/env bash\nif [ \"$1 $2\" = \"-I -c\" ] && [ -n \"${HANG_READ:-}\" ] && [ \"${3%%$'\\n'*}\" = \"$HANG_READ\" ]; then\n"
+                             + "  echo $$ > \"" + pid + "\"; trap '' TERM; exec sleep 600\nfi\nexec " + real + " \"$@\"\n");
+        var log = dir.resolve("ticket-log.tsv").toString();
+
+        assertThat(build(Map.of("BB_TEST_TICKET_LOG", log)).rc()).as(log()).isZero();
+        var started = System.nanoTime();
+        var run = bbTest(Map.of("BB_TEST_TICKET_LOG", log, "PATH", bin + ":" + System.getenv("PATH"), "HANG_READ", "# bb-test " + read,
+                                "BB_CP_READ_TIMEOUT", "3"),
+                         "fx.CalcTest#passes");
+
+        assertTimeoutRefusal(run, "the " + read + " did not finish within BB_CP_READ_TIMEOUT=3s; its process group was killed",
+                             (System.nanoTime() - started) / 1_000_000_000L, List.of(pid));
+    }
+
+    /// A bound that is not a positive integer is refused at enqueue (rc 2), never read as "no bound" (timeout 0 would disable it).
+    @ParameterizedTest(name = "{0}")
+    @ValueSource(strings = {"BB_JAVA_TIMEOUT=0", "BB_JAVA_TIMEOUT=1h", "BB_CP_READ_TIMEOUT=0", "BB_CP_READ_TIMEOUT="})
+    void aBoundThatIsNotAPositiveInteger_isRefusedAtEnqueue(String setting) throws Exception {
+        var all = new HashMap<>(env);
+        var eq = setting.indexOf('=');
+
+        all.put(setting.substring(0, eq), setting.substring(eq + 1));
+        var run = BbFixtures.run(List.of(tools.resolve("bb-test").toString(), co.toString(), "fx", "fx.CalcTest#passes"), all, null, null);
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isEqualTo(2);
+        assertThat(run.stderr()).contains("must be positive integers");
+        assertThat(run.stdout()).doesNotContain("queued ticket=");
     }
 
     // ---- the vbt5/vbt6 bypasses, built by REAL maven offline from this tree's .m2-local (a copy of the host seed ~/work/temper-m2-seed).

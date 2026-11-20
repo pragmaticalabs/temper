@@ -21,6 +21,12 @@
 # {platform,jupiter,vintage}/ (no manifest versions it) = refused; a missing non-.jar entry (an absent target/classes) holds nothing and is skipped. No build config is parsed for it.
 # BEFORE the run (vbt7 F2, never hang): a classpath entry that exists but is neither a regular file nor a directory (a FIFO, a device, or a
 # symlink resolving to one) is refused the same way (rc 15), java not run: java would block opening it.
+# BOUNDS (F2-bound, CTO ruling via bto16, fail closed): a stall the entry check cannot see (a huge or slow regular file, a stuck mount) is
+# cut by a timeout, and an expiry is a REFUSAL (rc 15, the same surfaces as below) naming the bound, never a pass or a silent error. Each java
+# run is bounded by BB_JAVA_TIMEOUT seconds (default 10800 = 3 h: no bb-test ticket ran on any host yet, and the longest ledger wall of a
+# whole-reactor `clean install` with every IT, on cloudbb-5..8 on 2026-11-20, was 6306 s; one module's selection is a subset of that), the
+# entry check and the resolved junit read by BB_CP_READ_TIMEOUT seconds (default 300, as BB_CP_RECORD_TIMEOUT). On expiry `timeout`
+# TERMs, and 10 s later KILLs, the process group it leads (java and every child that stayed in it). Both must be positive integers (rc 2).
 # A REFUSAL REPLACES THE VERDICT: rc 15 (the ticket's rc=, so .bb/rc), the ticket gets refused=<reason naming the resolved versions> and
 # verdict_source=guard (never verdict_source=java), .bb/refused holds the same reason, the ticket log's state column reads refused, bb-result
 # prints it; the run's console output and per-run count lines are not printed, and its report dir is renamed <ticket>.refused.
@@ -46,8 +52,28 @@ launcher_ok() {
   return 14
 }
 
-resolved_junit() {  # <classpath>: "v <jars>" when every junit jar on it is the launcher's version, else "x <why>" (fail closed)
-  python3 -I - "$LAUNCHER_VERSION" "$1" 2> /dev/null <<'PY' || echo "x the read of the classpath's junit jars failed"
+JAVA_T=${BB_JAVA_TIMEOUT-10800}; READ_T=${BB_CP_READ_TIMEOUT-300}   # set but empty: refused, never the default
+bounds_ok() { [[ $JAVA_T =~ ^[1-9][0-9]*$ && $READ_T =~ ^[1-9][0-9]*$ ]]; }
+BOUNDS_BAD="BB_JAVA_TIMEOUT ($JAVA_T) and BB_CP_READ_TIMEOUT ($READ_T) must be positive integers (seconds)"
+
+# ENTRY_PY <classpath>: "b <entry> is a <kind>" for the first entry that exists but is neither a regular file nor a directory, else "ok".
+read -r -d '' ENTRY_PY <<'PY' || true
+# bb-test classpath entry check
+import os, stat, sys
+for e in sys.argv[1].split(':'):
+    if not e or not os.path.exists(e) or os.path.isfile(e) or os.path.isdir(e):
+        continue
+    m = os.stat(e).st_mode
+    kind = ('fifo' if stat.S_ISFIFO(m) else 'character special file' if stat.S_ISCHR(m) else 'block special file' if stat.S_ISBLK(m)
+            else 'socket' if stat.S_ISSOCK(m) else 'special file')
+    print('b %s is a %s' % (e, kind))
+    sys.exit(0)
+print('ok')
+PY
+
+# JUNIT_PY <launcher version> <classpath>: "v <jars>" when every junit jar on it is the launcher's version, else "x <why>" (fail closed)
+read -r -d '' JUNIT_PY <<'PY' || true
+# bb-test resolved junit read
 import os, re, sys, zipfile
 plat = sys.argv[1]
 jup = '5.' + plat.split('.', 1)[1]
@@ -96,7 +122,6 @@ if not seen:
     no('no junit-platform, jupiter or vintage jar on the test classpath')
 print('v ' + ', '.join(sorted(set(seen))))
 PY
-}
 
 if [ "${1:-}" = __launch ]; then
   # ---- the queue ticket's job: runs where maven would, in the checkout. args: <module> <repeat> <selector>... [-D...] ----
@@ -111,12 +136,20 @@ if [ "${1:-}" = __launch ]; then
   guard() { "$@" && return 0; local r=$?; source_is guard; exit "$r"; }
   refuse() {   # rc 15: the refusal replaces the verdict on every surface (header: RESOLVED JUNIT CHECK)
     local why=${1//[$'\n\r']/ }
+    [ -z "${RD:-}" ] || rm -f "$RD"
     ( flock 9; [ ! -f "$Q/running/$TICKET" ] || printf 'refused=%s\nverdict_source=guard\n' "$why" >> "$Q/running/$TICKET" ) 9> "$Q/.lock"
     printf '%s\n' "$why" > "$CO/.bb/refused"
     if [ -z "$OUT" ]; then echo "bb-test: REFUSED (rc 15): $why; java was not run"; exit 15; fi
     rm -rf "$BASE.refused"; mv "$BASE" "$BASE.refused"; mv "$OUT" "$BASE.refused/console.txt"
     echo "bb-test: REFUSED (rc 15): $why; this run's test outcome is not a verdict (kept in $BASE.refused)"
     exit 15
+  }
+  TIMED_OUT=
+  bounded() {  # <secs> <dir> <out> <cmd>...: cmd run in <dir>, output appended to <out>, under `timeout` (BOUNDS); TIMED_OUT=<secs> on expiry
+    local s=$1 d=$2 o=$3 t0=$SECONDS r=0; shift 3
+    (cd "$d" && exec timeout -k 10 "$s" "$@") >> "$o" 2>&1 || r=$?
+    TIMED_OUT=; case "$r" in 124|137) [ $((SECONDS - t0)) -lt "$s" ] || TIMED_OUT=$s;; esac   # a fast own exit 124/137 is java's, not ours
+    return "$r"
   }
   JVM=(); SELS=()
   for a in "$@"; do
@@ -131,30 +164,34 @@ if [ "${1:-}" = __launch ]; then
   JAVA=${BB_TEST_JAVA:-${JAVA_HOME:-/usr/lib/jvm/java-25-openjdk-amd64}/bin/java}
   CP="$CO/$MOD/target/test-classes:$CO/$MOD/target/classes:$(cat "$CO/.bb/cp/${MOD//\//__}.cp")"
   # vbt7 F2 (fail closed, never hang): java opens every classpath entry, so a FIFO or device entry (or a symlink to one) would block it
-  # before the resolved check is ever reached. Such an entry is refused here, before java runs.
+  # before the resolved check is ever reached. Such an entry is refused here, before java runs; the check itself is bounded (BOUNDS).
   OUT=
-  IFS=: read -r -a CPE <<< "$CP"
-  for e in ${CPE[@]+"${CPE[@]}"}; do
-    if [ -e "$e" ] && [ ! -f "$e" ] && [ ! -d "$e" ]; then
-      refuse "unreadable classpath entry: $e is a $(stat -L -c %F -- "$e" 2> /dev/null || echo 'special file'), not a regular file or directory"
-    fi
-  done
-  RC=0; RD=false
-  for j in ${JVM[@]+"${JVM[@]}"}; do [ "$j" != -Daether.requireDocker=true ] || RD=true; done
+  bounds_ok || refuse "$BOUNDS_BAD"
+  RD=$(mktemp "$CO/.bb/bb-test-read.XXXXXX"); r=0
+  bounded "$READ_T" "$CO" "$RD" python3 -I -c "$ENTRY_PY" "$CP" || r=$?
+  [ -z "$TIMED_OUT" ] || refuse "timeout: the classpath entry check did not finish within BB_CP_READ_TIMEOUT=${READ_T}s; its process group was killed"
+  E=$(sed -n '/^\(ok\|b .*\)$/{p;q}' "$RD")
+  [ "$r" = 0 ] && [ -n "$E" ] || refuse "the classpath entry check failed (exit $r)"
+  [ "$E" = ok ] || refuse "unreadable classpath entry: ${E#b }, not a regular file or directory"
+  RC=0; RDK=false
+  for j in ${JVM[@]+"${JVM[@]}"}; do [ "$j" != -Daether.requireDocker=true ] || RDK=true; done
   BASE=$CO/$MOD/target/bb-test-reports/$TICKET; mkdir -p "$BASE"
   OUT=$(mktemp "$CO/.bb/bb-test-out.XXXXXX")   # java's console and the count lines are printed only once the resolved check passed
   for i in $(seq "$REPEAT"); do
     D=$BASE; [ "$REPEAT" = 1 ] || D=$D/run$i
     mkdir -p "$D"
-    set +e
-    (cd "$CO/$MOD" && "$JAVA" ${JVM[@]+"${JVM[@]}"} -jar "$LAUNCHER_JAR" execute --disable-banner --fail-if-no-tests \
-        --class-path "$CP" --reports-dir "$D" "${SELS[@]}") >> "$OUT" 2>&1
-    r=$?
-    set -e
-    echo "bb-test: run $i/$REPEAT java exit $r; requireDocker=$RD; $("$HERE/bb-testcount" "$D" 2>&1 | tr '\n' ' ')" >> "$OUT"
+    r=0
+    bounded "$JAVA_T" "$CO/$MOD" "$OUT" "$JAVA" ${JVM[@]+"${JVM[@]}"} -jar "$LAUNCHER_JAR" execute --disable-banner --fail-if-no-tests \
+        --class-path "$CP" --reports-dir "$D" "${SELS[@]}" || r=$?
+    echo "bb-test: run $i/$REPEAT java exit $r; requireDocker=$RDK; $("$HERE/bb-testcount" "$D" 2>&1 | tr '\n' ' ')" >> "$OUT"
+    [ -z "$TIMED_OUT" ] || refuse "timeout: java run $i/$REPEAT did not finish within BB_JAVA_TIMEOUT=${JAVA_T}s; its process group was killed"
     [ "$r" -le "$RC" ] || RC=$r
   done
-  JUNIT=$(resolved_junit "$CP")
+  : > "$RD"; r=0
+  bounded "$READ_T" "$CO" "$RD" python3 -I -c "$JUNIT_PY" "$LAUNCHER_VERSION" "$CP" || r=$?
+  [ -z "$TIMED_OUT" ] || refuse "timeout: the resolved junit read did not finish within BB_CP_READ_TIMEOUT=${READ_T}s; its process group was killed"
+  JUNIT=$(sed -n '/^[vx] /{p;q}' "$RD"); rm -f "$RD"; RD=
+  [ "$r" = 0 ] && [ -n "$JUNIT" ] || JUNIT="x the read of the classpath's junit jars failed"
   [ "${JUNIT%% *}" = v ] || refuse "junit version: ${JUNIT#x }; the launcher is junit-platform $LAUNCHER_VERSION"
   source_is java
   cat "$OUT"; rm -f "$OUT"
@@ -178,6 +215,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ ${#SELS[@]} -gt 0 ] || { echo "usage: bb-test <checkout> <module> <Class[#method]>... [--repeat N]" >&2; exit 2; }
+bounds_ok || { echo "bb-test: $BOUNDS_BAD" >&2; exit 2; }
 "$HERE/bb-cp-record" check "$CO" "$MOD" || exit $?
 launcher_ok || exit $?
 . "$HERE/bb-queue-lib.sh"
