@@ -671,10 +671,11 @@ class BbIncrementalIT {
             Files.delete(tools.resolve("bb-jbct-bootstrap"));
         }
 
-        BbFixtures.executable(dir.resolve("stub/mvn"), "#!/bin/sh\necho \"$*\" >> " + mvnRec + "\n");
         Files.writeString(dir.resolve("loadavg"), "0.00 0.00 0.00 1/1 1\n");
         var queue = dir.resolve("q");
         var env = env(queue);
+
+        BbFixtures.executable(dir.resolve("stub/mvn"), "#!/bin/sh\necho \"$*\" >> " + mvnRec + "\n");
         var submit = new ArrayList<String>(List.of(tools.resolve("bb-build").toString(),
                                                    "--since",
                                                    "base",
