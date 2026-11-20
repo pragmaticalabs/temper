@@ -336,6 +336,7 @@ class BbResultIT {
         assertThat(seconds).as("seconds for a 50 MB log").isLessThan(20);
 
         // a 300 MB log (sparse, no newline at all) under a 700 MB address-space limit: reading it whole cannot fit
+        Files.delete(log);
         try (var raf = new RandomAccessFile(log.toFile(), "rw")) {
             raf.setLength(300L * 1024 * 1024);
         }
