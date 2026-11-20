@@ -14,6 +14,10 @@
 #   reports: <dir>                       the one report directory, or `<checkout>/… (<n> report dirs)` when there are several modules
 #   first failing: <Class>#<method>: <first line of the message>     when any failure or error exists
 #   first error: <first "[ERROR]" line of the build log>              when rc != 0 and no failing test (not blank, not a bare "[ERROR]")
+# REFUSED (a ticket with refused=, bb-test's resolved junit check): the first line carries verdict=REFUSED, the second is
+#   `refused: <reason naming the resolved versions>`, the tests line is `tests: refused (not a verdict: <reason>)`, and no count, report,
+#   failing test or error line is printed; --json has "verdict":"refused", "refused":<reason>, tests.status "refused", no reports or
+#   failing. Any other ticket: "verdict":"rc" (the rc field is the verdict), "refused":null.
 # --json: one JSON object with the same facts and the full detail: every failing test with its message's first line (cut at 1000 chars),
 #   per-report-file counts, report paths, the log path. A ticket that is not finished: {"v":1,"ticket":..,"state":..,"finished":false}.
 # Exit: 0 a summary of a DONE ticket was printed (the verdict is the rc field, not the exit status); 3 the ticket is waiting or running
@@ -236,12 +240,17 @@ def main(argv):
     cr = int(created) // 1000000000 if is_num(created) else 0
     wall = int(ended) - cr if is_num(ended) and cr != 0 else None
     log = t.get('output') or (co + '/.bb/build.log')
+    refused = t.get('refused')  # a bb-test resolved-junit refusal: it REPLACES the verdict (no count, no failing test, no error line)
     head = 'ticket=%s state=%s rc=%s wall=%ss' % (tid, state or '?', rc if rc else '-', wall if wall is not None else '-')
+    if refused:
+        head = 'ticket=%s state=%s rc=%s verdict=REFUSED wall=%ss' % (tid, state or '?', rc if rc else '-', wall if wall is not None else '-')
 
     tests = {'status': 'none', 'reason': 'no report written by this build'}
     reports, dirs, failing, bad = [], [], [], 0
     owned = True
-    if not os.path.isabs(co) or not is_num(started):
+    if refused:
+        tests = {'status': 'refused', 'reason': 'not a verdict: ' + refused}
+    elif not os.path.isabs(co) or not is_num(started):
         tests = {'status': 'none', 'reason': 'the ticket has no started build or no checkout'}
     else:
         try:
@@ -274,7 +283,7 @@ def main(argv):
                 tests = {'status': 'none', 'reason': 'the report search stopped after %d s' % WALK_SECONDS}
 
     err, err_why = None, None
-    if (rc or '') not in ('', '0') and not failing:
+    if (rc or '') not in ('', '0') and not failing and not refused:
         err, err_why = ((None, 'unavailable: a later build in this checkout replaced the log') if not owned
                         else first_error(log))
 
@@ -282,11 +291,11 @@ def main(argv):
         out = {'v': 1, 'ticket': tid, 'state': state, 'finished': True, 'rc': int(rc) if is_num(rc) else None,
                'wall': wall, 'started': int(started) if is_num(started) else None, 'ended': int(ended) if is_num(ended) else None,
                'co': co, 'log': log, 'tests': tests, 'reportDirs': dirs, 'reports': reports, 'failing': failing,
-               'firstError': err, 'firstErrorNote': err_why}
+               'firstError': err, 'firstErrorNote': err_why, 'verdict': 'refused' if refused else 'rc', 'refused': refused}
         print(json.dumps(clean_all(out)))
         return 0
 
-    lines = [head]
+    lines = [head] + (['refused: ' + refused] if refused else [])
     if tests['status'] == 'counted':
         extra = '%d report files' % tests['reportFiles'] + (', %d bad report files' % bad if bad else '')
         tail = ' [search stopped after %d s: counts may be partial]' % WALK_SECONDS if tests['incomplete'] else ''

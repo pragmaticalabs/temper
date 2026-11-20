@@ -4,27 +4,28 @@
 # <module>/target/test-classes:<module>/target/classes:<cp recorded by the last green bb-build (.bb/cp/<module>.cp)>, with
 # -Daether.requireDocker=true. The launch is ONE queue ticket (cap, port group, netns slot, memory floor, load gate as for a build),
 # enqueued through bb-build (BB_LAUNCH makes the waiter run this script's __launch mode instead of maven), and NEVER deduped.
-# VERDICT = the java exit status (the ticket's rc, read with bb-wait/bb-await as for a build). --fail-if-no-tests: a selection that
+# VERDICT = the java exit status (the ticket's rc, read with bb-wait/bb-await as for a build), unless the resolved junit check below refuses
+# the run (rc 15, which replaces it). --fail-if-no-tests: a selection that
 # matches nothing is red (java exit 2). Reports: <module>/target/bb-test-reports/<ticket>/ (with --repeat N>1: .../run<i>/), the
-# launcher's legacy XML, never surefire-reports; a count line (bb-testcount) is appended to .bb/build.log after each run.
+# launcher's legacy XML, never surefire-reports; java's console and a count line (bb-testcount) per run are appended to .bb/build.log
+# after the last run, once the resolved junit check passed.
 # STALE-JAR GUARD (rc 12, nothing queued; run again at launch, after any queue wait): bb-cp-record check. BB_STALE_OK (any value) is
 # refused. LAUNCHER: junit-platform-console-standalone 1.13.4, sha256-pinned, read from the host seed
 # (~/work/temper-m2-seed/org/junit/platform/...); absent or wrong sha = rc 14, the path and sha named; nothing is installed here.
-# VERSION GUARD (rc 15, checked with the launcher, at enqueue and at launch): the junit-platform version the checkout builds against,
-# read from /project/properties of its root pom.xml by an XML parse (comments and plugin config are never read for it): exactly one literal
-# <junit-platform.version>, else exactly one literal <junit.version> 5.N.P read as platform 1.N.P, must equal LAUNCHER_VERSION. A different version = rc 15
-# naming both; anything else (no property, two definitions, a ${ref}, a -SNAPSHOT or other non-literal, a 6.x junit.version, an unparsable pom) = rc 15, fail closed,
-# "cannot be determined". Every override of either property also = rc 15: a <profile> (root pom or a pom on the module path or <parent> chain),
-# such a pom's own properties, a <parent> outside the checkout, a literal org.junit* dependency version (a junit-bom import included), two
-# <properties> blocks, a -D in .mvn/maven.config (-Dname, -D name, --define=name, --define name), a -D in the launch args (vbt4 M1, vbt5 H1,
-# vbt6 H1-R); an org.junit* dependency or junit-bom import whose ${junit.version}/${junit-platform.version} brings another platform version
-# (vbt6 M-a); a ${property} groupId that does not resolve (vbt6 M-b). rc 16: .mvn/maven.config passes -s/-gs/-f/--settings/--global-settings/
-# --file (a settings profile or another pom this parse never reads). NOT COVERED (a static parse cannot see it): junit versions managed by a
-# third-party BOM import (e.g. spring-boot-dependencies), a settings.xml profile not named in maven.config, MAVEN_ARGS on the host.
-# VERDICT SOURCE (vbt4 L2): the launch writes verdict_source=guard (a launch-time guard refused: rc 12/14/15/16) or verdict_source=java (java
-# ran; rc = its exit status) on the ticket, so a java System.exit(12|14|15) never reads as a guard.
-# Call rc: 0 queued (as bb-build); 2 usage; 12 stale-jar guard; 14 launcher jar absent/not the pin; 15 checkout's junit-platform version differs from
-# the launcher's or is undeterminable; 16 .mvn/maven.config names a settings or pom file; others from bb-build (3, 4).
+# RESOLVED JUNIT CHECK (rc 15; CTO ruling on vbt5/vbt6, temper#72): AFTER the java run, every jar on the run's own test classpath (the
+# --class-path java got: test-classes, classes and .bb/cp/<module>.cp, which is maven's dependency:build-classpath of the build, with the
+# build's own options) that holds org/junit/platform/, org/junit/jupiter/ or org/junit/vintage/ classes is read: its MANIFEST.MF names it
+# (Implementation-Title, else Bundle-SymbolicName) and gives its version (Implementation-Version, else Bundle-Version). A platform jar must be
+# LAUNCHER_VERSION 1.N.P, a jupiter or vintage jar 5.N.P. FAIL CLOSED: no such jar on the classpath, a jar that cannot be read, a classpath
+# .jar that does not exist, a junit jar whose name or version the manifest does not give, a classpath directory holding org/junit/
+# {platform,jupiter,vintage}/ (no manifest versions it) = refused; a missing non-.jar entry (an absent target/classes) holds nothing and is skipped. No build config is parsed for it.
+# A REFUSAL REPLACES THE VERDICT: rc 15 (the ticket's rc=, so .bb/rc), the ticket gets refused=<reason naming the resolved versions> and
+# verdict_source=guard (never verdict_source=java), .bb/refused holds the same reason, the ticket log's state column reads refused, bb-result
+# prints it; the run's console output and per-run count lines are not printed, and its report dir is renamed <ticket>.refused.
+# VERDICT SOURCE (vbt4 L2): the launch writes verdict_source=guard (a launch-time guard refused: rc 12/14/15) or verdict_source=java (java
+# ran and the resolved check passed; rc = its exit status) on the ticket, so a java System.exit(12|14|15) never reads as a guard.
+# Call rc: 0 queued (as bb-build); 2 usage; 12 stale-jar guard; 14 launcher jar absent/not the pin; others from bb-build (3, 4).
+# Ticket rc 15: the run's resolved junit is not the launcher's (refused, above).
 # REQUIRE DOCKER (CTO ruling 2026-11-19): the launch runs with -Daether.requireDocker=true (bb-build appends it to every ticket's args) unless
 # BB_REQUIRE_DOCKER=0 is given at enqueue: the same explicit override as bb-build (#31), recorded in the ticket as requireDocker=0 (bb-tickets shows it). On condition (CTO): the ticket (requireDockerEffective=true|false) AND each result line
 # (requireDocker=true|false) state it, so a count with Testcontainers skipped never passes for a full one.
@@ -43,177 +44,56 @@ launcher_ok() {
   return 14
 }
 
-platform_version_of() {  # <checkout> <module>: "v <version>" its root pom pins, or "x <why it cannot be determined>" (fail closed)
-  python3 -I - "$1" "$2" 2> /dev/null <<'PY' || echo "x the version parse failed"
-import os, re, shlex, sys, xml.etree.ElementTree as ET
-# /project/properties of the root pom only (comments and plugin config are never read for the value). Exactly one literal
-# <junit-platform.version>, else (none at all) exactly one literal <junit.version> 5.N.P read as platform 1.N.P. Fail closed (rc 15) on:
-# two <properties> blocks, two definitions, a ${ref}, a non-literal or a 6.x; and on every OVERRIDE of either property (vbt4 M1, vbt5 H1):
-# a <profile>'s properties in the root pom or in any pom from the root down to the module or on the module's local <parent> chain, such
-# a pom's own properties, a <parent> that is not a pom in the checkout, an org.junit* <dependency> anywhere in those poms or the root pom
-# (dependencyManagement, a junit-bom import, plugin dependencies) whose version is set but is not ${junit.version} or
-# ${junit-platform.version}, and a -D of either name in .mvn/maven.config (-Dname, -D name, --define=name, --define name). An org.junit*
-# dependency at ${junit.version} or ${junit-platform.version} (a junit-bom import included) is resolved through the root pom's property
-# and must imply the platform version reported (vbt6 M-a: a junit-bom at ${junit.version}=5.12.2 beside <junit-platform.version>1.13.4
-# brings platform 1.12.2). A ${property} groupId with a version is resolved through that pom's and the root pom's properties (and
-# project.groupId); unresolvable = fail closed (vbt6 M-b). -s/-f/-gs/--settings/--file/--global-settings in .mvn/maven.config name a
-# file this parse does not read: "s", rc 16 (vbt6). The launch-time -D args are checked by the caller (jvm_args_ok).
-NAMES = ('junit-platform.version', 'junit.version')
-co, module = sys.argv[1], sys.argv[2].strip('/')
-local = lambda t: t.rsplit('}', 1)[-1] if isinstance(t, str) else ''
+resolved_junit() {  # <classpath>: "v <jars>" when every junit jar on it is the launcher's version, else "x <why>" (fail closed)
+  python3 -I - "$LAUNCHER_VERSION" "$1" 2> /dev/null <<'PY' || echo "x the read of the classpath's junit jars failed"
+import os, re, sys, zipfile
+plat = sys.argv[1]
+jup = '5.' + plat.split('.', 1)[1]
 def no(why):
     print('x ' + why)
     sys.exit(0)
-def project(path):
-    try:
-        root = ET.parse(path).getroot()
-    except Exception:
-        no('%s does not parse' % os.path.relpath(path, co))
-    if local(root.tag) != 'project':
-        no('%s is not a <project>' % os.path.relpath(path, co))
-    return root
-def defines(props):
-    return [local(c.tag) for p in props for c in p if local(c.tag) in NAMES]
-def profile_props(root):
-    return [p for prof in root.iter() if local(prof.tag) == 'profile' for p in prof if local(p.tag) == 'properties']
-if not os.path.isfile(os.path.join(co, 'pom.xml')):
-    no('no root pom.xml')
-root = project(os.path.join(co, 'pom.xml'))
-props = [c for c in root if local(c.tag) == 'properties']
-if len(props) > 1:
-    no('the root pom has %d <properties> blocks' % len(props))
-for name in defines(profile_props(root)):
-    no('a <profile> in the root pom sets <%s>' % name)
-REFS = ('${junit-platform.version}', '${junit.version}')
-child = lambda e, tag: next((c for c in e if local(c.tag) == tag), None)
-text = lambda e, tag: None if child(e, tag) is None else (child(e, tag).text or '').strip()
-pprops = lambda proj: {local(c.tag): (c.text or '').strip() for p in proj if local(p.tag) == 'properties' for c in p}
-ROOTP = pprops(root)
-def resolve(value, path, proj):  # ${name} through the pom's own properties, then the root pom's, and project.groupId; None if any is left
-    own = dict(ROOTP, **pprops(proj))
-    par = child(proj, 'parent')
-    own['project.groupId'] = text(proj, 'groupId') or (None if par is None else text(par, 'groupId')) or '${unresolved}'
-    for _ in range(16):
-        nxt = re.sub(r'\$\{([^}]*)\}', lambda m: own.get(m.group(1), m.group(0)), value)
-        if nxt == value:
-            break
-        value = nxt
-    return None if '${' in value else value
-USES = []  # (pom, group:artifact, the version REF): each must imply the reported platform version (checked at the end)
-def junit_literals(path, proj):  # any org.junit* <dependency> (incl. a dependencyManagement import of junit-bom) whose version is set but is not a REF
-    for dep in proj.iter():
-        if local(dep.tag) != 'dependency' or text(dep, 'version') is None:
-            continue
-        raw = text(dep, 'groupId') or ''
-        group = resolve(raw, path, proj)
-        if group is None:
-            no('%s has a dependency groupId %s that cannot be resolved (with version %s)' % (os.path.relpath(path, co), raw, text(dep, 'version')))
-        if not group.startswith('org.junit'):
-            continue
-        if text(dep, 'version') not in REFS:
-            no('%s sets the version of %s:%s to %s, not to a junit version property' % (os.path.relpath(path, co), group, text(dep, 'artifactId'), text(dep, 'version')))
-        USES.append((os.path.relpath(path, co), group + ':' + (text(dep, 'artifactId') or ''), group, text(dep, 'version')))
-def overrides(path, proj):
-    for name in defines([c for c in proj if local(c.tag) == 'properties'] + profile_props(proj)):
-        no('%s sets <%s>' % (os.path.relpath(path, co), name))
-    junit_literals(path, proj)
-junit_literals(os.path.join(co, 'pom.xml'), root)
-rootpom = os.path.realpath(os.path.join(co, 'pom.xml'))
-d = co
-for part in module.split('/'):
-    d = os.path.join(d, part)
-    pom = os.path.join(d, 'pom.xml')
-    if os.path.isfile(pom) and os.path.realpath(pom) != rootpom:
-        overrides(pom, project(pom))
-# the module's <parent> chain (vbt5 H1-ii): a parent found by relativePath off the module's dir path is an inherited override too.
-# Followed until it reaches the root pom or a pom without <parent>; a parent that is not a pom in the checkout (empty relativePath,
-# no file there, another artifactId: maven then resolves it from a repository) = fail closed.
-pom = os.path.join(co, module, 'pom.xml')
-for _ in range(64):
-    if not os.path.isfile(pom) or os.path.realpath(pom) == rootpom:
-        break
-    par = child(project(pom), 'parent')
-    if par is None:
-        break
-    rel = text(par, 'relativePath')
-    nxt = os.path.normpath(os.path.join(os.path.dirname(pom), '../pom.xml' if rel is None else rel))
-    if os.path.isdir(nxt):
-        nxt = os.path.join(nxt, 'pom.xml')
-    real = os.path.realpath(nxt)
-    if rel == '' or not os.path.isfile(nxt) or not real.startswith(os.path.realpath(co) + os.sep):
-        no('%s has a <parent> that is not a pom in the checkout' % os.path.relpath(pom, co))
-    if text(project(nxt), 'artifactId') != text(par, 'artifactId'):
-        no('%s has a <parent> %s that %s is not' % (os.path.relpath(pom, co), text(par, 'artifactId'), os.path.relpath(nxt, co)))
-    if real != rootpom:
-        overrides(nxt, project(nxt))
-    pom = nxt
-else:
-    no('the <parent> chain of %s/pom.xml does not end' % module)
-try:
-    cfg = open(os.path.join(co, '.mvn', 'maven.config'), encoding='utf-8', errors='replace').read()
-except OSError:
-    cfg = ''
-try:
-    toks = shlex.split(cfg)
-except ValueError:
-    no('.mvn/maven.config does not tokenize')
-FILES = ('--settings', '--global-settings', '--file')
-def long_opt(tok, names):  # tok's option part is one of names or an unambiguous-length (>= 4 chars) prefix of one, as commons-cli matches
-    opt = tok.split('=', 1)[0]
-    return next((n for n in names if opt.startswith('--') and len(opt) >= 4 and n.startswith(opt)), None)
-for i, tok in enumerate(toks):
-    if tok in ('-s', '-gs', '-f') or long_opt(tok, FILES) or (re.fullmatch(r'-(s|gs|f)\S+', tok) and tok not in ('-fae', '-ff', '-fn')):
-        print('s .mvn/maven.config passes %s: a settings or pom file the static parse does not read' % tok)
-        sys.exit(0)
-    if tok == '-D' or (long_opt(tok, ('--define',)) and '=' not in tok):
-        prop = toks[i + 1] if i + 1 < len(toks) else ''
-    elif long_opt(tok, ('--define',)):
-        prop = tok.split('=', 1)[1]
-    elif tok.startswith('-D'):
-        prop = tok[2:]
-    else:
+def manifest(z):
+    attrs, key = {}, None
+    for ln in z.read('META-INF/MANIFEST.MF').decode('utf-8', 'replace').splitlines():
+        if ln.startswith(' ') and key:
+            attrs[key] += ln[1:]
+        elif ':' in ln:
+            key, val = ln.split(':', 1)
+            attrs[key] = val.strip()
+    return attrs
+seen, bad = [], []
+for e in sys.argv[2].split(':'):
+    if not e:
         continue
-    if prop.split('=', 1)[0] in NAMES:  # -Dname, -D name, --define=name, --define name (vbt5 H1-i, vbt6 H1-R)
-        no('.mvn/maven.config sets -D%s' % prop.split('=', 1)[0])
-vals = lambda name: [(c.text or '').strip() for p in props for c in p if local(c.tag) == name]
-plat, junit = vals('junit-platform.version'), vals('junit.version')
-if plat:
-    if len(plat) == 1 and re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', plat[0]):
-        v = plat[0]
-    else:
-        no('<junit-platform.version> is not exactly one literal N.N.N')
-elif len(junit) == 1 and re.fullmatch(r'5\.[0-9]+\.[0-9]+', junit[0]):
-    v = '1.' + junit[0].split('.', 1)[1]
-else:
-    no('no literal <junit-platform.version>, nor exactly one literal <junit.version> 5.N.P, in its root pom.xml')
-for where, coord, group, ref in USES:  # vbt6 M-a: what each junit dependency (a junit-bom import included) brings must be that version
-    got = vals(ref[2:-1])
-    if len(got) != 1 or not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', got[0]):
-        no('%s uses %s for %s, which is not exactly one literal N.N.N in the root pom' % (where, ref, coord))
-    implied = got[0] if group == 'org.junit.platform' or not got[0].startswith('5.') else '1.' + got[0].split('.', 1)[1]
-    if implied != v:
-        no('%s uses %s=%s for %s, which brings junit-platform %s, not %s' % (where, ref, got[0], coord, implied, v))
-print('v ' + v)
+    if os.path.isdir(e):
+        if any(os.path.isdir(os.path.join(e, 'org', 'junit', p)) for p in ('platform', 'jupiter', 'vintage')):
+            no('the classpath directory %s holds junit classes, which no manifest versions' % e)
+        continue
+    if not os.path.isfile(e):
+        if e.endswith('.jar'):
+            no('the classpath jar %s does not exist' % e)
+        continue
+    try:
+        with zipfile.ZipFile(e) as z:
+            if not any(n.startswith(('org/junit/platform/', 'org/junit/jupiter/', 'org/junit/vintage/')) for n in z.namelist()):
+                continue
+            m = manifest(z)
+    except Exception as ex:
+        no('the classpath entry %s cannot be read as a jar (%s)' % (e, type(ex).__name__))
+    name = m.get('Implementation-Title') or m.get('Bundle-SymbolicName') or ''
+    ver = m.get('Implementation-Version') or m.get('Bundle-Version') or ''
+    want = jup if re.search('jupiter|vintage', name) else plat if 'platform' in name else None
+    if want is None or not ver:
+        no('the junit jar %s has no junit name or no version in its manifest' % e)
+    seen.append('%s %s' % (name, ver))
+    if ver != want:
+        bad.append('%s %s (launcher wants %s)' % (name, ver, want))
+if bad:
+    no('resolved ' + ', '.join(bad[:6]) + (' +%d more' % (len(bad) - 6) if len(bad) > 6 else ''))
+if not seen:
+    no('no junit-platform, jupiter or vintage jar on the test classpath')
+print('v ' + ', '.join(sorted(set(seen))))
 PY
-  return 0
-}
-version_ok() {  # <checkout> <module>
-  local v; v=$(platform_version_of "$1" "$2")
-  case "$v" in
-    "v $LAUNCHER_VERSION") return 0;;
-    "v "*) echo "bb-test: the checkout's junit-platform version is ${v#v } but the launcher is $LAUNCHER_VERSION (rc 15); refusing: a launcher of another version can run the tests differently from maven" >&2;;
-    "s "*) echo "bb-test: $1 cannot be checked (rc 16): ${v#s }; refusing, the launcher is $LAUNCHER_VERSION" >&2; return 16;;
-    *) echo "bb-test: the junit-platform version of $1 cannot be determined (rc 15): ${v#x }; refusing, the launcher is $LAUNCHER_VERSION" >&2;;
-  esac
-  return 15
-}
-# jvm_args_ok <arg>...: a launch-time -D of either version property is an override the pom check cannot see (rc 15).
-jvm_args_ok() {
-  local a; for a in "$@"; do
-    case "$a" in -Djunit-platform.version|-Djunit-platform.version=*|-Djunit.version|-Djunit.version=*)
-      echo "bb-test: the launch args set ${a%%=*} (rc 15); refusing: an override of the junit-platform version is not checked against the launcher" >&2; return 15;;
-    esac
-  done
 }
 
 if [ "${1:-}" = __launch ]; then
@@ -236,25 +116,36 @@ if [ "${1:-}" = __launch ]; then
     esac
   done
   guard "$HERE/bb-cp-record" check "$CO" "$MOD"
-  guard version_ok "$CO" "$MOD"
-  guard jvm_args_ok ${JVM[@]+"${JVM[@]}"}
   guard launcher_ok
-  source_is java
   JAVA=${BB_TEST_JAVA:-${JAVA_HOME:-/usr/lib/jvm/java-25-openjdk-amd64}/bin/java}
   CP="$CO/$MOD/target/test-classes:$CO/$MOD/target/classes:$(cat "$CO/.bb/cp/${MOD//\//__}.cp")"
   RC=0; RD=false
   for j in ${JVM[@]+"${JVM[@]}"}; do [ "$j" != -Daether.requireDocker=true ] || RD=true; done
+  BASE=$CO/$MOD/target/bb-test-reports/$TICKET; mkdir -p "$BASE"
+  OUT=$(mktemp "$CO/.bb/bb-test-out.XXXXXX")   # java's console and the count lines are printed only once the resolved check passed
   for i in $(seq "$REPEAT"); do
-    D=$CO/$MOD/target/bb-test-reports/$TICKET; [ "$REPEAT" = 1 ] || D=$D/run$i
+    D=$BASE; [ "$REPEAT" = 1 ] || D=$D/run$i
     mkdir -p "$D"
     set +e
     (cd "$CO/$MOD" && "$JAVA" ${JVM[@]+"${JVM[@]}"} -jar "$LAUNCHER_JAR" execute --disable-banner --fail-if-no-tests \
-        --class-path "$CP" --reports-dir "$D" "${SELS[@]}")
+        --class-path "$CP" --reports-dir "$D" "${SELS[@]}") >> "$OUT" 2>&1
     r=$?
     set -e
-    echo "bb-test: run $i/$REPEAT java exit $r; requireDocker=$RD; $("$HERE/bb-testcount" "$D" 2>&1 | tr '\n' ' ')"
+    echo "bb-test: run $i/$REPEAT java exit $r; requireDocker=$RD; $("$HERE/bb-testcount" "$D" 2>&1 | tr '\n' ' ')" >> "$OUT"
     [ "$r" -le "$RC" ] || RC=$r
   done
+  JUNIT=$(resolved_junit "$CP")
+  if [ "${JUNIT%% *}" != v ]; then   # the refusal replaces the verdict on every surface (header: RESOLVED JUNIT CHECK)
+    WHY="junit version: ${JUNIT#x }; the launcher is junit-platform $LAUNCHER_VERSION"; WHY=${WHY//[$'\n\r']/ }
+    ( flock 9; [ ! -f "$Q/running/$TICKET" ] || printf 'refused=%s\nverdict_source=guard\n' "$WHY" >> "$Q/running/$TICKET" ) 9> "$Q/.lock"
+    printf '%s\n' "$WHY" > "$CO/.bb/refused"
+    rm -rf "$BASE.refused"; mv "$BASE" "$BASE.refused"; mv "$OUT" "$BASE.refused/console.txt"
+    echo "bb-test: REFUSED (rc 15): $WHY; this run's test outcome is not a verdict (kept in $BASE.refused)"
+    exit 15
+  fi
+  source_is java
+  cat "$OUT"; rm -f "$OUT"
+  echo "bb-test: resolved junit on the test classpath: ${JUNIT#v }"
   exit "$RC"
 fi
 
@@ -275,7 +166,6 @@ while [ $# -gt 0 ]; do
 done
 [ ${#SELS[@]} -gt 0 ] || { echo "usage: bb-test <checkout> <module> <Class[#method]>... [--repeat N]" >&2; exit 2; }
 "$HERE/bb-cp-record" check "$CO" "$MOD" || exit $?
-version_ok "$CO" "$MOD" || exit $?
 launcher_ok || exit $?
 . "$HERE/bb-queue-lib.sh"
 GROUP=${BB_PORT_GROUP:-}

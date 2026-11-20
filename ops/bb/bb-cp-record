@@ -3,7 +3,7 @@
 # bb-cp-record check  <checkout> <module>
 #
 # record: called by bb-build on a GREEN build (never changes that build's verdict). Re-runs maven OFFLINE as
-#   `test-compile dependency:build-classpath` with the build's own selection args (-pl/-am/-amd/-f/-P only), so that reactor modules
+#   `test-compile dependency:build-classpath` with every option of the build (FORWARDED OPTIONS below), so that reactor modules
 #   resolve to target/classes, and writes, replacing the previous record whole:
 #     <co>/.bb/cp/<module>.cp   the module's test classpath ('/' in the module path becomes '__')
 #     <co>/.bb/cp/manifest      head <sha> | reactor <groupId>:<artifactId> | tree <module> <digest> | entry <module> <path> <digest>
@@ -257,18 +257,30 @@ def check(co, module):
     return 0
 
 
-SEL_VALUE = {'-pl', '--projects', '-f', '--file'}
-SEL_FLAG = {'-am', '--also-make', '-amd', '--also-make-dependents'}
+# FORWARDED OPTIONS (CTO ruling on vbt5/vbt6, temper#72): every OPTION of the build reaches the record, so the recorded classpath is what
+# the build resolved (a -D, --define, -s, -gs, -P, -f, -pl, -am of the build line included); goals and phases are dropped (the record runs
+# its own). A listed option that takes a value takes the next word unless the value is attached; -l/--log-file and its value are dropped
+# (the record's log would replace the build's). An option this table does not know is forwarded alone: when it takes a separate value,
+# that value is dropped as a goal, so the option takes the record's own goal instead and the record fails (no record; bb-test refuses).
+VALUED = {'-pl', '--projects', '-f', '--file', '-s', '--settings', '-gs', '--global-settings', '-D', '--define', '-P',
+          '--activate-profiles', '-T', '--threads', '-rf', '--resume-from', '-b', '--builder', '-t', '--toolchains', '-gt',
+          '--global-toolchains', '-emp', '--encrypt-master-password', '-ep', '--encrypt-password', '--color'}
+DROPPED = {'-l', '--log-file'}
 
 
 def selection(args):
     out, i = [], 0
     while i < len(args):
         a = args[i]
-        if a in SEL_VALUE and i + 1 < len(args):
+        if a in DROPPED:
+            i += 2
+            continue
+        if a.startswith('--log-file='):
+            pass
+        elif a in VALUED and i + 1 < len(args):
             out += [a, args[i + 1]]
             i += 1
-        elif a in SEL_FLAG or a.startswith('--projects=') or a.startswith('--file=') or a.startswith('-P') or (a.startswith('-pl') and a != '-pl'):
+        elif a.startswith('-'):
             out.append(a)
         i += 1
     return out

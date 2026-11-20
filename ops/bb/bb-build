@@ -96,7 +96,7 @@ if [ "${1:-}" = __run ]; then
   done
   # granted (lock held): launch, record the launch in the LEDGER (the next grant counts it from that line), release the lock at once
   NOW=$(date +%s)
-  rm -f "$B/queued" "$B/rc" "$B/end"; touch "$B/run.marker"; echo "$NOW" > "$B/start"; printf '%q ' "$@" > "$B/args"   # for bb-report's EMPTY RUN check
+  rm -f "$B/queued" "$B/rc" "$B/end" "$B/refused"; touch "$B/run.marker"; echo "$NOW" > "$B/start"; printf '%q ' "$@" > "$B/args"   # for bb-report's EMPTY RUN check
   RDF=(-Daether.requireDocker=true); [ "$(field "$T" requireDocker)" != 0 ] || RDF=()   # #31: the ticket's own record decides
   SLOT=""; [ "$(field "$T" iso)" = 1 ] && SLOT=$(pg_free_slot)
   printf 'started=%s\nwaited=%s\n' "$NOW" "$WAITED" >> "$T"; [ -z "$SLOT" ] || printf 'group_slot=%s\n' "$SLOT" >> "$T"; mv "$T" "$Q/running/$ID"; T=$Q/running/$ID

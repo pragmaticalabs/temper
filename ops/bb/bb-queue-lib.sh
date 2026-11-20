@@ -411,7 +411,8 @@ utc() { case "$1" in ''|0|*[!0-9]*) echo -;; *) date -u -d "@$1" +%Y-%m-%dT%H:%M
 #   host ticket owner checkout port_group group_id enqueued granted ended wait_s run_s rc state args
 # times ISO-8601 UTC; group_id = isolated slot number, "host" (host-exclusive group ticket) or '-'; wait_s = granted-enqueued (never
 # granted: ended-enqueued); run_s = ended-granted; rc '-' when the ticket has none (abandoned, expired, orphaned); state = the
-# ticket's last state=; args with tabs/newlines folded to spaces and cut so the line fits.
+# ticket's last state=, or refused when the ticket has a refused= field (a bb-test resolved-junit refusal); args with tabs/newlines
+# folded to spaces and cut so the line fits.
 ticket_log() {
   local f=$1 cr st en g gid rc ws=- rs=- line a
   cr=$(created_s "$f"); st=$(field "$f" started); en=$(field "$f" ended); g=$(field "$f" group); rc=$(field "$f" rc)
@@ -421,7 +422,7 @@ ticket_log() {
   if [ -n "$st" ] && [ -n "$en" ]; then rs=$((en - st)); fi
   a=$(field "$f" args | tr '\t\n\r' '   ')
   line=$(printf '%s\t' "$(hostname -s 2>/dev/null || hostname)" "${f##*/}" "$(field "$f" owner)" "$(field "$f" co)" "${g:-0}" "$gid" \
-    "$(utc "$cr")" "$(utc "$st")" "$(utc "$en")" "$ws" "$rs" "${rc:--}" "$(field "$f" state)")
+    "$(utc "$cr")" "$(utc "$st")" "$(utc "$en")" "$ws" "$rs" "${rc:--}" "$( [ -z "$(field "$f" refused)" ] && field "$f" state || echo refused)")
   a=${a:0:$((3990 - ${#line}))}
   [ -s "$TLOG" ] || printf 'host\tticket\towner\tcheckout\tport_group\tgroup_id\tenqueued\tgranted\tended\twait_s\trun_s\trc\tstate\targs\n' >> "$TLOG"
   printf '%s%s\n' "$line" "$a" >> "$TLOG"

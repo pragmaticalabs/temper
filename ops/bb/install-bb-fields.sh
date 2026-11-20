@@ -39,7 +39,7 @@ readonly BB_LIB_PREMEM=a8fb757b12597e167b9804f7d14327e0   # the #42 version: no 
 readonly BB_LIB_PRECAP=cca5e8cd6942f988bb932f37f4de93e1   # the #53 version: no host reactor cap, no off-queue JVM headroom (issue #56)
 readonly BB_LIB_PREOFFQ=e1b318e7bef1d4acff934b041d5ecc1a   # the #56/#64 version: no off-queue reactor list (2026-11-20); the cap counts reactors by process pattern
 readonly BB_LIB_PRELEDGER=2569b8af2cf8acc063024e553be66a93   # the #66 version: the cap counts reactors by process pattern (replaced by the launch ledger)
-readonly BB_LIB_NEW=7eaf76a33ec71888d45c4432e77ae11a
+readonly BB_LIB_NEW=e607b50fda23b34c7468cd89d0e9f247
 readonly BB_QUEUE_OLD=7efbfbecb9739fed35223cdc97eb185d
 readonly BB_QUEUE_PREV=a04b7be02f840d4f1e2bd19c54c52b3f
 readonly BB_QUEUE_LIVE=af86457ae18f4ca331e47137cd088bc7   # what the 2026-11-11 hosts run: its header says `group tickets running:`, which the worker cannot parse
@@ -62,11 +62,11 @@ readonly BB_BUILD_PRECAP=8478b2174ce3ff6de293b55a283e3ce7   # the #53 version: c
 readonly BB_BUILD_PREJBCT=12c68a554862caa672f7211456dfc84c   # the #56 version: no jbct plugin bootstrap hook, no bb-cp-record hook, no BB_LAUNCH
 readonly BB_BUILD_PREHELP=a942996fc17ef7851bac693f135defc2   # the #64/#66 version: no --help, no bb-cp-record hook, no BB_LAUNCH, no launch ledger (bb-test lane)
 readonly BB_BUILD_PRERESULT=24183c7d359b4030faeef894bbe4ba52   # the #67 version: --help and bb-result, no bb-cp-record hook, no launch ledger
-readonly BB_BUILD_NEW=1204c063e5c141767db5684aa0c6f90e
+readonly BB_BUILD_NEW=7c507772c3c43ff084098f591c4e0af0
 # bb-jbct-bootstrap: absent on every host before its first install; bb-build calls it, so it is installed first.
 readonly BB_JBCTBOOT_NEW=3e5396ecee48b99949456cf805df1e60
 # bb-result: absent on every host before its first install. No trailing comment on a pin line: bb-drift reads it by pattern.
-readonly BB_RESULT_NEW=2b99dd5c414175c4fd40a9836da76298
+readonly BB_RESULT_NEW=f4505867d09a1b3946280944678757ba
 readonly BB_TICKETS_OLD=472cd816644fe0ee0902b8da3d33de8e   # before the per-ticket progressAt (issue #10)
 readonly BB_TICKETS_PRE31=e1aeba98541ba781295001f956b08c8d   # live since 2026-11-12: drops a ticket key with a capital letter
 readonly BB_TICKETS_PREOFFQ=6174119f0cd567c5dc462d1e063c6214   # the #31 version: no `offq` in the trailer (2026-11-20)
@@ -83,8 +83,8 @@ readonly BB_NETNS_NEW=bf05b7c51c2f7863ee685a195273e195
 readonly BB_PORTGROUP_PREV=a93ade2ff7dddcc75cee3d4169a08499   # the 2026-11-09 host snapshot, live on c4/d1 since 2026-11-11
 readonly BB_PORTGROUP_NEW=884caf3cf37b12cf5cf1d97e96f76a4c
 # The bb-test lane helpers: absent on every host before their first install. No trailing comment on a pin line: bb-drift reads it by pattern.
-readonly BB_CPRECORD_NEW=8c79a293cb8eb4adf36b6e74fef05b93
-readonly BB_TEST_NEW=04b08af2b9200919efb19fd8c5fe8c28
+readonly BB_CPRECORD_NEW=3db38c67c3959312bf90a2089eb26c06
+readonly BB_TEST_NEW=919fe83c1114d00172fa232a784f51aa
 readonly BB_TESTCOUNT_NEW=7ef8a4c3eba2a517146eed6d7ac31511
 readonly BB_MUTATE_OLD=f9bfbd37c5feafe67995f6716e8fecb0   # the host snapshot, identical on all four hosts: batch credit unsound for multi-module specs
 readonly BB_MUTATE_PREVIA=2c341d44d428ba445db7ea03ee90af64   # the batch-sound version (#41): does not export BB_VIA (issue #46)

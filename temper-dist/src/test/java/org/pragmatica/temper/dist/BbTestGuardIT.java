@@ -183,99 +183,6 @@ class BbTestGuardIT {
                                           "3fdfc37e29744a9a67dd5365e81467e26fbde0b7aa204e6f8bbe79eeaa7ae892");
     }
 
-    private BbFixtures.Outcome bbTestWithRootPom(String pom, Path launcher) throws Exception {
-        Files.writeString(co.resolve("pom.xml"), pom);
-        git("add", "-A");
-        git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "pom");
-        recorded();
-
-        return BbFixtures.run(List.of(BbFixtures.OPS_BB.resolve("bb-test").toString(),
-                                      co.toString(),
-                                      "app",
-                                      "SomeTest"),
-                              Map.of("BB_TEST_LAUNCHER_JAR", launcher.toString()),
-                              null,
-                              null);
-    }
-
-    private static final String POM_HEAD = "<project><modelVersion>4.0.0</modelVersion><groupId>g</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging>";
-
-    private BbFixtures.Outcome versionOf(String pomBody) throws Exception {
-        return bbTestWithRootPom(POM_HEAD + pomBody + "</project>", tmp.resolve("no-launcher.jar"));
-    }
-
-    private void refused15(BbFixtures.Outcome run) {
-        assertThat(run.rc()).as(run.stderr()).isEqualTo(15);
-    }
-
-    @Test
-    void versionGuard_aCheckoutOnAnotherJunitPlatformVersion_isRefusedWithRc15_namingBoth() throws Exception {
-        var run = bbTestWithRootPom(ROOT_POM.replace("5.13.4", "5.12.2"), tmp.resolve("no-launcher.jar"));
-
-        refused15(run);
-        assertThat(run.stderr()).contains("1.12.2", "1.13.4");
-    }
-
-    @Test
-    void versionGuard_anUndeterminableVersion_isRefusedWithRc15_failClosed() throws Exception {
-        var run = bbTestWithRootPom(ROOT_POM.replace("5.13.4", "${some.var}"), tmp.resolve("no-launcher.jar"));
-
-        refused15(run);
-        assertThat(run.stderr()).contains("cannot be determined");
-    }
-
-    @Test
-    void versionGuard_theMatchingVersion_passesTheCheck_andReachesTheLauncherCheck() throws Exception {
-        var run = bbTestWithRootPom(ROOT_POM, tmp.resolve("no-launcher.jar"));
-
-        assertThat(run.rc()).as(run.stderr()).isEqualTo(14);
-    }
-
-    @Test
-    void versionGuard_aCommentedOutPlatformProperty_isNotRead() throws Exception {
-        var run = versionOf("<properties><!-- <junit-platform.version>1.13.4</junit-platform.version> --><junit.version>5.12.2</junit.version></properties>");
-
-        refused15(run);
-        assertThat(run.stderr()).contains("1.12.2");
-    }
-
-    @Test
-    void versionGuard_twoDefinitions_areRefused_evenWhenTheFirstMatches() throws Exception {
-        refused15(versionOf("<properties><junit-platform.version>1.13.4</junit-platform.version><junit-platform.version>1.12.0</junit-platform.version></properties>"));
-    }
-
-    @Test
-    void versionGuard_aPropertyOutsideProjectProperties_isNotRead() throws Exception {
-        var run = versionOf("<dependencyManagement><junit-platform.version>1.13.4</junit-platform.version></dependencyManagement>");
-
-        refused15(run);
-        assertThat(run.stderr()).contains("cannot be determined");
-    }
-
-    @Test
-    void versionGuard_aPropertyReference_isRefused() throws Exception {
-        refused15(versionOf("<properties><junit-platform.version>${junit.platform}</junit-platform.version></properties>"));
-    }
-
-    @Test
-    void versionGuard_aSixDotXJunitVersion_isRefused() throws Exception {
-        refused15(versionOf("<properties><junit.version>6.0.0</junit.version></properties>"));
-    }
-
-    @Test
-    void versionGuard_aSnapshotVersion_isRefused() throws Exception {
-        refused15(versionOf("<properties><junit-platform.version>1.13.4-SNAPSHOT</junit-platform.version></properties>"));
-    }
-
-    @Test
-    void versionGuard_aCrlfPomWithTheMatchingVersion_isAccepted() throws Exception {
-        var pom = POM_HEAD
-                + "\r\n<properties>\r\n<junit.version>\r\n  5.13.4 \r\n</junit.version>\r\n</properties>\r\n</project>\r\n";
-        var run = bbTestWithRootPom(pom, tmp.resolve("no-launcher.jar"));
-
-        assertThat(run.rc()).as(run.stderr()).isEqualTo(14);
-    }
-
     private BbFixtures.Outcome launchDirect(String pom, String... extra) throws Exception {
         // what the queue's waiter runs for a bb-test ticket, with the enqueue-time check out of the way: __launch in the checkout,
         // with one running ticket naming it
@@ -301,19 +208,6 @@ class BbTestGuardIT {
                                      tmp.resolve("no-launcher.jar").toString()),
                               co,
                               null);
-    }
-
-    @Test
-    void launchTime_aCheckoutOnAnotherJunitPlatformVersion_isRefusedWithRc15() throws Exception {
-        var run = launchDirect(ROOT_POM.replace("5.13.4", "5.12.2"));
-
-        assertThat(run.rc()).as(run.stderr()).isEqualTo(15);
-        assertThat(run.stderr()).contains("1.12.2", "1.13.4");
-    }
-
-    @Test
-    void launchTime_theMatchingVersion_reachesTheLauncherCheck() throws Exception {
-        assertThat(launchDirect(ROOT_POM).rc()).isEqualTo(14);
     }
 
     @Test
@@ -481,209 +375,12 @@ class BbTestGuardIT {
         assertThat(count(dup).rc()).isEqualTo(3);
     }
 
-    // ---- vbt4 M1: every override of the junit version properties is refused (rc 15), not only the root pom's /project/properties ----
-    private static final String ROOT_PROPS = "<properties><junit.version>5.13.4</junit.version></properties>";
-
-    @Test
-    void versionGuard_aRootPomProfileSettingThePlatformProperty_isRefusedWithRc15() throws Exception {
-        var run = versionOf(ROOT_PROPS
-                           + "<profiles><profile><id>p</id><properties><junit-platform.version>1.13.4</junit-platform.version></properties></profile></profiles>");
-
-        refused15(run);
-        assertThat(run.stderr()).contains("a <profile> in the root pom sets <junit-platform.version>");
-    }
-
-    @Test
-    void versionGuard_twoPropertiesBlocks_areRefusedWithRc15() throws Exception {
-        var run = versionOf(ROOT_PROPS + "<properties><other>x</other></properties>");
-
-        refused15(run);
-        assertThat(run.stderr()).contains("the root pom has 2 <properties> blocks");
-    }
-
-    @Test
-    void versionGuard_aModulePomOnThePathSettingTheProperty_isRefusedWithRc15() throws Exception {
-        Files.writeString(co.resolve("app").resolve("pom.xml"),
-                          "<project><modelVersion>4.0.0</modelVersion><groupId>g</groupId><artifactId>app</artifactId><version>1</version>"
-                         + "<properties><junit.version>5.12.2</junit.version></properties></project>");
-        var run = bbTestWithRootPom(ROOT_POM, tmp.resolve("no-launcher.jar"));
-
-        refused15(run);
-        assertThat(run.stderr()).contains("app/pom.xml sets <junit.version>");
-    }
-
-    @Test
-    void versionGuard_aMavenConfigDefineOfTheProperty_isRefusedWithRc15() throws Exception {
-        Files.createDirectories(co.resolve(".mvn"));
-        Files.writeString(co.resolve(".mvn").resolve("maven.config"),
-                          "-B\n-D junit-platform.version=1.12.2\n");
-        var run = bbTestWithRootPom(ROOT_POM, tmp.resolve("no-launcher.jar"));
-
-        refused15(run);
-        assertThat(run.stderr()).contains(".mvn/maven.config sets -Djunit-platform.version");
-    }
-
-    // ---- vbt5 H1: three overrides the vbt4 M1 guard let through (each row was v 1.13.4 = accepted against that guard) ----
-    @Test
-    void versionGuard_aMavenConfigLongDefineWithEquals_isRefusedWithRc15() throws Exception {
-        Files.createDirectories(co.resolve(".mvn"));
-        Files.writeString(co.resolve(".mvn").resolve("maven.config"), "-B\n--define=junit.version=5.12.2\n");
-        var run = bbTestWithRootPom(ROOT_POM, tmp.resolve("no-launcher.jar"));
-
-        refused15(run);
-        assertThat(run.stderr()).contains(".mvn/maven.config sets -Djunit.version");
-    }
-
-    // ---- vbt6: each row below was accepted (rc 14, the launcher check) by the 32e2ad8b6 guard ----
-    private BbFixtures.Outcome withMavenConfig(String config) throws Exception {
-        Files.createDirectories(co.resolve(".mvn"));
-        Files.writeString(co.resolve(".mvn").resolve("maven.config"), config);
-        return bbTestWithRootPom(ROOT_POM, tmp.resolve("no-launcher.jar"));
-    }
-
-    @Test
-    void versionGuard_aMavenConfigPlainDefineOfJunitVersion_isRefusedWithRc15() throws Exception {
-        var run = withMavenConfig("-B\n-Djunit.version=5.12.2\n");
-
-        refused15(run);
-        assertThat(run.stderr()).contains(".mvn/maven.config sets -Djunit.version");
-    }
-
-    @Test
-    void versionGuard_aMavenConfigPlainDefineOfThePlatformVersion_isRefusedWithRc15() throws Exception {
-        var run = withMavenConfig("-Djunit-platform.version=1.12.2 -B\n");
-
-        refused15(run);
-        assertThat(run.stderr()).contains(".mvn/maven.config sets -Djunit-platform.version");
-    }
-
-    @Test
-    void versionGuard_aMavenConfigLongDefineWithASpace_isRefusedWithRc15() throws Exception {
-        var run = withMavenConfig("--define junit.version=5.12.2\n");
-
-        refused15(run);
-        assertThat(run.stderr()).contains(".mvn/maven.config sets -Djunit.version");
-    }
-
-    @Test
-    void versionGuard_aMavenConfigDefineOfAnotherProperty_passesTheCheck() throws Exception {
-        var run = withMavenConfig("-Dmyjunit.version=5.12.2 -Dlabel=junit.version -fae -T 4\n");
-
-        assertThat(run.rc()).as(run.stderr()).isEqualTo(14);
-    }
-
-    @Test
-    void versionGuard_aMavenConfigSettingsOrPomFile_isRefusedWithRc16() throws Exception {
-        for (var config : List.of("-s .mvn/s.xml", "--settings=.mvn/s.xml", "-gs g.xml", "-f alt.xml", "--file alt.xml", "--global-settings g.xml")) {
-            var run = withMavenConfig("-B\n" + config + "\n");
-
-            assertThat(run.rc()).as(config + ": " + run.stderr()).isEqualTo(16);
-            assertThat(run.stderr()).contains("cannot be checked (rc 16)", ".mvn/maven.config passes " + config.split("[ ]")[0]);
-        }
-    }
-
-    private static final String BOM_AT_JUNIT_VERSION = "<dependencyManagement><dependencies><dependency><groupId>org.junit</groupId><artifactId>junit-bom</artifactId>"
-                                                     + "<version>${junit.version}</version><type>pom</type><scope>import</scope></dependency></dependencies></dependencyManagement>";
-
-    @Test
-    void versionGuard_aJunitBomAtAJunitVersionBringingAnotherPlatform_isRefusedWithRc15() throws Exception {
-        var run = versionOf("<properties><junit-platform.version>1.13.4</junit-platform.version><junit.version>5.12.2</junit.version></properties>"
-                           + BOM_AT_JUNIT_VERSION);
-
-        refused15(run);
-        assertThat(run.stderr()).contains("uses ${junit.version}=5.12.2 for org.junit:junit-bom, which brings junit-platform 1.12.2, not 1.13.4");
-    }
-
-    @Test
-    void versionGuard_aJunitBomAtTheMatchingJunitVersion_passesTheCheck() throws Exception {
-        var run = versionOf("<properties><junit-platform.version>1.13.4</junit-platform.version><junit.version>5.13.4</junit.version></properties>"
-                           + BOM_AT_JUNIT_VERSION);
-
-        assertThat(run.rc()).as(run.stderr()).isEqualTo(14);
-    }
-
-    @Test
-    void versionGuard_aJunitGroupIdThroughAPropertyWithALiteralVersion_isRefusedWithRc15() throws Exception {
-        var run = versionOf("<properties><junit.version>5.13.4</junit.version><junit.group>org.junit.jupiter</junit.group></properties>"
-                           + "<dependencies><dependency><groupId>${junit.group}</groupId><artifactId>junit-jupiter</artifactId><version>5.12.2</version>"
-                           + "</dependency></dependencies>");
-
-        refused15(run);
-        assertThat(run.stderr()).contains("sets the version of org.junit.jupiter:junit-jupiter to 5.12.2");
-    }
-
-    @Test
-    void versionGuard_anUnresolvableGroupIdWithAVersion_isRefusedWithRc15() throws Exception {
-        var run = versionOf(ROOT_PROPS + "<dependencies><dependency><groupId>${nowhere}</groupId><artifactId>x</artifactId><version>1</version>"
-                           + "</dependency></dependencies>");
-
-        refused15(run);
-        assertThat(run.stderr()).contains("groupId ${nowhere} that cannot be resolved");
-    }
-
-    private static final String APP_WITH_PARENT = "<project><modelVersion>4.0.0</modelVersion><parent><groupId>g</groupId><artifactId>%s</artifactId><version>1</version>"
-                                                + "<relativePath>%s</relativePath></parent><artifactId>app</artifactId></project>";
-
-    @Test
-    void versionGuard_aModuleParentByRelativePathOffItsDirPath_settingTheProperty_isRefusedWithRc15() throws Exception {
-        Files.createDirectories(co.resolve("parent"));
-        Files.writeString(co.resolve("parent").resolve("pom.xml"),
-                          "<project><modelVersion>4.0.0</modelVersion><groupId>g</groupId><artifactId>parent</artifactId><version>1</version>"
-                         + "<properties><junit.version>5.12.2</junit.version></properties></project>");
-        Files.writeString(co.resolve("app").resolve("pom.xml"), APP_WITH_PARENT.formatted("parent", "../parent/pom.xml"));
-        var run = bbTestWithRootPom(ROOT_POM, tmp.resolve("no-launcher.jar"));
-
-        refused15(run);
-        assertThat(run.stderr()).contains("parent/pom.xml sets <junit.version>");
-    }
-
-    @Test
-    void versionGuard_aModuleParentChainThroughAnotherDirToTheRoot_withoutAnOverride_reachesTheLauncherCheck() throws Exception {
-        Files.createDirectories(co.resolve("parent"));
-        Files.writeString(co.resolve("parent").resolve("pom.xml"),
-                          "<project><modelVersion>4.0.0</modelVersion><parent><groupId>g</groupId><artifactId>root</artifactId><version>1</version></parent>"
-                         + "<artifactId>parent</artifactId></project>");
-        Files.writeString(co.resolve("app").resolve("pom.xml"), APP_WITH_PARENT.formatted("parent", "../parent"));
-        var run = bbTestWithRootPom(ROOT_POM, tmp.resolve("no-launcher.jar"));
-
-        assertThat(run.rc()).as(run.stderr()).isEqualTo(14);
-    }
-
-    @Test
-    void versionGuard_aModuleParentResolvedFromARepository_isRefusedWithRc15() throws Exception {
-        Files.writeString(co.resolve("app").resolve("pom.xml"), APP_WITH_PARENT.formatted("external", ""));
-        var run = bbTestWithRootPom(ROOT_POM, tmp.resolve("no-launcher.jar"));
-
-        refused15(run);
-        assertThat(run.stderr()).contains("app/pom.xml has a <parent> that is not a pom in the checkout");
-    }
-
-    @Test
-    void versionGuard_aModuleJunitBomImportAtALiteralVersion_isRefusedWithRc15() throws Exception {
-        Files.writeString(co.resolve("app").resolve("pom.xml"),
-                          "<project><modelVersion>4.0.0</modelVersion><groupId>g</groupId><artifactId>app</artifactId><version>1</version>"
-                         + "<dependencyManagement><dependencies><dependency><groupId>org.junit</groupId><artifactId>junit-bom</artifactId>"
-                         + "<version>5.12.2</version><type>pom</type><scope>import</scope></dependency></dependencies></dependencyManagement></project>");
-        var run = bbTestWithRootPom(ROOT_POM, tmp.resolve("no-launcher.jar"));
-
-        refused15(run);
-        assertThat(run.stderr()).contains("app/pom.xml sets the version of org.junit:junit-bom to 5.12.2");
-    }
-
-    @Test
-    void launchTime_aDefineOfTheVersionInTheLaunchArgs_isRefusedWithRc15() throws Exception {
-        var run = launchDirect(ROOT_POM, "-Djunit.version=5.12.2");
-
-        assertThat(run.rc()).as(run.stderr()).isEqualTo(15);
-        assertThat(run.stderr()).contains("the launch args set -Djunit.version");
-    }
-
     // ---- vbt4 L2: a launch-time guard refusal is told apart from java's own exit status on the ticket ----
     @Test
     void launchTime_aGuardRefusal_writesVerdictSourceGuard_onTheTicket() throws Exception {
-        var run = launchDirect(ROOT_POM.replace("5.13.4", "5.12.2"));
+        var run = launchDirect(ROOT_POM);
 
-        assertThat(run.rc()).as(run.stderr()).isEqualTo(15);
+        assertThat(run.rc()).as("the launcher jar is absent: a launch-time guard, rc 14 " + run.stderr()).isEqualTo(14);
         assertThat(Files.readString(tmp.resolve("q").resolve("running").resolve("T1"))).contains("\nverdict_source=guard\n")
                   .doesNotContain("verdict_source=java");
     }
@@ -763,5 +460,133 @@ class BbTestGuardIT {
         assertThat(w[2]).as("pgid = maven's pid (its own session)").isEqualTo(w[0]);
         assertThat(w[3]).as("the start time of that process").isEqualTo(w[1]);
         assertThat(co.resolve(".bb/cp-record.pgid")).as("removed once maven exited").doesNotExist();
+    }
+
+    // ---- RESOLVED JUNIT CHECK (CTO ruling on vbt5/vbt6, temper#72): after the java run, the junit jars on the run's own classpath are read
+    // by their MANIFEST; any version other than the launcher's, or nothing readable found, is rc 15 and replaces the verdict. Here java is a
+    // stand-in that writes one passing testcase and exits 0, so every refusal below is a refusal of a run whose tests passed.
+
+    private Path junitJar(String file, String title, String version, String entry) throws Exception {
+        var path = Files.createDirectories(tmp.resolve("jars")).resolve(file);
+        var manifest = new java.util.jar.Manifest();
+        var attrs = manifest.getMainAttributes();
+
+        attrs.put(java.util.jar.Attributes.Name.MANIFEST_VERSION, "1.0");
+        if (title != null) {
+            attrs.put(java.util.jar.Attributes.Name.IMPLEMENTATION_TITLE, title);
+        }
+        if (version != null) {
+            attrs.put(java.util.jar.Attributes.Name.IMPLEMENTATION_VERSION, version);
+        }
+        try (var out = new java.util.jar.JarOutputStream(Files.newOutputStream(path), manifest)) {
+            out.putNextEntry(new java.util.jar.JarEntry(entry));
+            out.write(1);
+            out.closeEntry();
+        }
+        return path;
+    }
+
+    private String matching() throws Exception {
+        return junitJar("junit-platform-commons-1.13.4.jar", "junit-platform-commons", "1.13.4", "org/junit/platform/commons/X.class") + ":"
+               + junitJar("junit-jupiter-api-5.13.4.jar", "junit-jupiter-api", "5.13.4", "org/junit/jupiter/api/X.class");
+    }
+
+    /// __launch of ticket T1 with a stand-in launcher (its sha passed as the pin) and a stand-in java, the app module recorded with
+    /// `appExtra` as the tail of its classpath.
+    private BbFixtures.Outcome resolvedRun(String appExtra) throws Exception {
+        var record = record(appExtra);
+
+        assertThat(record.rc()).as(record.stdout() + record.stderr()).isZero();
+        var running = Files.createDirectories(tmp.resolve("q").resolve("running"));
+
+        Files.writeString(running.resolve("T1"), "id=T1\nco=" + co + "\n");
+        var launcher = Files.writeString(tmp.resolve("launcher.jar"), "stand-in launcher");
+        var sha = java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(launcher)));
+        var fakeJava = BbFixtures.executable(tmp.resolve("bin").resolve("java"),
+                                         "#!/usr/bin/env bash\n"
+                                        + "while [ $# -gt 0 ]; do [ \"$1\" = --reports-dir ] && D=$2; shift; done\n"
+                                        + "printf '<testsuite name=\"s\" tests=\"1\" failures=\"0\" errors=\"0\" skipped=\"0\"><testcase classname=\"a.ATest\" name=\"t\"/></testsuite>\\n' > \"$D/TEST-junit-jupiter.xml\"\n"
+                                        + "echo STAND-IN-JAVA-RAN; exit 0\n");
+
+        return BbFixtures.run(List.of(BbFixtures.OPS_BB.resolve("bb-test").toString(), "__launch", "app", "1", "a.ATest"),
+                              Map.of("BB_TEST_QUEUE_ROOT", tmp.resolve("q").toString(),
+                                     "BB_TEST_LAUNCHER_JAR", launcher.toString(),
+                                     "BB_TEST_LAUNCHER_SHA", sha,
+                                     "BB_TEST_JAVA", fakeJava.toString()),
+                              co,
+                              null);
+    }
+
+    private String ticket() throws Exception {
+        return Files.readString(tmp.resolve("q").resolve("running").resolve("T1"));
+    }
+
+    private void assertRefused(BbFixtures.Outcome run, String reason) throws Exception {
+        assertThat(run.rc()).as("refused, replacing java's exit 0: " + run.stdout() + run.stderr()).isEqualTo(15);
+        assertThat(run.stdout()).contains("bb-test: REFUSED (rc 15)", reason)
+                                .as("the run's console is not printed as a result").doesNotContain("STAND-IN-JAVA-RAN", "java exit 0");
+        assertThat(ticket()).contains("\nrefused=junit version: ", reason, "\nverdict_source=guard\n").doesNotContain("verdict_source=java");
+        assertThat(Files.readString(co.resolve(".bb/refused"))).contains(reason);
+        assertThat(co.resolve("app/target/bb-test-reports/T1")).as("no report dir that a count could read as this run's").doesNotExist();
+        assertThat(co.resolve("app/target/bb-test-reports/T1.refused/console.txt")).exists();
+    }
+
+    @Test
+    void resolved_theLaunchersJunitOnTheClasspath_passes_andJavasExitIsTheVerdict() throws Exception {
+        var run = resolvedRun(matching() + ":" + tmp.resolve("no-such-classes-dir"));
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        assertThat(run.stdout()).contains("STAND-IN-JAVA-RAN",
+                                          "bb-test: resolved junit on the test classpath: junit-jupiter-api 5.13.4, junit-platform-commons 1.13.4");
+        assertThat(ticket()).contains("verdict_source=java").doesNotContain("refused=");
+        assertThat(co.resolve(".bb/refused")).doesNotExist();
+    }
+
+    @Test
+    void resolved_anotherJupiterVersion_isRefusedWithRc15_namingIt() throws Exception {
+        var older = junitJar("junit-jupiter-api-5.11.4.jar", "junit-jupiter-api", "5.11.4", "org/junit/jupiter/api/X.class");
+
+        assertRefused(resolvedRun(older + ":" + matching()), "resolved junit-jupiter-api 5.11.4 (launcher wants 5.13.4)");
+    }
+
+    @Test
+    void resolved_anotherPlatformVersion_isRefusedWithRc15_namingIt() throws Exception {
+        var newer = junitJar("junit-platform-engine-1.14.1.jar", "junit-platform-engine", "1.14.1", "org/junit/platform/engine/X.class");
+
+        assertRefused(resolvedRun(matching() + ":" + newer), "junit-platform-engine 1.14.1 (launcher wants 1.13.4)");
+    }
+
+    @Test
+    void failClosed_noJunitJarOnTheClasspath_isRefused() throws Exception {
+        var plain = junitJar("other.jar", "other", "1.0", "x/Y.class");
+
+        assertRefused(resolvedRun(plain.toString()), "no junit-platform, jupiter or vintage jar on the test classpath");
+    }
+
+    @Test
+    void failClosed_aClasspathJarThatDoesNotExist_isRefused() throws Exception {
+        assertRefused(resolvedRun(matching() + ":/seed/x.jar"), "the classpath jar /seed/x.jar does not exist");
+    }
+
+    @Test
+    void failClosed_aJarThatCannotBeRead_isRefused() throws Exception {
+        var broken = Files.writeString(Files.createDirectories(tmp.resolve("jars")).resolve("broken.jar"), "not a zip");
+
+        assertRefused(resolvedRun(matching() + ":" + broken), "cannot be read as a jar (BadZipFile)");
+    }
+
+    @Test
+    void failClosed_aJunitJarWithoutAManifestVersion_isRefused() throws Exception {
+        var bare = junitJar("junit-jupiter-api.jar", "junit-jupiter-api", null, "org/junit/jupiter/api/X.class");
+
+        assertRefused(resolvedRun(matching() + ":" + bare), "has no junit name or no version in its manifest");
+    }
+
+    @Test
+    void failClosed_aClasspathDirectoryHoldingJunitClasses_isRefused() throws Exception {
+        var classes = Files.createDirectories(tmp.resolve("shaded").resolve("org/junit/jupiter/api"));
+
+        Files.writeString(classes.resolve("X.class"), "x");
+        assertRefused(resolvedRun(matching() + ":" + tmp.resolve("shaded")), "holds junit classes, which no manifest versions");
     }
 }

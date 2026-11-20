@@ -100,7 +100,7 @@ class BbTestLaunchIT {
                                        + "case \" $* \" in *dependency:build-classpath*)\n"
                                        + "  [ -z \"$HANG_RECORD\" ] || { echo $$ > \"$HANG_RECORD\"; exec sleep 600; }\n"
                                        + "  mkdir -p fx/target; echo '" + launcher
-                                       + "' > fx/target/bb-cp.txt; exit 0;;\n"
+                                       + "'\"${RECORD_EXTRA:+:$RECORD_EXTRA}\" > fx/target/bb-cp.txt; exit 0;;\n"
                                        + "esac\n"
                                        + "rm -rf fx/target/classes fx/target/test-classes; mkdir -p fx/target/classes fx/target/test-classes\n" + jdk
                                        + "/bin/javac -d fx/target/classes $(find fx/src/main -name '*.java') || exit 1\n" + jdk
@@ -320,5 +320,192 @@ class BbTestLaunchIT {
 
         assertThat(ProcessHandle.of(pid)).as("the hung maven of the record was killed with it").isEmpty();
         assertThat(Files.readString(co.resolve(".bb/rc")).strip()).isEqualTo("0");
+    }
+
+    // ---- RESOLVED JUNIT CHECK end to end (CTO ruling on vbt5/vbt6, temper#72). The junit version the build ACTUALLY resolved, read after the
+    // run from the ticket's own test classpath, is the allowed one; a refusal (rc 15) replaces the verdict on every surface.
+
+    private static final String OLD_API = "work/temper-m2-seed/org/junit/jupiter/junit-jupiter-api/5.11.4/junit-jupiter-api-5.11.4.jar";
+
+    private BbFixtures.Outcome bbResult(String... args) throws Exception {
+        var cmd = new ArrayList<>(List.of("python3", BbFixtures.OPS_BB.resolve("bb-result").toString()));
+
+        cmd.addAll(List.of(args));
+
+        return BbFixtures.run(cmd, env, null, null);
+    }
+
+    private void assertRefusedEverywhere(Done run) throws Exception {
+        var why = "resolved junit-jupiter-api 5.11.4 (launcher wants 5.13.4)";
+
+        assertThat(run.rc()).as("the ticket's rc: " + run.doneText()).isEqualTo(15);
+        assertThat(Files.readString(co.resolve(".bb/rc")).strip()).as(".bb/rc holds the refusal code, never java's 0").isEqualTo("15");
+        assertThat(run.doneText()).contains("\nrefused=junit version: " + why, "\nverdict_source=guard\n").doesNotContain("verdict_source=java");
+        assertThat(Files.readString(co.resolve(".bb/refused"))).contains(why);
+        var row = Files.readAllLines(dir.resolve("home/work/bb-ticket-log.tsv")).stream().filter(l -> l.contains("\t" + run.id() + "\t")).toList();
+
+        assertThat(row).as("one ledger row for the ticket").hasSize(1);
+        assertThat(row.get(0).split("\t")[12]).as("the ledger's state column").isEqualTo("refused");
+        var text = bbResult(run.id()).stdout();
+
+        assertThat(text.lines().findFirst().orElseThrow()).contains("rc=15 verdict=REFUSED");
+        assertThat(text).contains("refused: junit version: " + why, "tests: refused (not a verdict: ").doesNotContain(" run, ", "reports: ");
+        assertThat(bbResult(run.id(), "--json").stdout()).contains("\"verdict\": \"refused\"", "\"status\": \"refused\"", "\"failing\": []")
+                                                       .doesNotContain("\"counted\"");
+        assertThat(co.resolve("fx/target/bb-test-reports").resolve(run.id())).as("the passing reports are not left where a count reads them")
+                                                                            .doesNotExist();
+    }
+
+    @Test
+    void aRunWhoseTestsPassed_onAnotherResolvedJupiter_isRefusedOnEverySurface() throws Exception {
+        var old = Path.of(System.getProperty("user.home")).resolve(OLD_API);
+
+        assumeTrue(Files.exists(old), "the seeded junit-jupiter-api 5.11.4 is on build hosts only");
+        var extra = Map.of("RECORD_EXTRA", old.toString());
+
+        assertThat(build(extra).rc()).as(log()).isZero();
+        var run = bbTest(extra, "fx.CalcTest#passes");
+
+        assertThat(Files.readString(co.resolve("fx/target/bb-test-reports").resolve(run.id() + ".refused").resolve("console.txt")))
+                  .as("java ran and its tests passed; that outcome is kept aside, not as the verdict").contains("java exit 0");
+        assertRefusedEverywhere(run);
+    }
+
+    // ---- the vbt5/vbt6 bypasses, built by REAL maven offline from this tree's .m2-local (a copy of the host seed ~/work/temper-m2-seed).
+    // Artifacts each fixture resolves: org.junit.jupiter:junit-jupiter-api 5.11.4 (+ junit-platform-commons 1.11.4, opentest4j 1.3.0,
+    // apiguardian-api 1.1.2, org.junit:junit-bom 5.11.4 pom) for a bypass, the same at 5.13.4 / 1.13.4 for the matching build;
+    // maven-compiler-plugin 3.15.0, maven-resources-plugin 3.3.1, maven-dependency-plugin (the seed's) and maven 3.9 at ~/tools/maven.
+
+    private static final String PLUGINS = "<build><pluginManagement><plugins><plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-compiler-plugin</artifactId>"
+                                           + "<version>3.15.0</version></plugin><plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-resources-plugin</artifactId>"
+                                           + "<version>3.3.1</version></plugin></plugins></pluginManagement></build>";
+
+    private static final String TO_ROOT = "<parent><groupId>g</groupId><artifactId>root</artifactId><version>1</version></parent>";
+
+    private static String pom(String parent, String coordinates, String properties, String body) {
+        return "<project><modelVersion>4.0.0</modelVersion>" + parent + coordinates + "<properties><maven.compiler.release>21</maven.compiler.release>"
+               + "<project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>" + properties + "</properties>" + body + PLUGINS + "</project>";
+    }
+
+    private static String api(String groupId, String version) {
+        return "<dependencies><dependency><groupId>" + groupId + "</groupId><artifactId>junit-jupiter-api</artifactId>"
+               + (version == null ? "" : "<version>" + version + "</version>") + "<scope>test</scope></dependency></dependencies>";
+    }
+
+    private static String bom(String version) {
+        return "<dependencyManagement><dependencies><dependency><groupId>org.junit</groupId><artifactId>junit-bom</artifactId><version>" + version
+               + "</version><type>pom</type><scope>import</scope></dependency></dependencies></dependencyManagement>";
+    }
+
+    private static final String FX = pom(TO_ROOT, "<artifactId>fx</artifactId>", "", api("org.junit.jupiter", "${junit.version}"));
+
+    /// Real maven builds `fx` (pom `fxPom`, plus `files` relative to the checkout) with `args` before `test-compile`; bb-test then runs
+    /// fx.CalcTest#passes, which passes whatever junit-jupiter-api it was compiled against.
+    private Done realBuildThenPassingTest(String fxPom, Map<String, String> files, String... args) throws Exception {
+        var mvn = Path.of(System.getProperty("user.home")).resolve("tools/maven/bin/mvn");
+        var repo = Path.of("").toAbsolutePath().getParent().resolve(".m2-local");
+
+        assumeTrue(Files.isExecutable(mvn) && Files.exists(repo.resolve("org/junit/jupiter/junit-jupiter-api/5.11.4/junit-jupiter-api-5.11.4.jar")),
+                   "real maven and the seeded tree repo are on build hosts only");
+        Files.writeString(co.resolve("pom.xml"),
+                          pom("", "<groupId>g</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>fx</module></modules>",
+                              "<junit.version>5.13.4</junit.version>", ""));
+        Files.writeString(co.resolve("fx/pom.xml"), fxPom);
+        Files.writeString(Files.createDirectories(co.resolve(".mvn")).resolve("maven.config"), "-Dmaven.repo.local=" + repo + "\n");
+        for (var f : files.entrySet()) {
+            Files.writeString(Files.createDirectories(co.resolve(f.getKey()).getParent()).resolve(co.resolve(f.getKey()).getFileName()), f.getValue());
+        }
+        for (var step : List.of(List.of("add", "-A"), List.of("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "real poms"))) {
+            var git = new ArrayList<>(List.of("git", "-C", co.toString()));
+
+            git.addAll(step);
+            assertThat(BbFixtures.run(git, Map.of(), null, null).rc()).isZero();
+        }
+        var real = Map.of("BB_TEST_MVN", mvn.toString(), "JAVA_HOME", System.getProperty("java.home"));
+        var cmd = new ArrayList<>(List.of(tools.resolve("bb-build").toString(), co.toString(), "-B"));
+
+        cmd.addAll(List.of(args));
+        cmd.add("test-compile");
+        var built = enqueue(real, cmd.toArray(String[]::new));
+
+        assertThat(built.rc()).as(log()).isZero();
+        assertThat(log()).doesNotContain("bb-cp-record: record failed");
+
+        return bbTest(real, "fx.CalcTest#passes");
+    }
+
+    private static void assertOlderRefused(Done run) {
+        assertThat(run.rc()).as(run.doneText()).isEqualTo(15);
+        assertThat(run.doneText()).contains("\nrefused=junit version: resolved ", "junit-jupiter-api 5.11.4 (launcher wants 5.13.4)",
+                                            "\nverdict_source=guard\n");
+    }
+
+    @Test
+    void real_theMatchingResolvedJunit_passes_byJavasExitStatus() throws Exception {
+        var run = realBuildThenPassingTest(FX, Map.of(), "-pl", "fx");
+
+        assertThat(run.rc()).as(run.doneText() + log()).isZero();
+        assertThat(run.doneText()).contains("verdict_source=java").doesNotContain("refused=");
+        assertThat(log()).contains("bb-test: resolved junit on the test classpath: ", "junit-jupiter-api 5.13.4", "junit-platform-commons 1.13.4");
+    }
+
+    @Test
+    void real_aPlainDefineOnTheBuildLine_isRefused() throws Exception {
+        assertOlderRefused(realBuildThenPassingTest(FX, Map.of(), "-pl", "fx", "-Djunit.version=5.11.4"));
+    }
+
+    @Test
+    void real_aLongDefineWithEquals_isRefused() throws Exception {
+        assertOlderRefused(realBuildThenPassingTest(FX, Map.of(), "-pl", "fx", "--define=junit.version=5.11.4"));
+    }
+
+    @Test
+    void real_aLongDefineWithASpace_isRefused() throws Exception {
+        assertOlderRefused(realBuildThenPassingTest(FX, Map.of(), "-pl", "fx", "--define", "junit.version=5.11.4"));
+    }
+
+    @Test
+    void real_anOffPathParent_isRefused() throws Exception {
+        var fx = pom("<parent><groupId>g</groupId><artifactId>outside</artifactId><version>1</version><relativePath>../../outside/pom.xml</relativePath></parent>",
+                     "<artifactId>fx</artifactId>", "", api("org.junit.jupiter", "${junit.version}"));
+        Files.createDirectories(dir.resolve("work/outside"));
+        Files.writeString(dir.resolve("work/outside/pom.xml"),
+                          pom("", "<groupId>g</groupId><artifactId>outside</artifactId><version>1</version><packaging>pom</packaging>",
+                              "<junit.version>5.11.4</junit.version>", ""));
+
+        assertOlderRefused(realBuildThenPassingTest(fx, Map.of(), "-pl", "fx"));
+    }
+
+    @Test
+    void real_aJunitBomByLiteral_isRefused() throws Exception {
+        assertOlderRefused(realBuildThenPassingTest(pom(TO_ROOT, "<artifactId>fx</artifactId>", "", bom("5.11.4") + api("org.junit.jupiter", null)),
+                                                    Map.of(), "-pl", "fx"));
+    }
+
+    @Test
+    void real_aJunitBomByProperty_isRefused() throws Exception {
+        assertOlderRefused(realBuildThenPassingTest(pom(TO_ROOT, "<artifactId>fx</artifactId>", "<bom.v>5.11.4</bom.v>", bom("${bom.v}") + api("org.junit.jupiter", null)),
+                                                    Map.of(), "-pl", "fx"));
+    }
+
+    @Test
+    void real_aPropertyGroupId_isRefused() throws Exception {
+        assertOlderRefused(realBuildThenPassingTest(pom(TO_ROOT, "<artifactId>fx</artifactId>", "<jg>org.junit.jupiter</jg>", api("${jg}", "5.11.4")),
+                                                    Map.of(), "-pl", "fx"));
+    }
+
+    @Test
+    void real_aSettingsFileGivenWithS_isRefused() throws Exception {
+        var settings = "<settings><profiles><profile><id>old</id><properties><junit.version>5.11.4</junit.version></properties></profile></profiles>"
+                       + "<activeProfiles><activeProfile>old</activeProfile></activeProfiles></settings>";
+
+        assertOlderRefused(realBuildThenPassingTest(FX, Map.of("alt-settings.xml", settings), "-pl", "fx", "-s", "alt-settings.xml"));
+    }
+
+    @Test
+    void real_anotherPomGivenWithF_isRefused() throws Exception {
+        var alt = pom(TO_ROOT, "<artifactId>fx</artifactId>", "", api("org.junit.jupiter", "5.11.4"));
+
+        assertOlderRefused(realBuildThenPassingTest(FX, Map.of("fx/pom-alt.xml", alt), "-f", "fx/pom-alt.xml"));
     }
 }
