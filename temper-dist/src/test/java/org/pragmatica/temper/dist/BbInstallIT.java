@@ -511,7 +511,10 @@ class BbInstallIT {
                                              + " before=" + pin(key + "PREOFFQ")
                                              + " after=" + pin(key + "NEW"));
             assertThat(tools.resolve(name)).hasBinaryContent(Files.readAllBytes(OPS_BB.resolve(name)));
-            assertThat(tools.resolve(name + ".bak-" + pin(key + "PREOFFQ"))).hasBinaryContent(prev(name + ".preoffq"));
+            if (!name.equals("bb-tickets")) {
+                // the installer backs up every file but bb-tickets
+                assertThat(tools.resolve(name + ".bak-" + pin(key + "PREOFFQ"))).hasBinaryContent(prev(name + ".preoffq"));
+            }
         }
     }
 

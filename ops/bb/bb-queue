@@ -24,6 +24,7 @@
 #                                    every queue client already applies before a grant; this just makes it on demand.
 set -uo pipefail
 SELF=$(readlink -f "$0")
+[ "${1:-}" = offq ] && LIB_READONLY=1   # the lib then creates nothing (bb-tickets, a read-only reader, calls this)
 . "$(dirname "$SELF")/bb-queue-lib.sh"
 # The listing runs WITHOUT the queue lock (2026-09-29): a ticket can move between directories, or be half-written, while
 # we read it. Every numeric field is therefore checked before arithmetic, and a vanished ticket is skipped.

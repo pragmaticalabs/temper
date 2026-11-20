@@ -38,7 +38,8 @@ PSLIST=${BB_TEST_PS:-}   # TEST ONLY: a file of "pid ppid rss_kb args..." lines,
 MAXREACT=${BB_TEST_MAX_REACTORS_FILE:-$HOME/work/max-reactors}
 # TICKET LOG (2026-11-11): one TSV line per ticket when it reaches done/ (see ticket_log).
 TLOG=${BB_TEST_TICKET_LOG:-$HOME/work/bb-ticket-log.tsv}
-mkdir -p "$Q/waiting" "$Q/running" "$Q/done"
+# LIB_READONLY: set by bb-queue itself for `offq` (what bb-tickets calls), a reader that must not create a queue directory.
+[ -n "${LIB_READONLY:-}" ] || mkdir -p "$Q/waiting" "$Q/running" "$Q/done"
 
 field() { sed -n "s/^$2=//p" "$1" 2>/dev/null | tail -1; }
 reactors() { pgrep -u "$USER" -fc "$PAT" || true; }
