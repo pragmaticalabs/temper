@@ -49,8 +49,8 @@ public record FleetAlarmsView(int v, Instant asOf, List<HostAlarms> hosts) {
     /// `portgroup-held`, `portgroup-long`; `waiter-gone` has a ticket only), `days` to `host-retiring`, `skewS` to `clock-skew`.
     /// `ageMin` is as of the host's `hostAt`: the ticket's wait or run time, but for `portgroup-held` its stall (time since
     /// its last progress); `firedAt` is on the controller clock. For the off-queue kinds (`off-queue-reactor`, `lingering-reactor`) `ticket`
-    /// reads `pid=<n> owner=<o> cwd=<path>` (owner: the checkout prefix under ~/work/co, else `unowned`; the path last, with `%` written
-    /// `%25` and a space `%20`, nothing else encoded; `reactorCwd` reads it back), `ageMin` is the launcher's age and `limitMin` the lingering limit; no field was added, so a CLI that predates
+    /// reads `pid=<n> owner=<o> cwd=<path>` (owner: the checkout prefix under ~/work/co, else `unowned`; owner and path with `%` written
+    /// `%25` and a space `%20`, nothing else encoded, the path last; `reactorOwner` and `reactorCwd` read them back), `ageMin` is the launcher's age and `limitMin` the lingering limit; no field was added, so a CLI that predates
     /// the kinds still decodes the reply.
     public record Alarm(String kind,
                         Option<String> ticket,
@@ -77,7 +77,7 @@ public record FleetAlarmsView(int v, Instant asOf, List<HostAlarms> hosts) {
                                          String owner,
                                          String cwd) {
             return new Alarm(kind,
-                             Option.some("pid=" + pid + " owner=" + owner + " cwd=" + encodeCwd(cwd)),
+                             Option.some("pid=" + pid + " owner=" + encodeField(owner) + " cwd=" + encodeField(cwd)),
                              ageMin,
                              limitMin,
                              Option.none(),
@@ -85,15 +85,15 @@ public record FleetAlarmsView(int v, Instant asOf, List<HostAlarms> hosts) {
                              firedAt);
         }
 
-        /// `%` becomes `%25` and a space `%20`; nothing else is touched, so the path stays readable and the ticket
-        /// stays unambiguous with the path last.
-        public static String encodeCwd(String cwd) {
+        /// `%` becomes `%25` and a space `%20`; nothing else is touched. Applied to owner and cwd in a reactor ticket, so the
+        /// ticket stays unambiguous: owner holds no space and the cwd is last.
+        public static String encodeField(String cwd) {
             return cwd.replace("%", "%25")
                       .replace(" ", "%20");
         }
 
-        /// The inverse of `encodeCwd`, in one pass (a literal `%20` in the path was written `%2520` and comes back as `%20`).
-        public static String decodeCwd(String encoded) {
+        /// The inverse of `encodeField`, in one pass (a literal `%20` in the path was written `%2520` and comes back as `%20`).
+        public static String decodeField(String encoded) {
             var out = new StringBuilder(encoded.length());
 
             for (int i = 0; i < encoded.length(); i++) {
@@ -111,6 +111,16 @@ public record FleetAlarmsView(int v, Instant asOf, List<HostAlarms> hosts) {
             return out.toString();
         }
 
+        /// The original owner out of a reactor alarm's ticket string: what sits between `owner=` and ` cwd=`, decoded.
+        public static Option<String> reactorOwner(String ticket) {
+            var from = ticket.indexOf(" owner=");
+            var to = ticket.indexOf(" cwd=");
+
+            return from < 0 || to < from
+                   ? Option.none()
+                   : Option.some(decodeField(ticket.substring(from + 7, to)));
+        }
+
         /// The original cwd out of a reactor alarm's ticket string `pid=<n> owner=<o> cwd=<encoded>`: everything after the
         /// first ` cwd=`, decoded.
         public static Option<String> reactorCwd(String ticket) {
@@ -118,7 +128,7 @@ public record FleetAlarmsView(int v, Instant asOf, List<HostAlarms> hosts) {
 
             return at < 0
                    ? Option.none()
-                   : Option.some(decodeCwd(ticket.substring(at + 5)));
+                   : Option.some(decodeField(ticket.substring(at + 5)));
         }
     }
 }

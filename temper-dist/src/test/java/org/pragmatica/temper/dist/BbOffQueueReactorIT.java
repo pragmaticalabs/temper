@@ -198,7 +198,7 @@ class BbOffQueueReactorIT {
                                   dir,
                                   null);
 
-        assertThat(offq.stdout()).isEqualTo("200\t" + (BTIME + 60) + "\tunowned\t" + loose + "\n");
+        assertThat(offq.stdout()).as("the sentinel line first").isEqualTo("offq v1\n200\t" + (BTIME + 60) + "\tunowned\t" + loose + "\n");
     }
 
     @Test
@@ -248,6 +248,58 @@ class BbOffQueueReactorIT {
                                                                                .replace("\\", "\\\\")
                                                                                .replace("\"", "\\\"")
                                     + "/a\\\"b\\\\c d\"}]}");
+    }
+
+    /// The owner is a checkout directory name, so it needs the same JSON escaping as the cwd: a checkout `a"b\\c-x` must not make the
+    /// trailer invalid (the host's whole collection would fail). Mutation: leave `$3` unescaped in bb-tickets -> red.
+    @Test
+    void bbTickets_escapesAnOwnerWithAQuoteAndABackslash_theTrailerStaysValidJson() throws Exception {
+        var checkout = co.resolve("a\"b\\c-x");
+
+        processes("  200     1 9000 /usr/bin/java -classpath boot " + marker);
+        proc("200", checkout, 6000, "0::/user.slice");
+        var run = BbFixtures.run(List.of(BbFixtures.OPS_BB.resolve("bb-tickets").toString()),
+                                 env,
+                                 dir,
+                                 null);
+
+        assertThat(run.rc()).as(run.stderr()).isZero();
+        var trailer = run.stdout().lines().toList().getLast();
+
+        assertThat(trailer).contains("\"owner\":\"a\\\"b\\\\c\",\"cwd\":\"");
+        var file = Files.writeString(dir.resolve("trailer.json"), trailer);
+        var json = BbFixtures.run(List.of("python3", "-c", "import json,sys; json.load(open(sys.argv[1]))", file.toString()),
+                                  env,
+                                  dir,
+                                  null);
+
+        assertThat(json.rc()).as("the trailer parses: " + json.stderr()).isZero();
+    }
+
+    /// An older `bb-queue` given `offq` runs its plain listing, which prints no sentinel: that is a failed read (no `offq` key,
+    /// the controller keeps its list), not a successful empty one that would clear the marks. Mutation: drop the sentinel check in
+    /// bb-tickets -> red.
+    @Test
+    void bbTickets_anOlderBbQueueWithoutTheSentinel_isAFailedRead_noOffqKey() throws Exception {
+        for (var sub : List.of("running", "waiting", "done")) {
+            Files.createDirectories(dir.resolve("q").resolve(sub));
+        }
+        var stub = Files.createDirectories(dir.resolve("stub-old"));
+        var exec = java.nio.file.attribute.PosixFilePermissions.fromString("rwxr-xr-x");
+
+        Files.copy(BbFixtures.OPS_BB.resolve("bb-tickets"), stub.resolve("bb-tickets"));
+        Files.setPosixFilePermissions(stub.resolve("bb-tickets"), exec);
+        Files.writeString(stub.resolve("bb-queue"),
+                          "#!/bin/sh\nprintf 'RUNNING 0\\n  + 1 reactor(s) not started through the queue\\n'\n");
+        Files.setPosixFilePermissions(stub.resolve("bb-queue"), exec);
+        var run = BbFixtures.run(List.of(stub.resolve("bb-tickets").toString()),
+                                 env,
+                                 dir,
+                                 null);
+
+        assertThat(run.rc()).as(run.stderr()).isZero();
+        assertThat(run.stdout().lines().toList().getLast()).as("an older bb-queue: the read failed, not found none")
+                  .doesNotContain("offq");
     }
 
     // ---- fixtures ---------------------------------------------------------------------------------------------

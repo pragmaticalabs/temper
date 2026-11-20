@@ -764,6 +764,6 @@ class AlarmCheckTest {
                        .orElseThrow();
         var encoded = line.substring(line.indexOf(" cwd=") + 5, line.lastIndexOf(" age="));
 
-        assertThat(FleetAlarmsView.Alarm.decodeCwd(encoded)).isEqualTo(REACTOR_CWD);
+        assertThat(FleetAlarmsView.Alarm.decodeField(encoded)).isEqualTo(REACTOR_CWD);
     }
 }

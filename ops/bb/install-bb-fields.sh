@@ -48,7 +48,7 @@ readonly BB_QUEUE_PREVIA=617b0bff8c73753e4a8e8b57201192ab   # live from the 2026
 readonly BB_QUEUE_PREMEM=de6c69845c05e97f1234b4b4977f1b52   # the #46 version: no MEMORY GATE line, no [granted by memory override] mark (issue #53)
 readonly BB_QUEUE_PRECAP=841403902eeb4af490300f8f56011c8e   # the #53 version: no HOST CAP line (issue #56)
 readonly BB_QUEUE_PREOFFQ=fcbdc6cf8130550b57f83ebb00ef859b   # the #56/#64 version: no `offq` subcommand, the "+ N reactor(s)" count is reactors minus tickets (2026-11-20)
-readonly BB_QUEUE_NEW=24e2be2308c255d649232a3670070051
+readonly BB_QUEUE_NEW=9cb677b671867eecdf90c9514bbd0732
 readonly BB_BUILD_MID=a1100c916b866ad3716bc4095ddb1991   # the T3 fields version, before the waiter's first-writer-wins guard
 readonly BB_BUILD_PREV=cae49573d06f632d3081f7d5be1e9b66
 readonly BB_BUILD_LIVE=015b2a2261a6789c5af215b3745a2b84   # what c3/c4/d1 run since 2026-11-11: no requireDocker flag
@@ -64,7 +64,7 @@ readonly BB_JBCTBOOT_NEW=3e5396ecee48b99949456cf805df1e60
 readonly BB_TICKETS_OLD=472cd816644fe0ee0902b8da3d33de8e   # before the per-ticket progressAt (issue #10)
 readonly BB_TICKETS_PRE31=e1aeba98541ba781295001f956b08c8d   # live since 2026-11-12: drops a ticket key with a capital letter
 readonly BB_TICKETS_PREOFFQ=6174119f0cd567c5dc462d1e063c6214   # the #31 version: no `offq` in the trailer (2026-11-20)
-readonly BB_TICKETS_NEW=de3cf1c430b8bff3778b44161d3640bf
+readonly BB_TICKETS_NEW=8d34d9dc9ab2a4f867af863ec21be77e
 readonly BB_HOLD_OLD=0bc2401b6e94fd05b66e1df04387e2ac   # the 2026-11-09 host snapshot
 readonly BB_HOLD_NEW=3561bb8e22fc2f7f3e98dc795f31eecb
 readonly BB_WAIT_PRERC=da248f0b4f9248f2bfed64330b3ca66e   # live on all four hosts from 2026-11-12: the ticket rc= is read from .bb/rc (replaced by the exit-status record)

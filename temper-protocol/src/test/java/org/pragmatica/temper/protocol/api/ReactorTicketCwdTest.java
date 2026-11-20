@@ -16,12 +16,16 @@ import static org.assertj.core.api.Assertions.assertThat;
 /// starts with pid/owner and the cwd read-back takes the owner along).
 class ReactorTicketCwdTest {
     private static String ticketOf(String cwd) {
+        return ticketOf("orq1", cwd);
+    }
+
+    private static String ticketOf(String owner, String cwd) {
         return FleetAlarmsView.Alarm.reactorAlarm("lingering-reactor",
                                                   Option.some(45),
                                                   Option.some(30),
                                                   Instant.parse("2026-11-06T10:00:00Z"),
                                                   77,
-                                                  "orq1",
+                                                  owner,
                                                   cwd)
                                     .ticket()
                                     .or("");
@@ -43,6 +47,18 @@ class ReactorTicketCwdTest {
         var line = "bigboy lingering-reactor " + ticketOf(cwd) + " age=45m limit=30m";
         var between = line.substring(line.indexOf(" cwd=") + 5, line.lastIndexOf(" age="));
 
-        assertThat(FleetAlarmsView.Alarm.decodeCwd(between)).isEqualTo(cwd);
+        assertThat(FleetAlarmsView.Alarm.decodeField(between)).isEqualTo(cwd);
+    }
+
+    /// The owner is the checkout prefix, a directory name: it may hold a space or `%` too, and is encoded like the cwd, so
+    /// the line `pid=.. owner=.. cwd=..` splits on its keys. Mutation: leave the owner unencoded -> every row is red.
+    @ParameterizedTest
+    @ValueSource(strings = {"orq1", "a b", "100%", "a%20b", "a\"b\\c", "x cwd=y"})
+    void reactorOwner_roundTripsThroughTheTicketString_besideACwdWithASpace(String owner) {
+        var ticket = ticketOf(owner, "/home/a b/c%d");
+
+        assertThat(ticket).startsWith("pid=77 owner=");
+        assertThat(FleetAlarmsView.Alarm.reactorOwner(ticket)).isEqualTo(Option.some(owner));
+        assertThat(FleetAlarmsView.Alarm.reactorCwd(ticket)).isEqualTo(Option.some("/home/a b/c%d"));
     }
 }

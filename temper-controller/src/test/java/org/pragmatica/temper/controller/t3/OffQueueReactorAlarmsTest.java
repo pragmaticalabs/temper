@@ -106,6 +106,24 @@ class OffQueueReactorAlarmsTest {
                   .containsExactly(BbAlarm.OFF_QUEUE_REACTOR);
     }
 
+    /// Pid reuse with NO empty round between: round 1 sees pid 77 started at S1, round 2 sees pid 77 started at S2. The marks are
+    /// keyed `pid:startS`, so the second is a new launcher and fires. Mutation: key the marks on pid alone -> red (the S1 mark
+    /// still stands, nothing fires).
+    @Test
+    void aReusedPid_withNoEmptyRoundBetween_isAnotherLauncher_andFiresItsOwnAlarm() {
+        var rounds = new Rounds();
+
+        rounds.round(AT, reactor(77, AT - 3600));
+
+        assertThat(rounds.round(AT + 30,
+                                reactor(77, AT + 10))).as("same pid, new start, no round between")
+                  .extracting(NewFleetEvent::kind)
+                  .containsExactly(BbAlarm.OFF_QUEUE_REACTOR);
+        assertThat(rounds.rows).as("the first launcher's marks left with it; only the new one's stand")
+                  .extracting(BbAlarm::subject)
+                  .containsOnly("77:" + (AT + 10));
+    }
+
     @Test
     void fleetAlarms_listsTheReactorsWhileTheSnapshotHoldsThem_withOwnerAndCwd() {
         var now = Instant.ofEpochSecond(AT + 20);

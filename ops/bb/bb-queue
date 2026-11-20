@@ -109,8 +109,8 @@ if [ "${1:-}" = release ]; then
   exit 0
 fi
 
-# offq: the off-queue reactors as "pid<TAB>startS<TAB>owner<TAB>cwd" lines (offqueue_reactors): what bb-tickets reads for the controller. Takes no lock, writes nothing.
-if [ "${1:-}" = offq ]; then offqueue_reactors; exit 0; fi
+# offq: the sentinel line `offq v1`, then the off-queue reactors as "pid<TAB>startS<TAB>owner<TAB>cwd" lines (offqueue_reactors): what bb-tickets reads for the controller; it treats a reply without the sentinel (an older bb-queue ran its plain listing) as a failed read. Takes no lock, writes nothing.
+if [ "${1:-}" = offq ]; then echo "offq v1"; offqueue_reactors; exit 0; fi
 
 if [ "${1:-}" = reap ]; then
   exec 8> "$Q/.lock"; flock 8
