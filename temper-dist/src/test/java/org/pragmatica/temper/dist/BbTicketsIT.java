@@ -135,7 +135,7 @@ class BbTicketsIT {
         var lines = out.stdout().lines().toList();
 
         assertThat(lines.getLast()).isEqualTo("{\"v\":1,\"end\":true,\"count\":9,\"queue\":\"present\",\"at\":" + NOW
-                                             + "}");
+                                             + ",\"offq\":[]}");
         assertThat(lines).hasSize(10);
         assertThat(line(out, "dA")).isEqualTo("{\"v\":1,\"ticket\":\"dA\",\"dir\":\"done\",\"waiter\":null,"
                                              + "\"fields\":{\"id\":\"dA\",\"ended\":\"" + (NOW - 50)
@@ -300,14 +300,14 @@ class BbTicketsIT {
             return walk.sorted()
                        .map(path -> {
                                 try {
-                                return path
-                                     + " " + Files.getLastModifiedTime(path)
-                                     + " " + (Files.isRegularFile(path)
-                                              ? Files.size(path)
-                                              : -1);
-                            } catch (IOException e) {
-                                throw new IllegalStateException(e);
-                            }
+                                    return path
+                                         + " " + Files.getLastModifiedTime(path)
+                                         + " " + (Files.isRegularFile(path)
+                                                  ? Files.size(path)
+                                                  : -1);
+                                } catch (IOException e) {
+                                    throw new IllegalStateException(e);
+                                }
                             })
                        .collect(Collectors.toList());
         }

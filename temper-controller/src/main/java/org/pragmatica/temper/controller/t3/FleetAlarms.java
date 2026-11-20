@@ -14,6 +14,7 @@ import org.pragmatica.lang.Option;
 import org.pragmatica.temper.protocol.api.FleetAlarmsView;
 import org.pragmatica.temper.store.api.BbAlarm;
 import org.pragmatica.temper.store.api.BbCollect;
+import org.pragmatica.temper.store.api.BbOffQueue;
 import org.pragmatica.temper.store.api.BbSnapshot;
 import org.pragmatica.temper.store.api.BbTicket;
 
@@ -28,7 +29,8 @@ import static org.pragmatica.lang.Option.some;
 /// `host-retiring` while its subject is the configured `retireAt` and `now < retireAt`; a host past its `retireAt` lists
 /// none of its collected marks (#103: it is no longer collected). A ticket is listed once, at its
 /// highest fired threshold; `host-retiring` once, at its tightest. Order: `clock-skew`, then `queue-wait`,
-/// `portgroup-held`, `portgroup-long`, `waiter-gone` by ticket id, then `host-retiring`.
+/// `portgroup-held`, `portgroup-long`, `waiter-gone` by ticket id, `off-queue-reactor` and `lingering-reactor` by `pid:startS`
+/// (each while the latest snapshot still lists that launcher in `offq`), then `host-retiring`.
 public final class FleetAlarms {
     private static final long NANOS = 1_000_000_000L;
 
@@ -36,6 +38,8 @@ public final class FleetAlarms {
                                                              BbAlarm.PORTGROUP_HELD,
                                                              BbAlarm.PORTGROUP_LONG,
                                                              BbAlarm.WAITER_GONE);
+
+    private static final List<String> REACTOR_KINDS = List.of(BbAlarm.OFF_QUEUE_REACTOR, BbAlarm.LINGERING_REACTOR);
 
     private FleetAlarms() {}
 
@@ -109,8 +113,38 @@ public final class FleetAlarms {
                                                                                                                       row,
                                                                                                                       ticket))
                                                                                            .stream()));
+        var reactors = REACTOR_KINDS.stream().flatMap(kind -> rows.stream()
+                                                                  .filter(row -> row.kind()
+                                                                                    .equals(kind))
+                                                                  .sorted(Comparator.comparing(BbAlarm::subject))
+                                                                  .flatMap(row -> snapshot.offq()
+                                                                                          .stream()
+                                                                                          .filter(reactor -> reactor.key()
+                                                                                                                    .equals(row.subject()))
+                                                                                          .findFirst()
+                                                                                          .map(reactor -> reactorAlarm(snapshot,
+                                                                                                                       row,
+                                                                                                                       reactor))
+                                                                                          .stream()));
 
-        return Stream.concat(skew, perTicket).toList();
+        return Stream.concat(Stream.concat(skew, perTicket),
+                             reactors)
+                     .toList();
+    }
+
+    private static FleetAlarmsView.Alarm reactorAlarm(BbSnapshot snapshot, BbAlarm row, BbOffQueue reactor) {
+        return FleetAlarmsView.Alarm.reactorAlarm(row.kind(),
+                                                  snapshot.hostAt()
+                                                          .map(at -> (int)(Math.max(0,
+                                                                                    at.getEpochSecond() - reactor.startS()) / 60)),
+                                                  row.kind()
+                                                     .equals(BbAlarm.LINGERING_REACTOR)
+                                                  ? some(threshold(row))
+                                                  : Option.<Integer> none(),
+                                                  seconds(row.firedAt()),
+                                                  reactor.pid(),
+                                                  reactor.owner(),
+                                                  reactor.cwd());
     }
 
     /// The mark of the highest threshold of each ticket of `kind`, by ticket id.

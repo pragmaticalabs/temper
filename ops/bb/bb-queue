@@ -24,6 +24,7 @@
 #                                    every queue client already applies before a grant; this just makes it on demand.
 set -uo pipefail
 SELF=$(readlink -f "$0")
+[ "${1:-}" = offq ] && LIB_READONLY=1   # the lib then creates nothing (bb-tickets, a read-only reader, calls this)
 . "$(dirname "$SELF")/bb-queue-lib.sh"
 # The listing runs WITHOUT the queue lock (2026-09-29): a ticket can move between directories, or be half-written, while
 # we read it. Every numeric field is therefore checked before arithmetic, and a vanished ticket is skipped.
@@ -108,6 +109,9 @@ if [ "${1:-}" = release ]; then
   exit 0
 fi
 
+# offq: the sentinel line `offq v1`, then the off-queue reactors as "pid<TAB>startS<TAB>owner<TAB>cwd" lines (offqueue_reactors): what bb-tickets reads for the controller; it treats a reply without the sentinel (an older bb-queue ran its plain listing) as a failed read. Takes no lock, writes nothing.
+if [ "${1:-}" = offq ]; then echo "offq v1"; offqueue_reactors; exit 0; fi
+
 if [ "${1:-}" = reap ]; then
   exec 8> "$Q/.lock"; flock 8
   before=$(ls "$Q/waiting" "$Q/running" 2>/dev/null | grep -v ':$' | grep . | sort)
@@ -120,7 +124,6 @@ if [ "${1:-}" = reap ]; then
 fi
 
 N=${1:-10}
-TRACKED=0
 # the gate line comes BEFORE the sections: the worker (BbQueue.java) wants each header directly above its column line
 LH=$(load_held)
 echo "LOAD GATE (grant only while load5/cores < $LOAD_MAX; override: the oldest grantable ticket after ${LOAD_STARVE}s while < $LOAD_STARVE_REACTORS reactors run): ${LH:-open}"
@@ -131,7 +134,7 @@ HC=$(host_cap); EFF=5; [ "$HC" -ge "$EFF" ] || EFF=$HC
 echo "RUNNING (reactors on host: $(reactors); cap $EFF (5 bounded by the host cap $HC) unless a ticket sets a lower one; port-group slots: $(pg_slots); port group held by: $(group_holder))"
 row TICKET OWNER PRIO AGE CHECKOUT ARGS
 for f in "$Q"/running/*; do
-  snap "$f" || continue; TRACKED=$((TRACKED + 1))
+  snap "$f" || continue
   s=""; waiter_alive "${f##*/}" || s=" [waiter gone]"; if [ "$(fv group)" = 1 ]; then if [ "$(fv iso)" = 1 ]; then s="$s [port-group slot $(fv group_slot)/$(pg_slots), isolated netns]"; else s="$s [port-group host-exclusive]"; fi; fi
   [ "$(fv requireDocker)" = 0 ] && s="$s [no-requireDocker]"
   s="$s$(mutant_tag "$(fv via)")"
@@ -139,7 +142,13 @@ for f in "$Q"/running/*; do
   [ -n "$(fv mem_override)" ] && s="$s [granted by memory override: $(fv mem_override | cut -d' ' -f2,4)]"
   row "${f##*/}" "$(fv owner)" "$(prio "$(fv owner)" "$(fv sha)")" "$(age "$(fv started)")" "$(basename "$(fv co)")" "$(fv args)$s"
 done
-U=$(( $(reactors) - TRACKED )); [ "$U" -gt 0 ] && echo "  + $U reactor(s) not started through the queue (direct mvn or BB_QUEUE=0)"
+# OFF-QUEUE REACTORS: every maven launcher the queue did not start (not a temper CI job either), by pid, owner (checkout prefix, else unowned), age and full cwd.
+# The first line keeps its shape (the worker's BbQueue skips "  + " lines); the controller's off-queue-reactor / lingering-reactor alarms read the same list via bb-tickets.
+OQ=$(offqueue_reactors)
+if [ -n "$OQ" ]; then
+  echo "  + $(printf '%s\n' "$OQ" | wc -l) reactor(s) not started through the queue (direct mvn or BB_QUEUE=0)"
+  printf '%s\n' "$OQ" | while IFS=$'\t' read -r opid ostart oowner ocwd; do echo "  + off-queue pid $opid owner $oowner age $(age "$ostart") cwd $ocwd"; done
+fi
 echo
 echo "WAITING (grant order: priority desc, then FIFO; a [port-group] ticket is skipped while all slots are taken (host-exclusive ones: while any group ticket runs); a ticket its own cap blocks is passed by backfill until blocked ${STARVE}s, then the host drains for it)"
 printf '%-4s ' POS; row TICKET OWNER PRIO WAITED CHECKOUT ARGS
