@@ -422,7 +422,7 @@ class BbTestGuardIT {
         recorded();
         var made = BbFixtures.run(List.of("bash", "-c", "touch lib/$'\\xff'.txt"), Map.of(), co, null);
 
-        assertThat(made.rc()).as(made.stderr()).isZero();
+        assumeTrue(made.rc() == 0, "this filesystem refuses a non-UTF-8 file name (e.g. ZFS utf8only=on): " + made.stderr());
         var run = check();
 
         assertThat(run.rc()).isEqualTo(12);
