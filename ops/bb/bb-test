@@ -27,6 +27,7 @@
 # whole-reactor `clean install` with every IT, on cloudbb-5..8 on 2026-11-20, was 6306 s; one module's selection is a subset of that), the
 # entry check and the resolved junit read by BB_CP_READ_TIMEOUT seconds (default 300, as BB_CP_RECORD_TIMEOUT). On expiry `timeout`
 # TERMs, and 10 s later KILLs, the process group it leads (java and every child that stayed in it). Both must be positive integers (rc 2).
+# Limit: a pgid kill reaches only what stayed in the group; a `setsid` grandchild that left it survives the kill. The stale-jar check (both calls) is bounded by BB_CP_READ_TIMEOUT too.
 # A REFUSAL REPLACES THE VERDICT: rc 15 (the ticket's rc=, so .bb/rc), the ticket gets refused=<reason naming the resolved versions> and
 # verdict_source=guard (never verdict_source=java), .bb/refused holds the same reason, the ticket log's state column reads refused, bb-result
 # prints it; the run's console output and per-run count lines are not printed, and its report dir is renamed <ticket>.refused.
@@ -159,14 +160,17 @@ if [ "${1:-}" = __launch ]; then
       *) SELS+=(--select-class "$a");;
     esac
   done
-  guard "$HERE/bb-cp-record" check "$CO" "$MOD"
+  OUT=; bounds_ok || refuse "$BOUNDS_BAD"
+  RD=$(mktemp "$CO/.bb/bb-test-read.XXXXXX"); r=0
+  bounded "$READ_T" "$CO" "$RD" "$HERE/bb-cp-record" check "$CO" "$MOD" || r=$?   # the stale-jar check is bounded like every read (BOUNDS)
+  [ -z "$TIMED_OUT" ] || refuse "timeout: the stale-jar check did not finish within BB_CP_READ_TIMEOUT=${READ_T}s; its process group was killed"
+  cat "$RD"; rm -f "$RD"; RD=
+  [ "$r" = 0 ] || { source_is guard; exit "$r"; }
   guard launcher_ok
   JAVA=${BB_TEST_JAVA:-${JAVA_HOME:-/usr/lib/jvm/java-25-openjdk-amd64}/bin/java}
   CP="$CO/$MOD/target/test-classes:$CO/$MOD/target/classes:$(cat "$CO/.bb/cp/${MOD//\//__}.cp")"
   # vbt7 F2 (fail closed, never hang): java opens every classpath entry, so a FIFO or device entry (or a symlink to one) would block it
   # before the resolved check is ever reached. Such an entry is refused here, before java runs; the check itself is bounded (BOUNDS).
-  OUT=
-  bounds_ok || refuse "$BOUNDS_BAD"
   RD=$(mktemp "$CO/.bb/bb-test-read.XXXXXX"); r=0
   bounded "$READ_T" "$CO" "$RD" python3 -I -c "$ENTRY_PY" "$CP" || r=$?
   [ -z "$TIMED_OUT" ] || refuse "timeout: the classpath entry check did not finish within BB_CP_READ_TIMEOUT=${READ_T}s; its process group was killed"
@@ -216,7 +220,10 @@ while [ $# -gt 0 ]; do
 done
 [ ${#SELS[@]} -gt 0 ] || { echo "usage: bb-test <checkout> <module> <Class[#method]>... [--repeat N]" >&2; exit 2; }
 bounds_ok || { echo "bb-test: $BOUNDS_BAD" >&2; exit 2; }
-"$HERE/bb-cp-record" check "$CO" "$MOD" || exit $?
+r=0; t0=$SECONDS
+timeout -k 10 "$READ_T" "$HERE/bb-cp-record" check "$CO" "$MOD" || r=$?   # bounded like every read (BOUNDS); an expiry refuses, never passes
+case "$r" in 124|137) [ $((SECONDS - t0)) -lt "$READ_T" ] || { echo "bb-test: REFUSED (rc 15): timeout: the stale-jar check did not finish within BB_CP_READ_TIMEOUT=${READ_T}s; its process group was killed; nothing queued" >&2; exit 15; };; esac
+[ "$r" = 0 ] || exit "$r"
 launcher_ok || exit $?
 . "$HERE/bb-queue-lib.sh"
 GROUP=${BB_PORT_GROUP:-}

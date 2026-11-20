@@ -510,6 +510,66 @@ class BbTestLaunchIT {
                              (System.nanoTime() - started) / 1_000_000_000L, List.of(pid));
     }
 
+    /// vbt8 L1: the stale-jar check (`bb-cp-record check`) is bounded by BB_CP_READ_TIMEOUT at BOTH calls: at enqueue (rc 15 on stderr,
+    /// nothing queued) and at launch (a refused ticket). The stand-in is the real bb-cp-record with a prefix that hangs a `check`, ignoring TERM,
+    /// from the HANG_CHECK_AFTER-th call on. Probe: drop the `timeout -k 10 "$READ_T"` wrap at the enqueue call (resp. the bounded() wrap at
+    /// the launch call) -> red: the stand-in sleeps 600 s, the row's 120 s thread timeout fails it.
+    private void hangingCheck(Path pid) throws Exception {
+        var real = tools.resolve("bb-cp-record");
+        var text = Files.readString(real);
+        var nl = text.indexOf('\n');
+
+        BbFixtures.executable(real,
+                              text.substring(0, nl + 1)
+                             + "if [ \"${1:-}\" = check ] && [ -n \"${HANG_CHECK:-}\" ]; then n=$(cat \"$HANG_CHECK.n\" 2>/dev/null || echo 0)\n"
+                             + "  echo $((n + 1)) > \"$HANG_CHECK.n\"\n"
+                             + "  if [ \"$n\" -ge \"${HANG_CHECK_AFTER:-0}\" ]; then echo $$ > \"" + pid + "\"; trap '' TERM; exec sleep 600; fi\nfi\n"
+                             + text.substring(nl + 1));
+    }
+
+    @Test
+    @Timeout(value = 120, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
+    void aStaleJarCheckPastTheBound_atEnqueue_isRefusedNamingTheTimeout_nothingQueued_andKilled() throws Exception {
+        var pid = dir.resolve("check.pid");
+
+        green();
+        hangingCheck(pid);
+        var all = new HashMap<>(env);
+
+        all.putAll(Map.of("HANG_CHECK", dir.resolve("hang").toString(), "BB_CP_READ_TIMEOUT", "3"));
+        var started = System.nanoTime();
+        var run = BbFixtures.run(List.of(tools.resolve("bb-test").toString(), co.toString(), "fx", "fx.CalcTest#passes"), all, null, null);
+
+        assertThat((System.nanoTime() - started) / 1_000_000_000L).as("cut at the bound + KILL grace, not the 600 s stall").isLessThan(45);
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isEqualTo(15);
+        assertThat(run.stderr()).contains("REFUSED (rc 15): timeout: the stale-jar check did not finish within BB_CP_READ_TIMEOUT=3s");
+        assertThat(run.stdout()).doesNotContain("queued ticket=");
+        var killed = Long.parseLong(Files.readString(pid).strip());
+
+        stalled.add(killed);
+        for (var i = 0; i < 50 && ProcessHandle.of(killed).isPresent(); i++) {
+            Thread.sleep(100);
+        }
+        assertThat(ProcessHandle.of(killed)).as("the stalled check was killed").isEmpty();
+    }
+
+    @Test
+    @Timeout(value = 120, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
+    void aStaleJarCheckPastTheBound_atLaunch_isRefusedNamingTheTimeout_andKilled() throws Exception {
+        var pid = dir.resolve("check.pid");
+        var log = dir.resolve("ticket-log.tsv").toString();
+
+        assertThat(build(Map.of("BB_TEST_TICKET_LOG", log)).rc()).as(log()).isZero();
+        hangingCheck(pid);
+        var started = System.nanoTime();
+        var run = bbTest(Map.of("BB_TEST_TICKET_LOG", log, "HANG_CHECK", dir.resolve("hang").toString(), "HANG_CHECK_AFTER", "1",
+                                "BB_CP_READ_TIMEOUT", "3"),
+                         "fx.CalcTest#passes");
+
+        assertTimeoutRefusal(run, "the stale-jar check did not finish within BB_CP_READ_TIMEOUT=3s; its process group was killed",
+                             (System.nanoTime() - started) / 1_000_000_000L, List.of(pid));
+    }
+
     /// A bound that is not a positive integer is refused at enqueue (rc 2), never read as "no bound" (timeout 0 would disable it).
     @ParameterizedTest(name = "{0}")
     @ValueSource(strings = {"BB_JAVA_TIMEOUT=0", "BB_JAVA_TIMEOUT=1h", "BB_CP_READ_TIMEOUT=0", "BB_CP_READ_TIMEOUT="})

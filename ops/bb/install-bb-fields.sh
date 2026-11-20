@@ -76,16 +76,18 @@ readonly BB_HOLD_OLD=0bc2401b6e94fd05b66e1df04387e2ac   # the 2026-11-09 host sn
 readonly BB_HOLD_PRELEDGER=3561bb8e22fc2f7f3e98dc795f31eecb   # the #56 version: its slot was counted by pattern, not recorded in the launch ledger
 readonly BB_HOLD_NEW=c8c6947d1de945e38c5cf08f8448dae9
 readonly BB_WAIT_PRERC=da248f0b4f9248f2bfed64330b3ca66e   # live on all four hosts from 2026-11-12: the ticket rc= is read from .bb/rc (replaced by the exit-status record)
-readonly BB_WAIT_NEW=d5b0ff8d43994a78cd188b4a41fcd995
+readonly BB_WAIT_PREREFUSED=d5b0ff8d43994a78cd188b4a41fcd995
+readonly BB_WAIT_NEW=d742e51de2f05b57a422143d0ef0ab01
 # bb-await (issue #48): absent on every host before its first install. No trailing comment on a pin line: bb-drift reads it by pattern.
-readonly BB_AWAIT_NEW=56523085fccf5678eb7c208e7352c11b
+readonly BB_AWAIT_PREREFUSED=56523085fccf5678eb7c208e7352c11b
+readonly BB_AWAIT_NEW=c170d09c8d379f16849fc59ea094a72d
 readonly BB_NETNS_PREV=9661165d4ef938ea43eec5b8d2d619d9   # 2026-11-11: no docker socket in the container; live on c3/c4/d1
 readonly BB_NETNS_NEW=bf05b7c51c2f7863ee685a195273e195
 readonly BB_PORTGROUP_PREV=a93ade2ff7dddcc75cee3d4169a08499   # the 2026-11-09 host snapshot, live on c4/d1 since 2026-11-11
 readonly BB_PORTGROUP_NEW=884caf3cf37b12cf5cf1d97e96f76a4c
 # The bb-test lane helpers: absent on every host before their first install. No trailing comment on a pin line: bb-drift reads it by pattern.
 readonly BB_CPRECORD_NEW=3a75a8750a940c983170a43c6c8611b0
-readonly BB_TEST_NEW=e59c37ea1261e7cd8ec7c14a736b3a35
+readonly BB_TEST_NEW=a92bfc8e39b17b2377aeeb031b1f395e
 readonly BB_TESTCOUNT_NEW=7ef8a4c3eba2a517146eed6d7ac31511
 readonly BB_MUTATE_OLD=f9bfbd37c5feafe67995f6716e8fecb0   # the host snapshot, identical on all four hosts: batch credit unsound for multi-module specs
 readonly BB_MUTATE_PREVIA=2c341d44d428ba445db7ea03ee90af64   # the batch-sound version (#41): does not export BB_VIA (issue #46)
@@ -128,8 +130,8 @@ accepted_of() {  # the md5s a host may hold besides absent, in the order the ref
     bb-tickets) echo "$BB_TICKETS_OLD $BB_TICKETS_PRE31 $BB_TICKETS_PREOFFQ $BB_TICKETS_NEW" ;;
     bb-portgroup.py) echo "$BB_PORTGROUP_PREV $BB_PORTGROUP_NEW" ;;
     bb-netns-run) echo "$BB_NETNS_PREV $BB_NETNS_NEW" ;;
-    bb-wait) echo "$BB_WAIT_PRERC $BB_WAIT_NEW" ;;
-    bb-await) echo "$BB_AWAIT_NEW" ;;
+    bb-wait) echo "$BB_WAIT_PRERC $BB_WAIT_PREREFUSED $BB_WAIT_NEW" ;;
+    bb-await) echo "$BB_AWAIT_PREREFUSED $BB_AWAIT_NEW" ;;
     bb-mutate) echo "$BB_MUTATE_OLD $BB_MUTATE_PREVIA $BB_MUTATE_NEW" ;;
     bb-result) echo "$BB_RESULT_PRECP $BB_RESULT_NEW" ;;
     *) new_of "$1" ;;
