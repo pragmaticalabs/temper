@@ -23,12 +23,13 @@ import org.junit.jupiter.params.provider.MethodSource;
 import static org.assertj.core.api.Assertions.assertThat;
 
 
-/// Every JSON column of V1, V2, V10, V16 and V20 (the task tables, m3-design §5.3) is really `jsonb` (m0-design §5.2). The store binds `$n::jsonb`, and Postgres assigns a
+/// Every JSON column of V1, V2, V10, V16, V20 and V21 (the task tables, m3-design §5.3) is really `jsonb` (m0-design §5.2). The store binds `$n::jsonb`, and Postgres assigns a
 /// jsonb value to a `text` column without complaint, so a column declared `text` would pass every store test while
 /// losing jsonb operators and indexing. The catalog is read directly, and a jsonb-only operator runs on stored rows.
 @Tag("pg")
 class JsonbColumnsIT {
     private static final List<String> JSONB_COLUMNS = List.of("bb_snapshot.tickets",
+                                                              "bb_snapshot.offq",
                                                               "task_checkpoint.checklist",
                                                               "task_checkpoint.read_map",
                                                               "gh_budget.team_members",

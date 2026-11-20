@@ -30,7 +30,7 @@ import static org.pragmatica.lang.Option.option;
 /// - A ticket kind (`ticket-queued`, `ticket-started`, `ticket-finished`) depends on `tickets:<h>`,
 ///   `h` the `--match host=<h>` value; without one, on every `tickets:*` source the heartbeat lists. The subject of a
 ///   ticket event is `<host>/<id>`, so only the `host` key names the host. The collection alarms (`queue-wait`,
-///   `portgroup-held`, `portgroup-long`, `waiter-gone`, `clock-skew`) are evaluated in the same collection
+///   `portgroup-held`, `portgroup-long`, `waiter-gone`, `clock-skew`, `off-queue-reactor`, `lingering-reactor`) are evaluated in the same collection
 ///   round and depend on `tickets:<h>` alike; `host-retiring` is the controller's own, from its config and clock.
 /// - Every other kind comes from kiln, which reads GitHub: it depends on `kiln` (the pull), `kiln:github`, and
 ///   `kiln:highwater` (kiln's own feed integrity, the same property one level down; lead ruling 11-03). A kind
@@ -59,7 +59,9 @@ record Dependencies(List<String> named, boolean everyHostLink, boolean everyTick
                                                              "portgroup-held",
                                                              "portgroup-long",
                                                              "waiter-gone",
-                                                             "clock-skew");
+                                                             "clock-skew",
+                                                             "off-queue-reactor",
+                                                             "lingering-reactor");
 
     static final List<String> KILN_SOURCES = List.of("kiln", "kiln:github", "kiln:highwater");
     /// The stream's own integrity source: every wait depends on it.

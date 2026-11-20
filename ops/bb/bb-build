@@ -43,8 +43,26 @@
 # (those three words first, in that order; refused with rc 2 under BB_QUEUE=0 or without --reader; the flag is not part of the
 # maven args or the dedup key). A malformed value never blocks a build: "bb-build: ignoring BB_<NAME>: not <regex>" on stderr,
 # the field is omitted. Old callers set none of these.
+# JBCT BOOTSTRAP (2026-11-19, feat/bb-jbct-bootstrap): a run that asks for a jbct:* goal, an org.pragmatica-lite:jbct-maven-plugin:* goal or the jbct
+# profile, in a checkout whose .m2-local lacks the jbct-maven-plugin jar of its effective version (the root pom's plugin entry), first runs CI's bootstrap
+# (`mvn install -B -DskipTests -pl <ci.yml list at HEAD> -am`) inside the same ticket, same cap and port group, before the main maven
+# (bb-jbct-bootstrap holds the rules and its exit codes: failure -> the ticket's rc is the bootstrap's and the main maven does not run;
+# 82-87 are refusals; 88 = the helper itself is missing or not executable on a jbct run, refused before any maven). build.log carries `bootstrap: jbct plugin <ver> installed into .m2-local|present|FAILED rc=<n>`; the ticket carries
+# jbct_bootstrap=<ver> after an install. The jbct-run test lives here (wants_jbct) and only here; any other run never execs or even looks for the helper and is unchanged. Not part of the dedup key.
 set -euo pipefail
 SELF=$(readlink -f "$0")
+wants_jbct() {  # the ONE copy of the jbct-run test (the helper trusts it): a jbct:* or org.pragmatica-lite:jbct-maven-plugin:* goal, or the jbct profile (-Pjbct, -P a,jbct, --activate-profiles); "!jbct" / "-jbct" do not count
+  local a prof=0 p w=1
+  for a in "$@"; do
+    if [ "$prof" = 1 ]; then prof=0; a="-P$a"; fi
+    case $a in
+      jbct:*|org.pragmatica-lite:jbct-maven-plugin:*) w=0 ;;
+      -P|--activate-profiles) prof=1 ;;
+      -P*|--activate-profiles=*) for p in $(printf '%s' "${a#-P}" | sed 's/^--activate-profiles=//' | tr ',' ' '); do [ "$p" != jbct ] || w=0; done ;;
+    esac
+  done
+  return $w
+}
 DETACHED_READER=""
 if [ "${1:-}" = --detached ]; then
   [ "${BB_QUEUE:-1}" != 0 ] || { echo "refusing: --detached needs the queue" >&2; exit 2; }
@@ -81,11 +99,16 @@ if [ "${1:-}" = __run ]; then
   SLOT=""; [ "$(field "$T" iso)" = 1 ] && SLOT=$(pg_free_slot)
   printf 'started=%s\nwaited=%s\n' "$NOW" "$WAITED" >> "$T"; [ -z "$SLOT" ] || printf 'group_slot=%s\n' "$SLOT" >> "$T"; mv "$T" "$Q/running/$ID"; T=$Q/running/$ID
   (
-    cd "$CO"
+    cd "$CO"; : > "$B/build.log"
+    if wants_jbct "$@"; then   # jbct plugin bootstrap (see bb-jbct-bootstrap); any other ticket never touches the helper, installed or not
+      HELPER=$(dirname "$SELF")/bb-jbct-bootstrap
+      if [ ! -x "$HELPER" ]; then echo "bootstrap: refused: helper $HELPER missing or not executable (rc=88)" >> "$B/build.log"; date +%s > "$B/end"; write_rc "$B" 88; exit 88; fi
+      "$HELPER" "$CO" "$MVN" "$T" "$@" >> "$B/build.log" 2>&1 || { rc=$?; date +%s > "$B/end"; write_rc "$B" "$rc"; exit "$rc"; }
+    fi
     if [ "$(field "$T" iso)" = 1 ]; then
-      "$(dirname "$SELF")/bb-netns-run" "$ID" "$CO" "$MVN" "$@" ${RDF[@]+"${RDF[@]}"} > "$B/build.log" 2>&1
+      "$(dirname "$SELF")/bb-netns-run" "$ID" "$CO" "$MVN" "$@" ${RDF[@]+"${RDF[@]}"} >> "$B/build.log" 2>&1
     else
-      env -u HCLOUD_TOKEN JAVA_HOME=/usr/lib/jvm/java-25-openjdk-amd64 "$MVN" "$@" ${RDF[@]+"${RDF[@]}"} > "$B/build.log" 2>&1
+      env -u HCLOUD_TOKEN JAVA_HOME=/usr/lib/jvm/java-25-openjdk-amd64 "$MVN" "$@" ${RDF[@]+"${RDF[@]}"} >> "$B/build.log" 2>&1
     fi
     rc=$?; date +%s > "$B/end"
     if [ "$rc" = 0 ]; then   # bb-test lane: classpath + manifest of a GREEN build; bounded, and never changes rc

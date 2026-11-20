@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+# bb-jbct-bootstrap <checkout> <mvn> <ticket-file> [the main run's mvn args...]
+# Called by bb-build's job subshell right before the main maven of a ticket (feat/bb-jbct-bootstrap, 2026-11-19). Output goes to the
+# caller's build.log. In a pragmatica checkout `mvn jbct:check` fails with "Could not find artifact org.pragmatica-lite:jbct-maven-plugin
+# :jar:<project.version>": the plugin version is ${project.version} (a release not on central) and maven resolves a CLI-goal plugin before
+# the reactor builds it, so `package jbct:check` in one invocation does not help. CI's answer is a separate first invocation; this is that.
+# bb-build calls it ONLY for a jbct run (its wants_jbct is the single copy of that test: a jbct:* or org.pragmatica-lite:jbct-maven-plugin:*
+# goal, or the jbct profile); this file does not re-test the args, so a direct call always acts. It acts only when
+# <checkout>/.m2-local/org/pragmatica-lite/jbct-maven-plugin/<ver>/jbct-maven-plugin-<ver>.jar is absent. <ver> is the plugin's EFFECTIVE
+# version (not the root project <version> unless the plugin says ${project.version}): the <version> of org.pragmatica-lite:jbct-maven-plugin
+# in the root pom's <build><pluginManagement> or <build><plugins>, read from the checkout's HEAD (git show HEAD:pom.xml), as a literal,
+# ${project.version} (the root's own <version>, not the parent's) or ${prop} from the root <properties> (a property value may itself be one
+# ${...}, resolved once more; deeper is unresolved). Entries that resolve to the same version agree. No mvn help:evaluate.
+# The module list is read from the checkout's OWN HEAD (git show HEAD:.github/workflows/ci.yml), never a copy: the -pl list of the
+# `mvn install ... -DskipTests -pl <list> -am` lines whose list is a literal (letters, digits, _ . / , -) AND contains the element
+# jbct/jbct-maven-plugin (an exact list element, not a substring). Other install lines (aether/ember, integrations/consensus, the quoted
+# or variable CI group plan) are ignored. The selected lines must name one list. Never a guessed list.
+# The bootstrap is `mvn install -B -DskipTests -pl <list> -am` in the checkout, into its own .m2-local (maven.config), never ~/.m2.
+# Prints `bootstrap: jbct plugin <ver> installed into .m2-local` and appends `jbct_bootstrap=<ver>` to the ticket on success;
+# `bootstrap: jbct plugin <ver> present` when the jar is there (no install).
+# Exit: 0 nothing to do, present, or installed; the bootstrap maven's own rc (after `bootstrap: jbct plugin <ver> FAILED rc=<n>`);
+#   82 root pom unreadable at HEAD or holds no jbct-maven-plugin entry with a <version>; 86 entries that resolve to different versions;
+#   87 the version has an unresolved ${...}; 83 ci.yml unreadable at HEAD or holds no literal `mvn install -DskipTests -pl <list> -am`
+#   line whose list contains jbct/jbct-maven-plugin; 84 those lines name different lists; 85 the checkout's .mvn/maven.config has no -Dmaven.repo.local (the install would go to ~/.m2).
+set -uo pipefail
+CO=$1; MVN=$2; T=$3; shift 3
+
+refuse() { echo "bootstrap: REFUSED $2 (rc=$1)"; exit "$1"; }
+
+PYSRC=$(cat <<'PY'
+import sys, re, xml.etree.ElementTree as ET
+def t(e): return e.tag.rsplit('}', 1)[-1]
+def kids(e, n): return [c for c in e if t(c) == n]
+def txt(e, n):
+    k = kids(e, n)
+    return k[0].text.strip() if len(k) == 1 and k[0].text else None
+try:
+    root = ET.fromstring(sys.stdin.read())
+except Exception:
+    print("82 root pom.xml at HEAD is unreadable"); sys.exit()
+props = {}
+for ps in kids(root, 'properties'):
+    for p in ps:
+        props[t(p)] = (p.text or '').strip()
+own = txt(root, 'version')
+def sub(v):
+    def one(m):
+        k = m.group(1)
+        if k == 'project.version' and own: return own
+        if k in props: return props[k]
+        raise KeyError(k)
+    return re.sub(r'\$\{([^}]*)\}', one, v)
+def resolve(v):
+    for _ in range(2):
+        if '${' not in v: break
+        v = sub(v)
+    if '${' in v: raise KeyError(v)
+    return v
+found = []
+for b in kids(root, 'build'):
+    sections = kids(b, 'plugins') + [pl for pm in kids(b, 'pluginManagement') for pl in kids(pm, 'plugins')]
+    for ps in sections:
+        for pl in kids(ps, 'plugin'):
+            if txt(pl, 'groupId') == 'org.pragmatica-lite' and txt(pl, 'artifactId') == 'jbct-maven-plugin':
+                found.append(txt(pl, 'version'))
+if not found or any(f is None for f in found):
+    print("82 root pom.xml at HEAD has no org.pragmatica-lite:jbct-maven-plugin entry with a <version>"); sys.exit()
+try:
+    vs = sorted(set(resolve(f) for f in found))
+except KeyError as e:
+    print("87 jbct-maven-plugin <version> has an unresolved ${...} (%s)" % e); sys.exit()
+if len(vs) != 1:
+    print("86 jbct-maven-plugin entries resolve to different versions: " + " ".join(vs)); sys.exit()
+print("OK " + vs[0])
+PY
+)
+POMRES=$(git -C "$CO" show HEAD:pom.xml 2> /dev/null | python3 -I -c "$PYSRC" 2> /dev/null) || POMRES="82 cannot resolve the jbct-maven-plugin version"
+[ -n "$POMRES" ] || POMRES="82 cannot resolve the jbct-maven-plugin version"
+case $POMRES in OK\ *) VER=${POMRES#OK } ;; *) refuse "${POMRES%% *}" "${POMRES#* }" ;; esac
+[[ $VER =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || refuse 82 "jbct-maven-plugin version '${VER}' is not a plain version"
+
+JAR=$CO/.m2-local/org/pragmatica-lite/jbct-maven-plugin/$VER/jbct-maven-plugin-$VER.jar
+[ ! -f "$JAR" ] || { echo "bootstrap: jbct plugin $VER present"; exit 0; }
+
+CI=$(git -C "$CO" show HEAD:.github/workflows/ci.yml 2> /dev/null) || refuse 83 "cannot read .github/workflows/ci.yml at the checkout's HEAD"
+LISTS=$(printf '%s\n' "$CI" | grep -E 'mvn[[:space:]]+install' | grep -E -e '-DskipTests' \
+        | sed -nE 's/.*[[:space:]]-pl[[:space:]]+([A-Za-z0-9_.\/,-]+)[[:space:]]+-am([[:space:]].*)?$/\1/p' | awk -F, '{ for (i = 1; i <= NF; i++) if ($i == "jbct/jbct-maven-plugin") { print; next } }' | sort -u)
+[ -n "$LISTS" ] || refuse 83 "ci.yml at HEAD has no literal 'mvn install -DskipTests -pl <list> -am' line whose list contains jbct/jbct-maven-plugin"
+[ "$(printf '%s\n' "$LISTS" | awk 'END { print NR }')" = 1 ] || refuse 84 "ci.yml at HEAD names different -pl lists containing jbct/jbct-maven-plugin: $(printf '%s' "$LISTS" | tr '\n' ' ')"
+
+grep -q '^-Dmaven\.repo\.local=' "$CO/.mvn/maven.config" 2> /dev/null || refuse 85 "$CO/.mvn/maven.config has no -Dmaven.repo.local (the install would write ~/.m2)"
+
+cd "$CO" || exit 1
+env -u HCLOUD_TOKEN JAVA_HOME=${BB_JAVA_HOME:-/usr/lib/jvm/java-25-openjdk-amd64} "$MVN" install -B -DskipTests -pl "$LISTS" -am
+rc=$?
+if [ "$rc" != 0 ]; then echo "bootstrap: jbct plugin $VER FAILED rc=$rc"; exit "$rc"; fi
+echo "bootstrap: jbct plugin $VER installed into .m2-local"
+printf 'jbct_bootstrap=%s\n' "$VER" >> "$T"

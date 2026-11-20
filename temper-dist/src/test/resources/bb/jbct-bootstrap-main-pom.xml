@@ -1,0 +1,10 @@
+<project><groupId>org.pragmatica-lite</groupId><artifactId>pragmatica-lite-parent</artifactId><version>1.0.0-rc4</version><build><pluginManagement><plugins>
+                <plugin>
+                    <groupId>org.pragmatica-lite</groupId>
+                    <artifactId>jbct-maven-plugin</artifactId>
+                    <version>${project.version}</version>
+                    <configuration>
+                        <skip>${jbct.skip}</skip>
+                    </configuration>
+                </plugin>
+</plugins></pluginManagement></build></project>

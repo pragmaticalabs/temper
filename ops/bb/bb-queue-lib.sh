@@ -38,7 +38,8 @@ PSLIST=${BB_TEST_PS:-}   # TEST ONLY: a file of "pid ppid rss_kb args..." lines,
 MAXREACT=${BB_TEST_MAX_REACTORS_FILE:-$HOME/work/max-reactors}
 # TICKET LOG (2026-11-11): one TSV line per ticket when it reaches done/ (see ticket_log).
 TLOG=${BB_TEST_TICKET_LOG:-$HOME/work/bb-ticket-log.tsv}
-mkdir -p "$Q/waiting" "$Q/running" "$Q/done"
+# LIB_READONLY: set by bb-queue itself for `offq` (what bb-tickets calls), a reader that must not create a queue directory.
+[ -n "${LIB_READONLY:-}" ] || mkdir -p "$Q/waiting" "$Q/running" "$Q/done"
 
 field() { sed -n "s/^$2=//p" "$1" 2>/dev/null | tail -1; }
 reactors() { pgrep -u "$USER" -fc "$PAT" || true; }
@@ -348,6 +349,43 @@ offqueue_jvms() {
 }
 # offqueue_headroom_kb: the sum of offqueue_jvms headroom, in kB (0 when there is none).
 offqueue_headroom_kb() { offqueue_jvms | awk '{ s += $2 } END { printf "%.0f\n", s }'; }
+# OFF-QUEUE REACTORS (CTO ruling 2026-11-20; incident cloudbb-5 2026-11-20: a hand-run mvn in ~/v3455d held the host cap for ~45 min).
+# offqueue_reactors: one line per maven launcher ($PAT or a real classworlds launcher) the queue did not start, "pid<TAB>startS<TAB>owner<TAB>cwd"
+# (startS: epoch seconds; cwd in full, bytes outside 0x20-0x7e shown as ?). A launcher is the queue's own when a `bb-build __run ` process is among
+# its ancestors, or when its cgroup holds a running container named temper-* (a temper CI job, as HostReactors.foreign reads it) or bb-*
+# (bb-netns-run's isolated build: its tree ends at containerd-shim, not at a waiter). Observation only: it never signals anything, and the cap
+# does not read it. A docker that cannot answer leaves a containerised launcher listed (over-reports, never hides). Reads $PROCROOT, the ps list
+# (PSLIST seam) and, only when a candidate sits in a container, one `docker ps`.
+PROCROOT=${BB_TEST_PROC:-/proc}
+DOCKERPS=${BB_TEST_DOCKER_PS:-}   # TEST ONLY: a file of "<64-hex id> <name>" lines, read instead of `docker ps`
+CO_ROOT=${BB_TEST_CO_ROOT:-$HOME/work/co}
+# offq_owner <cwd>: the checkout prefix (~/work/co/v3436i-head -> v3436i), else "unowned".
+offq_owner() {
+  local r o=unowned
+  case "$1" in "$CO_ROOT"/?*) r=${1#"$CO_ROOT"/}; r=${r%%/*}; o=${r%%-*}; [ -n "$o" ] || o=unowned;; esac
+  printf '%s\n' "$o"
+}
+offqueue_reactors() {
+  local pid ids="" cg cid hit st t0 clk cwd
+  for pid in $(ps_list | awk -v pat="$PAT" -v mvn='[c]lassworlds[.]launcher[.]Launcher' '
+      $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ { n++; ord[n] = $1; par[$1] = $2; a = $0; sub(/^[[:space:]]*[0-9]+[[:space:]]+[0-9]+[[:space:]]+[0-9]+[[:space:]]*/, "", a); args[$1] = a }
+      END { for (i = 1; i <= n; i++) { p = ord[i]; if (args[p] !~ pat && args[p] !~ mvn) continue
+              own = 0; delete seen; for (q = par[p]; q in par && !(q in seen); q = par[q]) { seen[q] = 1; if (args[q] ~ /bb-build __run /) { own = 1; break } }
+              if (!own) print p } }'); do
+    cg=$(cat "$PROCROOT/$pid/cgroup" 2>/dev/null) || continue
+    hit=0
+    for cid in $(printf '%s\n' "$cg" | grep -Eo '[0-9a-f]{64}' | sort -u); do
+      [ -n "$ids" ] || ids=$( { if [ -n "$DOCKERPS" ]; then cat "$DOCKERPS" 2>/dev/null; else timeout 5 docker ps --no-trunc --format '{{.ID}} {{.Names}}' 2>/dev/null; fi; } | awk '$1 ~ /^[0-9a-f]{64}$/ && $2 ~ /^(temper|bb)-/ { print $1 }'; echo none)
+      case $'\n'"$ids"$'\n' in *$'\n'"$cid"$'\n'*) hit=1;; esac
+    done
+    [ "$hit" = 0 ] || continue
+    cwd=$(readlink "$PROCROOT/$pid/cwd" 2>/dev/null | tr -c '\040-\176\n' '?') && [ -n "$cwd" ] || continue
+    st=$(sed 's/^.*) //' "$PROCROOT/$pid/stat" 2>/dev/null | cut -d' ' -f20); t0=$(sed -n 's/^btime //p' "$PROCROOT/stat" 2>/dev/null)
+    clk=$(getconf CLK_TCK 2>/dev/null || echo 100)
+    case "$st$t0" in ''|*[!0-9]*) continue;; esac
+    printf '%s\t%s\t%s\t%s\n' "$pid" $((t0 + st / clk)) "$(offq_owner "$cwd")" "$cwd"
+  done
+}
 # mem_available_gb: "MemAvailable=<x.x>GB" from $MEMINFO, or nothing when it is unreadable or malformed.
 mem_available_gb() {
   awk '$1 == "MemAvailable:" { if ($2 ~ /^[0-9]+$/ && $3 == "kB") printf "MemAvailable=%.1fGB\n", $2 / 1048576; exit }' "$MEMINFO" 2>/dev/null || true

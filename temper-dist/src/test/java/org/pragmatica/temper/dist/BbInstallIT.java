@@ -203,6 +203,9 @@ class BbInstallIT {
         assertThat(pin("BB_HOLD_PRELEDGER")).isEqualTo(BbFixtures.md5(prev("bb-hold.preledger")));
         assertThat(pin("BB_LIB_PRECAP")).isEqualTo(BbFixtures.md5(prev("bb-queue-lib.sh.precap")));
         assertThat(pin("BB_QUEUE_PRECAP")).isEqualTo(BbFixtures.md5(prev("bb-queue.precap")));
+        assertThat(pin("BB_LIB_PREOFFQ")).isEqualTo(BbFixtures.md5(prev("bb-queue-lib.sh.preoffq")));
+        assertThat(pin("BB_QUEUE_PREOFFQ")).isEqualTo(BbFixtures.md5(prev("bb-queue.preoffq")));
+        assertThat(pin("BB_TICKETS_PREOFFQ")).isEqualTo(BbFixtures.md5(prev("bb-tickets.preoffq")));
         assertThat(pin("BB_HOLD_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-hold")));
         assertThat(pin("BB_WAIT_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-wait")));
         assertThat(pin("BB_AWAIT_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-await")));
@@ -213,6 +216,8 @@ class BbInstallIT {
         assertThat(pin("BB_CPRECORD_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-cp-record")));
         assertThat(pin("BB_TEST_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-test")));
         assertThat(pin("BB_TESTCOUNT_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-testcount")));
+        assertThat(pin("BB_JBCTBOOT_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-jbct-bootstrap")));
+        assertThat(pin("BB_BUILD_PREJBCT")).isEqualTo(BbFixtures.md5(prev("bb-build.prejbct")));
     }
 
     /// The bb-test lane helpers go in before bb-build (which calls bb-cp-record); a host holding a stranger's bb-test is refused, naming the one pin and
@@ -254,7 +259,8 @@ class BbInstallIT {
                                                           "bb-wait",
                                                           "bb-await",
                                                           "bb-netns-run",
-                                                          "bb-portgroup.py");
+                                                          "bb-portgroup.py",
+                                                          "bb-jbct-bootstrap");
 
     @Test
     void success_installsAllFourFiles_keepsBackups_andASecondRunChangesNothing() throws Exception {
@@ -275,6 +281,7 @@ class BbInstallIT {
                                                                     "installed builder@h1 bb-await before=absent after=" + pin("BB_AWAIT_NEW"),
                                                                     "installed builder@h1 bb-netns-run before=absent after=" + pin("BB_NETNS_NEW"),
                                                                     "installed builder@h1 bb-portgroup.py before=absent after=" + pin("BB_PORTGROUP_NEW"),
+                                                                    "installed builder@h1 bb-jbct-bootstrap before=absent after=" + pin("BB_JBCTBOOT_NEW"),
                                                                     "installed builder@h1 bb-queue-lib.sh before=" + BbFixtures.BB_LIB_OLD
                                                                    + " after=" + pin("BB_LIB_NEW"),
                                                                     "installed builder@h1 bb-queue before=" + BbFixtures.BB_QUEUE_OLD
@@ -321,6 +328,7 @@ class BbInstallIT {
                                                                      "unchanged builder@h1 bb-await " + pin("BB_AWAIT_NEW"),
                                                                      "unchanged builder@h1 bb-netns-run " + pin("BB_NETNS_NEW"),
                                                                      "unchanged builder@h1 bb-portgroup.py " + pin("BB_PORTGROUP_NEW"),
+                                                                     "unchanged builder@h1 bb-jbct-bootstrap " + pin("BB_JBCTBOOT_NEW"),
                                                                      "unchanged builder@h1 bb-queue-lib.sh " + pin("BB_LIB_NEW"),
                                                                      "unchanged builder@h1 bb-queue " + pin("BB_QUEUE_NEW"),
                                                                      "unchanged builder@h1 bb-build " + pin("BB_BUILD_NEW"));
@@ -514,8 +522,8 @@ class BbInstallIT {
         }
     }
 
-    /// The bb-queue-lib.sh, bb-queue and bb-hold of issue #56 (BB_*_PRELEDGER: the cap counted reactors by process pattern; the 2026-11-19
-    /// CTO ruling replaced that with the launch ledger) are accepted sources and are replaced, backed up under their md5.
+    /// The bb-queue-lib.sh and bb-queue of #66 and the bb-hold of #56 (BB_*_PRELEDGER: the cap counted reactors by process pattern; the
+    /// 2026-11-19 CTO ruling replaced that with the launch ledger) are accepted sources and are replaced, backed up under their md5.
     @Test
     void aHostRunningThePreLedgerQueue_isUpdatedToTheLaunchLedger() throws Exception {
         var tools = host("h1");
@@ -545,7 +553,7 @@ class BbInstallIT {
         }
     }
 
-    /// The bb-build of issue #56 (BB_BUILD_PRECP: no bb-cp-record hook, no BB_LAUNCH) is an accepted source and is replaced, backed up under its md5.
+    /// The bb-build of #64/#66 (BB_BUILD_PRECP: no bb-cp-record hook, no BB_LAUNCH, no launch ledger) is an accepted source and is replaced, backed up under its md5.
     @Test
     void aHostRunningThePreBbTestBuild_isUpdatedToTheOneWithTheClasspathRecord() throws Exception {
         var tools = host("h1");
@@ -559,6 +567,40 @@ class BbInstallIT {
                                          + " after=" + pin("BB_BUILD_NEW"));
         assertThat(tools.resolve("bb-build")).hasBinaryContent(Files.readAllBytes(OPS_BB.resolve("bb-build")));
         assertThat(tools.resolve("bb-build.bak-" + pin("BB_BUILD_PRECP"))).hasBinaryContent(prev("bb-build.precp"));
+    }
+
+    /// The bb-queue-lib.sh, bb-queue and bb-tickets before the off-queue reactor list (BB_*_PREOFFQ, 2026-11-20) are accepted sources and are
+    /// replaced, backed up under their md5. Mutation: leave a PREOFFQ out of its accepted list -> the install is refused (65), red.
+    @Test
+    void aHostRunningThePreOffQueueTools_isUpdatedToTheOnesThatListOffQueueReactors() throws Exception {
+        var tools = host("h1");
+
+        assertThat(install("builder@h1").rc()).isZero();
+        var names = List.of("bb-queue-lib.sh", "bb-queue", "bb-tickets");
+
+        for (var name : names) {
+            Files.write(tools.resolve(name), prev(name + ".preoffq"));
+        }
+
+        var run = install("builder@h1");
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        for (var name : names) {
+            var key = switch (name) {
+                case "bb-queue-lib.sh" -> "BB_LIB_";
+                case "bb-queue" -> "BB_QUEUE_";
+                default -> "BB_TICKETS_";
+            };
+
+            assertThat(run.stdout()).contains("installed builder@h1 " + name
+                                             + " before=" + pin(key + "PREOFFQ")
+                                             + " after=" + pin(key + "NEW"));
+            assertThat(tools.resolve(name)).hasBinaryContent(Files.readAllBytes(OPS_BB.resolve(name)));
+            if (!name.equals("bb-tickets")) {
+                // the installer backs up every file but bb-tickets
+                assertThat(tools.resolve(name + ".bak-" + pin(key + "PREOFFQ"))).hasBinaryContent(prev(name + ".preoffq"));
+            }
+        }
     }
 
     /// The bb-netns-run of 2026-11-11 (BB_NETNS_PREV, no docker socket in the container; live on c3/c4/d1) is an accepted source and is replaced, backed up under its md5.
@@ -592,6 +634,43 @@ class BbInstallIT {
         assertThat(tools.resolve("bb-queue")).hasBinaryContent(Files.readAllBytes(OPS_BB.resolve("bb-queue")));
     }
 
+    /// bb-jbct-bootstrap (2026-11-19): absent before its first install, installed BEFORE the bb-build that calls it; a host's bb-build at the
+    /// previous pin (BB_BUILD_PREJBCT, no hook) is an accepted source, replaced and backed up under its md5.
+    /// Mutation: move bb-jbct-bootstrap behind bb-build in FILES -> the order assertion is red.
+    @Test
+    void theJbctBootstrapHelper_isInstalledBeforeTheBbBuildThatCallsIt_andAPreviousBbBuildIsUpgraded() throws Exception {
+        var tools = host("h1");
+
+        Files.write(tools.resolve("bb-build"), prev("bb-build.prejbct"));
+        var run = install("builder@h1");
+        var lines = run.stdout().lines().toList();
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        assertThat(lines).contains("installed builder@h1 bb-jbct-bootstrap before=absent after=" + pin("BB_JBCTBOOT_NEW"),
+                                   "installed builder@h1 bb-build before=" + pin("BB_BUILD_PREJBCT")
+                                  + " after=" + pin("BB_BUILD_NEW"));
+        assertThat(lines.indexOf("installed builder@h1 bb-jbct-bootstrap before=absent after=" + pin("BB_JBCTBOOT_NEW"))).isLessThan(lines.indexOf("installed builder@h1 bb-build before=" + pin("BB_BUILD_PREJBCT")
+                                                                                                                                                  + " after=" + pin("BB_BUILD_NEW")));
+        assertThat(tools.resolve("bb-build.bak-" + pin("BB_BUILD_PREJBCT"))).hasBinaryContent(prev("bb-build.prejbct"));
+        assertThat(PosixFilePermissions.toString(Files.getPosixFilePermissions(tools.resolve("bb-jbct-bootstrap")))).isEqualTo("rwxr-xr-x");
+    }
+
+    /// A bb-jbct-bootstrap on a host that is not the pinned file is refused (exit 65, nothing written anywhere), naming the one accepted pin.
+    /// Mutation: accept any md5 for bb-jbct-bootstrap in phase 1 -> exit 0, red.
+    @Test
+    void aStrangersJbctBootstrapHelper_isRefused_withTheOnePinNamed_andNothingIsWritten() throws Exception {
+        var tools = host("h1");
+
+        Files.writeString(tools.resolve("bb-jbct-bootstrap"), "someone else's helper\n");
+        var before = listing(tools);
+        var run = install("builder@h1");
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isEqualTo(65);
+        assertThat(run.stdout().lines().toList()).containsExactly("refused builder@h1 bb-jbct-bootstrap installed=" + BbFixtures.md5("someone else's helper\n".getBytes())
+                                                                 + " expected=" + pin("BB_JBCTBOOT_NEW"));
+        assertThat(listing(tools)).isEqualTo(before);
+    }
+
     /// The bb-mutate on all four hosts (BB_MUTATE_OLD, batch credit unsound for multi-module specs) is an accepted source and is replaced, backed up under its md5.
     @Test
     void aHostRunningTheOldBbMutate_isUpdatedToTheBatchSoundOne() throws Exception {
@@ -622,6 +701,7 @@ class BbInstallIT {
                              "bb-netns-run",
                              "bb-portgroup.py",
                              "bb-mutate",
+                             "bb-jbct-bootstrap",
                              "bb-cp-record",
                              "bb-test",
                              "bb-testcount")) {
@@ -667,6 +747,7 @@ class BbInstallIT {
                                                                  + "|" + pin("BB_BUILD_PREVIA")
                                                                  + "|" + pin("BB_BUILD_PREMEM")
                                                                  + "|" + pin("BB_BUILD_PRECAP")
+                                                                 + "|" + pin("BB_BUILD_PREJBCT")
                                                                  + "|" + pin("BB_BUILD_PRECP")
                                                                  + "|" + pin("BB_BUILD_NEW"));
         assertThat(listing(good)).isEqualTo(goodBefore);
@@ -705,6 +786,7 @@ class BbInstallIT {
                            + "|621b2252c3da05e7dd1161d076908864|" + pin("BB_LIB_PRERC")
                            + "|" + pin("BB_LIB_PREMEM")
                            + "|" + pin("BB_LIB_PRECAP")
+                           + "|" + pin("BB_LIB_PREOFFQ")
                            + "|" + pin("BB_LIB_PRELEDGER")
                            + "|" + pin("BB_LIB_NEW"))
                   .contains("bb-queue installed=" + BbFixtures.md5("unrelated tool\n".getBytes())
@@ -715,6 +797,7 @@ class BbInstallIT {
                            + "|" + pin("BB_QUEUE_PREVIA")
                            + "|" + pin("BB_QUEUE_PREMEM")
                            + "|" + pin("BB_QUEUE_PRECAP")
+                           + "|" + pin("BB_QUEUE_PREOFFQ")
                            + "|" + pin("BB_QUEUE_PRELEDGER")
                            + "|" + pin("BB_QUEUE_NEW"));
     }
@@ -766,6 +849,7 @@ class BbInstallIT {
                                 "bb-await",
                                 "bb-netns-run",
                                 "bb-portgroup.py",
+                                "bb-jbct-bootstrap",
                                 "bb-mutate",
                                 "bb-cp-record",
                                 "bb-test",
