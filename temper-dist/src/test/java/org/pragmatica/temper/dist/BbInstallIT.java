@@ -193,6 +193,8 @@ class BbInstallIT {
         assertThat(pin("BB_MUTATE_PREVIA")).isEqualTo(BbFixtures.md5(prev("bb-mutate.previa")));
         assertThat(pin("BB_LIB_PRERC")).isEqualTo(BbFixtures.md5(prev("bb-queue-lib.sh.prerc")));
         assertThat(pin("BB_WAIT_PRERC")).isEqualTo(BbFixtures.md5(prev("bb-wait.prerc")));
+        assertThat(pin("BB_WAIT_PREREFUSED")).isEqualTo(BbFixtures.md5(prev("bb-wait.prerefused")));
+        assertThat(pin("BB_AWAIT_PREREFUSED")).isEqualTo(BbFixtures.md5(prev("bb-await.prerefused")));
         assertThat(pin("BB_BUILD_PREMEM")).isEqualTo(BbFixtures.md5(prev("bb-build.premem")));
         assertThat(pin("BB_LIB_PREMEM")).isEqualTo(BbFixtures.md5(prev("bb-queue-lib.sh.premem")));
         assertThat(pin("BB_QUEUE_PREMEM")).isEqualTo(BbFixtures.md5(prev("bb-queue.premem")));

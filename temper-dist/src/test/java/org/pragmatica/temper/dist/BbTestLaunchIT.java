@@ -511,7 +511,7 @@ class BbTestLaunchIT {
     }
 
     /// vbt8 L1: the stale-jar check (`bb-cp-record check`) is bounded by BB_CP_READ_TIMEOUT at BOTH calls: at enqueue (rc 15 on stderr,
-    /// nothing queued) and at launch (a refused ticket). The stand-in is the real bb-cp-record with a prefix that hangs a `check`, ignoring TERM,
+    /// nothing queued) and at launch (a refused ticket). The stand-in is the real (python) bb-cp-record with a prefix that hangs a `check`, ignoring TERM,
     /// from the HANG_CHECK_AFTER-th call on. Probe: drop the `timeout -k 10 "$READ_T"` wrap at the enqueue call (resp. the bounded() wrap at
     /// the launch call) -> red: the stand-in sleeps 600 s, the row's 120 s thread timeout fails it.
     private void hangingCheck(Path pid) throws Exception {
@@ -521,9 +521,15 @@ class BbTestLaunchIT {
 
         BbFixtures.executable(real,
                               text.substring(0, nl + 1)
-                             + "if [ \"${1:-}\" = check ] && [ -n \"${HANG_CHECK:-}\" ]; then n=$(cat \"$HANG_CHECK.n\" 2>/dev/null || echo 0)\n"
-                             + "  echo $((n + 1)) > \"$HANG_CHECK.n\"\n"
-                             + "  if [ \"$n\" -ge \"${HANG_CHECK_AFTER:-0}\" ]; then echo $$ > \"" + pid + "\"; trap '' TERM; exec sleep 600; fi\nfi\n"
+                             + "import os, signal, sys\n"
+                             + "if len(sys.argv) > 1 and sys.argv[1] == 'check' and os.environ.get('HANG_CHECK'):\n"
+                             + "    c = os.environ['HANG_CHECK'] + '.n'\n"
+                             + "    n = int(open(c).read()) if os.path.exists(c) else 0\n"
+                             + "    open(c, 'w').write(str(n + 1))\n"
+                             + "    if n >= int(os.environ.get('HANG_CHECK_AFTER', '0')):\n"
+                             + "        open('" + pid + "', 'w').write(str(os.getpid()))\n"
+                             + "        signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                             + "        os.execvp('sleep', ['sleep', '600'])\n"
                              + text.substring(nl + 1));
     }
 
