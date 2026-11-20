@@ -534,6 +534,93 @@ class BbTestGuardIT {
         assertThat(run.stderr()).contains(".mvn/maven.config sets -Djunit.version");
     }
 
+    // ---- vbt6: each row below was accepted (rc 14, the launcher check) by the 32e2ad8b6 guard ----
+    private BbFixtures.Outcome withMavenConfig(String config) throws Exception {
+        Files.createDirectories(co.resolve(".mvn"));
+        Files.writeString(co.resolve(".mvn").resolve("maven.config"), config);
+        return bbTestWithRootPom(ROOT_POM, tmp.resolve("no-launcher.jar"));
+    }
+
+    @Test
+    void versionGuard_aMavenConfigPlainDefineOfJunitVersion_isRefusedWithRc15() throws Exception {
+        var run = withMavenConfig("-B\n-Djunit.version=5.12.2\n");
+
+        refused15(run);
+        assertThat(run.stderr()).contains(".mvn/maven.config sets -Djunit.version");
+    }
+
+    @Test
+    void versionGuard_aMavenConfigPlainDefineOfThePlatformVersion_isRefusedWithRc15() throws Exception {
+        var run = withMavenConfig("-Djunit-platform.version=1.12.2 -B\n");
+
+        refused15(run);
+        assertThat(run.stderr()).contains(".mvn/maven.config sets -Djunit-platform.version");
+    }
+
+    @Test
+    void versionGuard_aMavenConfigLongDefineWithASpace_isRefusedWithRc15() throws Exception {
+        var run = withMavenConfig("--define junit.version=5.12.2\n");
+
+        refused15(run);
+        assertThat(run.stderr()).contains(".mvn/maven.config sets -Djunit.version");
+    }
+
+    @Test
+    void versionGuard_aMavenConfigDefineOfAnotherProperty_passesTheCheck() throws Exception {
+        var run = withMavenConfig("-Dmyjunit.version=5.12.2 -Dlabel=junit.version -fae -T 4\n");
+
+        assertThat(run.rc()).as(run.stderr()).isEqualTo(14);
+    }
+
+    @Test
+    void versionGuard_aMavenConfigSettingsOrPomFile_isRefusedWithRc16() throws Exception {
+        for (var config : List.of("-s .mvn/s.xml", "--settings=.mvn/s.xml", "-gs g.xml", "-f alt.xml", "--file alt.xml", "--global-settings g.xml")) {
+            var run = withMavenConfig("-B\n" + config + "\n");
+
+            assertThat(run.rc()).as(config + ": " + run.stderr()).isEqualTo(16);
+            assertThat(run.stderr()).contains("cannot be checked (rc 16)", ".mvn/maven.config passes " + config.split("[ ]")[0]);
+        }
+    }
+
+    private static final String BOM_AT_JUNIT_VERSION = "<dependencyManagement><dependencies><dependency><groupId>org.junit</groupId><artifactId>junit-bom</artifactId>"
+                                                     + "<version>${junit.version}</version><type>pom</type><scope>import</scope></dependency></dependencies></dependencyManagement>";
+
+    @Test
+    void versionGuard_aJunitBomAtAJunitVersionBringingAnotherPlatform_isRefusedWithRc15() throws Exception {
+        var run = versionOf("<properties><junit-platform.version>1.13.4</junit-platform.version><junit.version>5.12.2</junit.version></properties>"
+                           + BOM_AT_JUNIT_VERSION);
+
+        refused15(run);
+        assertThat(run.stderr()).contains("uses ${junit.version}=5.12.2 for org.junit:junit-bom, which brings junit-platform 1.12.2, not 1.13.4");
+    }
+
+    @Test
+    void versionGuard_aJunitBomAtTheMatchingJunitVersion_passesTheCheck() throws Exception {
+        var run = versionOf("<properties><junit-platform.version>1.13.4</junit-platform.version><junit.version>5.13.4</junit.version></properties>"
+                           + BOM_AT_JUNIT_VERSION);
+
+        assertThat(run.rc()).as(run.stderr()).isEqualTo(14);
+    }
+
+    @Test
+    void versionGuard_aJunitGroupIdThroughAPropertyWithALiteralVersion_isRefusedWithRc15() throws Exception {
+        var run = versionOf("<properties><junit.version>5.13.4</junit.version><junit.group>org.junit.jupiter</junit.group></properties>"
+                           + "<dependencies><dependency><groupId>${junit.group}</groupId><artifactId>junit-jupiter</artifactId><version>5.12.2</version>"
+                           + "</dependency></dependencies>");
+
+        refused15(run);
+        assertThat(run.stderr()).contains("sets the version of org.junit.jupiter:junit-jupiter to 5.12.2");
+    }
+
+    @Test
+    void versionGuard_anUnresolvableGroupIdWithAVersion_isRefusedWithRc15() throws Exception {
+        var run = versionOf(ROOT_PROPS + "<dependencies><dependency><groupId>${nowhere}</groupId><artifactId>x</artifactId><version>1</version>"
+                           + "</dependency></dependencies>");
+
+        refused15(run);
+        assertThat(run.stderr()).contains("groupId ${nowhere} that cannot be resolved");
+    }
+
     private static final String APP_WITH_PARENT = "<project><modelVersion>4.0.0</modelVersion><parent><groupId>g</groupId><artifactId>%s</artifactId><version>1</version>"
                                                 + "<relativePath>%s</relativePath></parent><artifactId>app</artifactId></project>";
 

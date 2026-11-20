@@ -16,11 +16,15 @@
 # naming both; anything else (no property, two definitions, a ${ref}, a -SNAPSHOT or other non-literal, a 6.x junit.version, an unparsable pom) = rc 15, fail closed,
 # "cannot be determined". Every override of either property also = rc 15: a <profile> (root pom or a pom on the module path or <parent> chain),
 # such a pom's own properties, a <parent> outside the checkout, a literal org.junit* dependency version (a junit-bom import included), two
-# <properties> blocks, a mention in .mvn/maven.config (-D or --define=), a -D in the launch args (vbt4 M1, vbt5 H1).
-# VERDICT SOURCE (vbt4 L2): the launch writes verdict_source=guard (a launch-time guard refused: rc 12/14/15) or verdict_source=java (java
+# <properties> blocks, a -D in .mvn/maven.config (-Dname, -D name, --define=name, --define name), a -D in the launch args (vbt4 M1, vbt5 H1,
+# vbt6 H1-R); an org.junit* dependency or junit-bom import whose ${junit.version}/${junit-platform.version} brings another platform version
+# (vbt6 M-a); a ${property} groupId that does not resolve (vbt6 M-b). rc 16: .mvn/maven.config passes -s/-gs/-f/--settings/--global-settings/
+# --file (a settings profile or another pom this parse never reads). NOT COVERED (a static parse cannot see it): junit versions managed by a
+# third-party BOM import (e.g. spring-boot-dependencies), a settings.xml profile not named in maven.config, MAVEN_ARGS on the host.
+# VERDICT SOURCE (vbt4 L2): the launch writes verdict_source=guard (a launch-time guard refused: rc 12/14/15/16) or verdict_source=java (java
 # ran; rc = its exit status) on the ticket, so a java System.exit(12|14|15) never reads as a guard.
 # Call rc: 0 queued (as bb-build); 2 usage; 12 stale-jar guard; 14 launcher jar absent/not the pin; 15 checkout's junit-platform version differs from
-# the launcher's or is undeterminable; others from bb-build (3, 4).
+# the launcher's or is undeterminable; 16 .mvn/maven.config names a settings or pom file; others from bb-build (3, 4).
 # REQUIRE DOCKER (CTO ruling 2026-11-19): the launch runs with -Daether.requireDocker=true (bb-build appends it to every ticket's args) unless
 # BB_REQUIRE_DOCKER=0 is given at enqueue: the same explicit override as bb-build (#31), recorded in the ticket as requireDocker=0 (bb-tickets shows it). On condition (CTO): the ticket (requireDockerEffective=true|false) AND each result line
 # (requireDocker=true|false) state it, so a count with Testcontainers skipped never passes for a full one.
@@ -41,15 +45,19 @@ launcher_ok() {
 
 platform_version_of() {  # <checkout> <module>: "v <version>" its root pom pins, or "x <why it cannot be determined>" (fail closed)
   python3 -I - "$1" "$2" 2> /dev/null <<'PY' || echo "x the version parse failed"
-import os, re, sys, xml.etree.ElementTree as ET
+import os, re, shlex, sys, xml.etree.ElementTree as ET
 # /project/properties of the root pom only (comments and plugin config are never read for the value). Exactly one literal
 # <junit-platform.version>, else (none at all) exactly one literal <junit.version> 5.N.P read as platform 1.N.P. Fail closed (rc 15) on:
 # two <properties> blocks, two definitions, a ${ref}, a non-literal or a 6.x; and on every OVERRIDE of either property (vbt4 M1, vbt5 H1):
 # a <profile>'s properties in the root pom or in any pom from the root down to the module or on the module's local <parent> chain, such
 # a pom's own properties, a <parent> that is not a pom in the checkout, an org.junit* <dependency> anywhere in those poms or the root pom
 # (dependencyManagement, a junit-bom import, plugin dependencies) whose version is set but is not ${junit.version} or
-# ${junit-platform.version}, and any mention of either name in .mvn/maven.config (-D, -D name, --define=name). The launch-time -D
-# args are checked by the caller (jvm_args_ok).
+# ${junit-platform.version}, and a -D of either name in .mvn/maven.config (-Dname, -D name, --define=name, --define name). An org.junit*
+# dependency at ${junit.version} or ${junit-platform.version} (a junit-bom import included) is resolved through the root pom's property
+# and must imply the platform version reported (vbt6 M-a: a junit-bom at ${junit.version}=5.12.2 beside <junit-platform.version>1.13.4
+# brings platform 1.12.2). A ${property} groupId with a version is resolved through that pom's and the root pom's properties (and
+# project.groupId); unresolvable = fail closed (vbt6 M-b). -s/-f/-gs/--settings/--file/--global-settings in .mvn/maven.config name a
+# file this parse does not read: "s", rc 16 (vbt6). The launch-time -D args are checked by the caller (jvm_args_ok).
 NAMES = ('junit-platform.version', 'junit.version')
 co, module = sys.argv[1], sys.argv[2].strip('/')
 local = lambda t: t.rsplit('}', 1)[-1] if isinstance(t, str) else ''
@@ -79,10 +87,32 @@ for name in defines(profile_props(root)):
 REFS = ('${junit-platform.version}', '${junit.version}')
 child = lambda e, tag: next((c for c in e if local(c.tag) == tag), None)
 text = lambda e, tag: None if child(e, tag) is None else (child(e, tag).text or '').strip()
+pprops = lambda proj: {local(c.tag): (c.text or '').strip() for p in proj if local(p.tag) == 'properties' for c in p}
+ROOTP = pprops(root)
+def resolve(value, path, proj):  # ${name} through the pom's own properties, then the root pom's, and project.groupId; None if any is left
+    own = dict(ROOTP, **pprops(proj))
+    par = child(proj, 'parent')
+    own['project.groupId'] = text(proj, 'groupId') or (None if par is None else text(par, 'groupId')) or '${unresolved}'
+    for _ in range(16):
+        nxt = re.sub(r'\$\{([^}]*)\}', lambda m: own.get(m.group(1), m.group(0)), value)
+        if nxt == value:
+            break
+        value = nxt
+    return None if '${' in value else value
+USES = []  # (pom, group:artifact, the version REF): each must imply the reported platform version (checked at the end)
 def junit_literals(path, proj):  # any org.junit* <dependency> (incl. a dependencyManagement import of junit-bom) whose version is set but is not a REF
     for dep in proj.iter():
-        if local(dep.tag) == 'dependency' and (text(dep, 'groupId') or '').startswith('org.junit') and text(dep, 'version') not in (None,) + REFS:
-            no('%s sets the version of %s:%s to %s, not to a junit version property' % (os.path.relpath(path, co), text(dep, 'groupId'), text(dep, 'artifactId'), text(dep, 'version')))
+        if local(dep.tag) != 'dependency' or text(dep, 'version') is None:
+            continue
+        raw = text(dep, 'groupId') or ''
+        group = resolve(raw, path, proj)
+        if group is None:
+            no('%s has a dependency groupId %s that cannot be resolved (with version %s)' % (os.path.relpath(path, co), raw, text(dep, 'version')))
+        if not group.startswith('org.junit'):
+            continue
+        if text(dep, 'version') not in REFS:
+            no('%s sets the version of %s:%s to %s, not to a junit version property' % (os.path.relpath(path, co), group, text(dep, 'artifactId'), text(dep, 'version')))
+        USES.append((os.path.relpath(path, co), group + ':' + (text(dep, 'artifactId') or ''), group, text(dep, 'version')))
 def overrides(path, proj):
     for name in defines([c for c in proj if local(c.tag) == 'properties'] + profile_props(proj)):
         no('%s sets <%s>' % (os.path.relpath(path, co), name))
@@ -123,20 +153,47 @@ try:
     cfg = open(os.path.join(co, '.mvn', 'maven.config'), encoding='utf-8', errors='replace').read()
 except OSError:
     cfg = ''
-for name in NAMES:
-    if re.search(r'(?<![A-Za-z0-9_.-])' + re.escape(name) + r'(?![A-Za-z0-9_.-])', cfg):  # any mention: -D, -D name, --define=name (vbt5 H1-i)
-        no('.mvn/maven.config sets -D%s' % name)
+try:
+    toks = shlex.split(cfg)
+except ValueError:
+    no('.mvn/maven.config does not tokenize')
+FILES = ('--settings', '--global-settings', '--file')
+def long_opt(tok, names):  # tok's option part is one of names or an unambiguous-length (>= 4 chars) prefix of one, as commons-cli matches
+    opt = tok.split('=', 1)[0]
+    return next((n for n in names if opt.startswith('--') and len(opt) >= 4 and n.startswith(opt)), None)
+for i, tok in enumerate(toks):
+    if tok in ('-s', '-gs', '-f') or long_opt(tok, FILES) or (re.fullmatch(r'-(s|gs|f)\S+', tok) and tok not in ('-fae', '-ff', '-fn')):
+        print('s .mvn/maven.config passes %s: a settings or pom file the static parse does not read' % tok)
+        sys.exit(0)
+    if tok == '-D' or (long_opt(tok, ('--define',)) and '=' not in tok):
+        prop = toks[i + 1] if i + 1 < len(toks) else ''
+    elif long_opt(tok, ('--define',)):
+        prop = tok.split('=', 1)[1]
+    elif tok.startswith('-D'):
+        prop = tok[2:]
+    else:
+        continue
+    if prop.split('=', 1)[0] in NAMES:  # -Dname, -D name, --define=name, --define name (vbt5 H1-i, vbt6 H1-R)
+        no('.mvn/maven.config sets -D%s' % prop.split('=', 1)[0])
 vals = lambda name: [(c.text or '').strip() for p in props for c in p if local(c.tag) == name]
 plat, junit = vals('junit-platform.version'), vals('junit.version')
 if plat:
     if len(plat) == 1 and re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', plat[0]):
-        print('v ' + plat[0])
+        v = plat[0]
     else:
         no('<junit-platform.version> is not exactly one literal N.N.N')
 elif len(junit) == 1 and re.fullmatch(r'5\.[0-9]+\.[0-9]+', junit[0]):
-    print('v 1.' + junit[0].split('.', 1)[1])
+    v = '1.' + junit[0].split('.', 1)[1]
 else:
     no('no literal <junit-platform.version>, nor exactly one literal <junit.version> 5.N.P, in its root pom.xml')
+for where, coord, group, ref in USES:  # vbt6 M-a: what each junit dependency (a junit-bom import included) brings must be that version
+    got = vals(ref[2:-1])
+    if len(got) != 1 or not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', got[0]):
+        no('%s uses %s for %s, which is not exactly one literal N.N.N in the root pom' % (where, ref, coord))
+    implied = got[0] if group == 'org.junit.platform' or not got[0].startswith('5.') else '1.' + got[0].split('.', 1)[1]
+    if implied != v:
+        no('%s uses %s=%s for %s, which brings junit-platform %s, not %s' % (where, ref, got[0], coord, implied, v))
+print('v ' + v)
 PY
   return 0
 }
@@ -145,6 +202,7 @@ version_ok() {  # <checkout> <module>
   case "$v" in
     "v $LAUNCHER_VERSION") return 0;;
     "v "*) echo "bb-test: the checkout's junit-platform version is ${v#v } but the launcher is $LAUNCHER_VERSION (rc 15); refusing: a launcher of another version can run the tests differently from maven" >&2;;
+    "s "*) echo "bb-test: $1 cannot be checked (rc 16): ${v#s }; refusing, the launcher is $LAUNCHER_VERSION" >&2; return 16;;
     *) echo "bb-test: the junit-platform version of $1 cannot be determined (rc 15): ${v#x }; refusing, the launcher is $LAUNCHER_VERSION" >&2;;
   esac
   return 15
