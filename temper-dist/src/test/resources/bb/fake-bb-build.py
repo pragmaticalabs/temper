@@ -3,6 +3,8 @@
 # $HOME/scenario.json, in reactor order. A module is "mutated" when <module>/src/f.txt contains MUT. A mutated module's first
 # testcase fails unless the module has a fault: zero (suite for the class, no testcases), otherclass (suite of another class),
 # stale (writes nothing). A module with a failed or skipped dependency is skipped; without -fae every module after a failure is.
+# Scenario "hang": true makes a build with any mutated module write .bb/start and never .bb/rc (a build that does not finish).
+# fresh.log: per build, the modules whose src/f.txt was modified within the last 60 s (what a real compile would redo).
 import json, os, sys, time
 
 co, args = sys.argv[1], sys.argv[2:]
@@ -15,7 +17,13 @@ open(b + "/start", "w").write(str(int(time.time())) + "\n")
 fae = "-fae" in args
 mutated = [m["name"] for m in sc["modules"] if "MUT" in open(f"{co}/{m['name']}/src/f.txt").read()]
 open(home + "/builds.log", "a").write("[" + ",".join(mutated) + "] " + str(fae).lower() + "\n")
+now = time.time()
+fresh = [m["name"] for m in sc["modules"] if now - os.stat(f"{co}/{m['name']}/src/f.txt").st_mtime < 60]
+open(home + "/fresh.log", "a").write("[" + ",".join(fresh) + "]\n")
 open(home + "/via.log", "a").write(os.environ.get("BB_VIA", "<unset>") + "\n")
+if sc.get("hang") and mutated:
+    print("ticket=T1")
+    sys.exit(0)
 bad, rc = set(), 0
 for m in sc["modules"]:
     n = m["name"]
