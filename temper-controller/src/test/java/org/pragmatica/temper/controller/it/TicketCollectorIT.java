@@ -18,7 +18,9 @@ import org.pragmatica.lang.utils.Causes;
 import org.pragmatica.temper.controller.config.ControllerConfig;
 import org.pragmatica.temper.controller.fleet.Fleet;
 import org.pragmatica.temper.controller.t3.LocalTicketTransport;
+import org.pragmatica.temper.controller.t3.TicketAlarms;
 import org.pragmatica.temper.controller.t3.TicketCollector;
+import org.pragmatica.temper.controller.t3.TicketEvents;
 import org.pragmatica.temper.controller.t3.TicketDiff;
 import org.pragmatica.temper.controller.t3.TicketError;
 import org.pragmatica.temper.controller.t3.TicketTransport;
@@ -296,7 +298,15 @@ class TicketCollectorIT {
     void aFailedOffqRead_betweenTwoSightings_isOneAlarm_andOnlyASuccessfulEmptyReadClears() {
         var replies = new java.util.concurrent.ConcurrentLinkedQueue<String>();
         TicketTransport transport = _ -> Promise.success(replies.poll());
-        var collector = collector(TicketDiff.NONE, target("h1", transport));
+        var collector = TicketCollector.ticketCollector(store.bb(),
+                                                        store.fleet(),
+                                                        fleet.writer(),
+                                                        List.of(target("h1", transport)),
+                                                        TemperJson.mapper(),
+                                                        now::get,
+                                                        TicketAlarms.round(TicketEvents.ticketEvents(),
+                                                                           TicketAlarms.Limits.DEFAULT),
+                                                        TicketCollector.READ_BOUND);
         var seen = ",\"offq\":[{\"pid\":200,\"startS\":" + (T0.getEpochSecond() - 1000)
                  + ",\"owner\":\"unowned\",\"cwd\":\"/h/x\"}]";
 
