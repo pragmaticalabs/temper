@@ -8,6 +8,9 @@ import java.util.Map;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.junit.jupiter.api.io.TempDir;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -45,6 +48,7 @@ class BbTestGuardIT {
         Files.writeString(co.resolve(".gitignore"), "target/\n.bb/\n");
         fakeMvn = BbFixtures.executable(tmp.resolve("bin").resolve("mvn"),
                                         "#!/usr/bin/env bash\n"
+                                       + "[ -z \"$MVN_ARGS\" ] || printf '%s\\n' \"$@\" > \"$MVN_ARGS\"\n"
                                        + "for m in lib app; do mkdir -p $m/target/classes $m/target/test-classes; echo \"class-$m\" > $m/target/classes/A.class; done\n"
                                        + "echo '/seed/junit.jar' > lib/target/bb-cp.txt\n"
                                        + "echo \"$PWD/lib/target/classes:${APP_EXTRA:-/seed/x.jar}\" > app/target/bb-cp.txt\n");
@@ -588,5 +592,77 @@ class BbTestGuardIT {
 
         Files.writeString(classes.resolve("X.class"), "x");
         assertRefused(resolvedRun(matching() + ":" + tmp.resolve("shaded")), "holds junit classes, which no manifest versions");
+    }
+
+    // ---- vbt7 F2: fail closed, never hang. A FIFO or device opened by java (or by the digest) blocks forever, so it is refused first ----
+
+    private Path fifo(String name) throws Exception {
+        var path = Files.createDirectories(tmp.resolve("special")).resolve(name);
+
+        assertThat(BbFixtures.run(List.of("mkfifo", path.toString()), Map.of(), null, null).rc()).isZero();
+
+        return path;
+    }
+
+    /// Probe: drop bb-test's pre-run entry check -> the .jar FIFOs hang the resolved check (cut by the timeout) and the bare FIFO and
+    /// /dev/zero reach java and pass (rc 0), all red.
+    @ParameterizedTest(name = "{0}")
+    @ValueSource(strings = {"fifo.jar", "fifo", "/dev/zero", "link-to-fifo.jar"})
+    @Timeout(60)
+    void preRun_aClasspathEntryThatIsAFifoOrADevice_isRefusedWithRc15_beforeJavaRuns(String entry) throws Exception {
+        Path path;
+
+        if (entry.startsWith("/")) {
+            path = Path.of(entry);
+        } else if (entry.startsWith("link-")) {
+            path = Files.createSymbolicLink(tmp.resolve(entry), fifo("target-fifo"));
+        } else {
+            path = fifo(entry);
+        }
+        var started = System.nanoTime();
+        var run = resolvedRun(matching() + ":" + path);
+        var seconds = (System.nanoTime() - started) / 1_000_000_000L;
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isEqualTo(15);
+        assertThat(seconds).as("refused within seconds, never a hang").isLessThan(20);
+        assertThat(run.stdout()).contains("bb-test: REFUSED (rc 15): unreadable classpath entry: " + path + " is a ",
+                                          "not a regular file or directory; java was not run")
+                                .doesNotContain("STAND-IN-JAVA-RAN");
+        assertThat(ticket()).contains("\nrefused=unreadable classpath entry: " + path, "\nverdict_source=guard\n").doesNotContain("verdict_source=java");
+        assertThat(Files.readString(co.resolve(".bb/refused"))).contains("unreadable classpath entry: " + path);
+        assertThat(co.resolve("app/target/bb-test-reports/T1")).as("java never ran: no report dir").doesNotExist();
+    }
+
+    /// A FIFO inside a recorded classes dir: the stale-jar guard digests every file there, and opening a FIFO blocks. It is refused (rc 12).
+    /// Probe: drop sha_file's regular-file check -> check blocks on the FIFO, cut by the timeout, red.
+    @Test
+    @Timeout(60)
+    void digest_aFifoInsideAClassesDir_isRefusedWithRc12_neverAHang() throws Exception {
+        recorded();
+        assertThat(BbFixtures.run(List.of("mkfifo", co.resolve("lib/target/classes/B.class").toString()), Map.of(), null, null).rc()).isZero();
+        var run = check();
+
+        assertThat(run.rc()).as(run.stderr()).isEqualTo(12);
+        assertThat(run.stderr()).contains("is not a regular file");
+    }
+
+    /// vbt7 F3: maven takes `-l<file>` attached as well as `-l <file>`; either would make the record's offline maven write over the build's
+    /// own log. Both forms (and --log-file=) are dropped; -llr (maven's --legacy-local-repository) is not a -l and is kept.
+    /// Probe: drop the attached -l clause -> -lattached.log reaches maven, red.
+    @Test
+    void record_dropsEveryFormOfTheLogFileOption_andKeepsLlr() throws Exception {
+        var args = tmp.resolve("mvn-args");
+        var run = BbFixtures.run(List.of(BbFixtures.OPS_BB.resolve("bb-cp-record").toString(), "record", co.toString(),
+                                         "-pl", "app", "-lattached.log", "-l", "separate.log", "--log-file=long.log", "--log-file", "long2.log", "-llr"),
+                                 Map.of("BB_TEST_MVN", fakeMvn.toString(), "MVN_ARGS", args.toString()),
+                                 null,
+                                 null);
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        var seen = Files.readAllLines(args);
+
+        assertThat(seen).contains("-pl", "app", "-llr")
+                        .noneMatch(a -> a.contains("log"))
+                        .doesNotContain("-l", "--log-file");
     }
 }

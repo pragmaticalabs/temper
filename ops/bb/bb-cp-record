@@ -17,7 +17,7 @@
 #   A symlink whose target leaves its module (the checkout, for the reactor root), or a directory symlink inside a classes dir, is refused
 #   too (rc 12): its content is not under any digest. record writes <co>/.bb/cp-record.pgid ("<pgid> <start>") while its maven runs, so
 #   bb-build can kill that process group (identity-checked) when a SIGKILL of record leaves maven behind.
-import hashlib, json, os, re, signal, subprocess, sys, xml.etree.ElementTree as ET
+import hashlib, json, os, re, signal, stat, subprocess, sys, xml.etree.ElementTree as ET
 
 REFUSED = 12
 SKIP_DIRS = {'.git', '.m2-local', '.bb', 'node_modules'}
@@ -32,6 +32,8 @@ def sha_file(path, bound):
             raise Unsafe('symlink %s resolves outside %s' % (path, bound))
         h.update(os.readlink(path).encode())
         return h.hexdigest()
+    if not stat.S_ISREG(os.stat(path).st_mode):   # vbt7 F2: opening a FIFO blocks forever; a device never ends
+        raise Unsafe('%s is not a regular file (a FIFO or device: opening it would block)' % path)
     with open(path, 'rb') as f:
         for block in iter(lambda: f.read(1 << 20), b''):
             h.update(block)
@@ -259,7 +261,7 @@ def check(co, module):
 
 # FORWARDED OPTIONS (CTO ruling on vbt5/vbt6, temper#72): every OPTION of the build reaches the record, so the recorded classpath is what
 # the build resolved (a -D, --define, -s, -gs, -P, -f, -pl, -am of the build line included); goals and phases are dropped (the record runs
-# its own). A listed option that takes a value takes the next word unless the value is attached; -l/--log-file and its value are dropped
+# its own). A listed option that takes a value takes the next word unless the value is attached; -l/--log-file and its value (separate or attached: -l<f>, --log-file=<f>) are dropped
 # (the record's log would replace the build's). An option this table does not know is forwarded alone: when it takes a separate value,
 # that value is dropped as a goal, so the option takes the record's own goal instead and the record fails (no record; bb-test refuses).
 VALUED = {'-pl', '--projects', '-f', '--file', '-s', '--settings', '-gs', '--global-settings', '-D', '--define', '-P',
@@ -275,8 +277,8 @@ def selection(args):
         if a in DROPPED:
             i += 2
             continue
-        if a.startswith('--log-file='):
-            pass
+        if a.startswith('--log-file=') or (a.startswith('-l') and len(a) > 2 and a != '-llr'):
+            pass   # the attached forms (--log-file=<f>, -l<f>) are dropped too; -llr is maven's --legacy-local-repository, not -l
         elif a in VALUED and i + 1 < len(args):
             out += [a, args[i + 1]]
             i += 1

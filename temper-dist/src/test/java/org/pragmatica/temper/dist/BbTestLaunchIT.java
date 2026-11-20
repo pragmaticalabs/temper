@@ -13,6 +13,9 @@ import java.util.stream.Stream;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.junit.jupiter.api.io.TempDir;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -369,6 +372,59 @@ class BbTestLaunchIT {
         assertThat(Files.readString(co.resolve("fx/target/bb-test-reports").resolve(run.id() + ".refused").resolve("console.txt")))
                   .as("java ran and its tests passed; that outcome is kept aside, not as the verdict").contains("java exit 0");
         assertRefusedEverywhere(run);
+    }
+
+    // ---- vbt7 F2: a FIFO or device on the classpath would block the REAL java before the resolved check; it is refused first (rc 15) ----
+
+    private Path special(String entry) throws Exception {
+        if (entry.startsWith("/")) {
+            return Path.of(entry);
+        }
+        var path = Files.createDirectories(dir.resolve("special")).resolve(entry);
+
+        assertThat(BbFixtures.run(List.of("mkfifo", path.toString()), Map.of(), null, null).rc()).isZero();
+
+        return path;
+    }
+
+    /// Probe: drop bb-test's pre-run entry check -> java blocks on the entry, the ticket never reaches done/, cut by the timeout, red.
+    @ParameterizedTest(name = "{0}")
+    @ValueSource(strings = {"fifo.jar", "fifo", "/dev/zero"})
+    @Timeout(90)
+    void aFifoOrDeviceOnTheClasspath_isRefusedWithinSeconds_neverHangsTheTicket(String entry) throws Exception {
+        var path = special(entry);
+        var extra = Map.of("RECORD_EXTRA", path.toString(), "BB_TEST_TICKET_LOG", dir.resolve("ticket-log.tsv").toString());
+
+        assertThat(build(extra).rc()).as(log()).isZero();
+        var started = System.nanoTime();
+        var run = bbTest(extra, "fx.CalcTest#passes");
+
+        assertThat((System.nanoTime() - started) / 1_000_000_000L).as("refused within seconds").isLessThan(30);
+        assertThat(run.rc()).as(run.doneText()).isEqualTo(15);
+        assertThat(run.doneText()).contains("\nrefused=unreadable classpath entry: " + path + " is a ", "\nverdict_source=guard\n")
+                                  .doesNotContain("verdict_source=java");
+        assertThat(bbResult(run.id()).stdout().lines().findFirst().orElseThrow()).contains("rc=15 verdict=REFUSED");
+    }
+
+    /// vbt7 F5: bb-build clears .bb/refused at the start of every run, so a refusal never outlives the next run on the checkout.
+    /// Probe m4: drop "$B/refused" from bb-build's __run rm -> .bb/refused survives the green re-run, red.
+    @Test
+    @Timeout(120)
+    void aRefusedTicket_thenAGreenRerunOnTheSameCheckout_leavesNoRefusal() throws Exception {
+        var extra = Map.of("RECORD_EXTRA", special("fifo.jar").toString());
+
+        assertThat(build(extra).rc()).as(log()).isZero();
+        var refused = bbTest(extra, "fx.CalcTest#passes");
+
+        assertThat(refused.rc()).as(refused.doneText()).isEqualTo(15);
+        assertThat(co.resolve(".bb/refused")).exists();
+        green();
+        assertThat(co.resolve(".bb/refused")).as("the green rebuild cleared the refusal").doesNotExist();
+        var rerun = bbTest(Map.of(), "fx.CalcTest#passes");
+
+        assertThat(rerun.rc()).as(rerun.doneText()).isZero();
+        assertThat(co.resolve(".bb/refused")).doesNotExist();
+        assertThat(bbResult(rerun.id()).stdout()).doesNotContain("REFUSED", "refused:");
     }
 
     // ---- the vbt5/vbt6 bypasses, built by REAL maven offline from this tree's .m2-local (a copy of the host seed ~/work/temper-m2-seed).

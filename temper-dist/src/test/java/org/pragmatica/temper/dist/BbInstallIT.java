@@ -221,6 +221,7 @@ class BbInstallIT {
         assertThat(pin("BB_BUILD_PREHELP")).isEqualTo(BbFixtures.md5(prev("bb-build.prehelp")));
         assertThat(pin("BB_BUILD_PRERESULT")).isEqualTo(BbFixtures.md5(prev("bb-build.preresult")));
         assertThat(pin("BB_RESULT_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-result")));
+        assertThat(pin("BB_RESULT_PRECP")).isEqualTo(BbFixtures.md5(prev("bb-result.precp")));
     }
 
     /// The bb-test lane helpers go in before bb-build (which calls bb-cp-record); a host holding a stranger's bb-test is refused, naming the one pin and
@@ -711,6 +712,65 @@ class BbInstallIT {
                                          + " after=" + pin("BB_MUTATE_NEW"));
         assertThat(tools.resolve("bb-mutate")).hasBinaryContent(Files.readAllBytes(OPS_BB.resolve("bb-mutate")));
         assertThat(tools.resolve("bb-mutate.bak-" + pin("BB_MUTATE_OLD"))).hasBinaryContent(prev("bb-mutate"));
+    }
+
+    /// The class behind vbt7 P1: a pin set that refuses what the hosts run today blocks every install. `bb/live-md5s` holds the ~/tools md5s
+    /// read from cloudbb-5 on 2026-11-20, one line per FILES entry. A host is built holding exactly that set (each md5 resolved to the repo
+    /// file or a vendored `.prev`), and the install must accept it: exit 0, every live file either unchanged or replaced and backed up.
+    /// Mutation: drop the bb-result case from accepted_of (bb-result then accepts only BB_RESULT_NEW) -> refused bb-result, exit 65, red.
+    @Test
+    void aHostAtTodaysLiveMd5s_isAcceptedForEveryFile_andUpgraded() throws Exception {
+        var live = new java.util.LinkedHashMap<String, String>();
+
+        try (var in = BbInstallIT.class.getResourceAsStream("/bb/live-md5s")) {
+            assertThat(in).as("test resource bb/live-md5s").isNotNull();
+            new String(in.readAllBytes()).lines()
+                                         .filter(l -> !l.isBlank() && !l.startsWith("#"))
+                                         .map(l -> l.split(" "))
+                                         .forEach(f -> live.put(f[0], f[1]));
+        }
+
+        var files = Pattern.compile("(?m)^FILES=\\(([^)]*)\\)").matcher(Files.readString(INSTALL));
+
+        assertThat(files.find()).as("FILES=(...) in install-bb-fields.sh").isTrue();
+        assertThat(live.keySet()).as("bb/live-md5s names every FILES entry, and only those")
+                                 .containsExactlyInAnyOrder(files.group(1).trim().split("\\s+"));
+
+        var candidates = new HashMap<String, byte[]>();
+
+        try (Stream<Path> walk = Files.list(Path.of(BbInstallIT.class.getResource("/bb").toURI()))) {
+            for (var path : walk.filter(p -> p.getFileName().toString().endsWith(".prev")).toList()) {
+                var bytes = Files.readAllBytes(path);
+                candidates.putIfAbsent(BbFixtures.md5(bytes), bytes);
+            }
+        }
+        for (var f : live.keySet()) {
+            var bytes = Files.readAllBytes(OPS_BB.resolve(f));
+            candidates.put(BbFixtures.md5(bytes), bytes);
+        }
+
+        var tools = host("h-live");
+
+        for (var e : live.entrySet()) {
+            if (e.getValue().equals("absent")) {
+                continue;
+            }
+            assertThat(candidates).as("live " + e.getKey() + " " + e.getValue() + " is the repo file or a vendored .prev").containsKey(e.getValue());
+            Files.write(tools.resolve(e.getKey()), candidates.get(e.getValue()));
+        }
+
+        var run = install("builder@h-live");
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        for (var e : live.entrySet()) {
+            var after = BbFixtures.md5(OPS_BB.resolve(e.getKey()));
+            var expected = e.getValue().equals(after)
+                           ? "unchanged builder@h-live " + e.getKey()
+                           : "installed builder@h-live " + e.getKey() + " before=" + e.getValue() + " after=" + after;
+
+            assertThat(run.stdout().lines().toList()).as(e.getKey()).anyMatch(l -> l.startsWith(expected));
+            assertThat(tools.resolve(e.getKey())).hasBinaryContent(Files.readAllBytes(OPS_BB.resolve(e.getKey())));
+        }
     }
 
     /// c4/d1 shape: a host already holding the live set is accepted and nothing is written.

@@ -19,6 +19,8 @@
 # LAUNCHER_VERSION 1.N.P, a jupiter or vintage jar 5.N.P. FAIL CLOSED: no such jar on the classpath, a jar that cannot be read, a classpath
 # .jar that does not exist, a junit jar whose name or version the manifest does not give, a classpath directory holding org/junit/
 # {platform,jupiter,vintage}/ (no manifest versions it) = refused; a missing non-.jar entry (an absent target/classes) holds nothing and is skipped. No build config is parsed for it.
+# BEFORE the run (vbt7 F2, never hang): a classpath entry that exists but is neither a regular file nor a directory (a FIFO, a device, or a
+# symlink resolving to one) is refused the same way (rc 15), java not run: java would block opening it.
 # A REFUSAL REPLACES THE VERDICT: rc 15 (the ticket's rc=, so .bb/rc), the ticket gets refused=<reason naming the resolved versions> and
 # verdict_source=guard (never verdict_source=java), .bb/refused holds the same reason, the ticket log's state column reads refused, bb-result
 # prints it; the run's console output and per-run count lines are not printed, and its report dir is renamed <ticket>.refused.
@@ -107,6 +109,15 @@ if [ "${1:-}" = __launch ]; then
   # verdict_source (vbt4 L2): rc 12/14/15 from a guard and the same number from java are told apart on the ticket, not by the number.
   source_is() { ( flock 9; [ ! -f "$Q/running/$TICKET" ] || echo "verdict_source=$1" >> "$Q/running/$TICKET" ) 9> "$Q/.lock"; }
   guard() { "$@" && return 0; local r=$?; source_is guard; exit "$r"; }
+  refuse() {   # rc 15: the refusal replaces the verdict on every surface (header: RESOLVED JUNIT CHECK)
+    local why=${1//[$'\n\r']/ }
+    ( flock 9; [ ! -f "$Q/running/$TICKET" ] || printf 'refused=%s\nverdict_source=guard\n' "$why" >> "$Q/running/$TICKET" ) 9> "$Q/.lock"
+    printf '%s\n' "$why" > "$CO/.bb/refused"
+    if [ -z "$OUT" ]; then echo "bb-test: REFUSED (rc 15): $why; java was not run"; exit 15; fi
+    rm -rf "$BASE.refused"; mv "$BASE" "$BASE.refused"; mv "$OUT" "$BASE.refused/console.txt"
+    echo "bb-test: REFUSED (rc 15): $why; this run's test outcome is not a verdict (kept in $BASE.refused)"
+    exit 15
+  }
   JVM=(); SELS=()
   for a in "$@"; do
     case "$a" in
@@ -119,6 +130,15 @@ if [ "${1:-}" = __launch ]; then
   guard launcher_ok
   JAVA=${BB_TEST_JAVA:-${JAVA_HOME:-/usr/lib/jvm/java-25-openjdk-amd64}/bin/java}
   CP="$CO/$MOD/target/test-classes:$CO/$MOD/target/classes:$(cat "$CO/.bb/cp/${MOD//\//__}.cp")"
+  # vbt7 F2 (fail closed, never hang): java opens every classpath entry, so a FIFO or device entry (or a symlink to one) would block it
+  # before the resolved check is ever reached. Such an entry is refused here, before java runs.
+  OUT=
+  IFS=: read -r -a CPE <<< "$CP"
+  for e in ${CPE[@]+"${CPE[@]}"}; do
+    if [ -e "$e" ] && [ ! -f "$e" ] && [ ! -d "$e" ]; then
+      refuse "unreadable classpath entry: $e is a $(stat -L -c %F -- "$e" 2> /dev/null || echo 'special file'), not a regular file or directory"
+    fi
+  done
   RC=0; RD=false
   for j in ${JVM[@]+"${JVM[@]}"}; do [ "$j" != -Daether.requireDocker=true ] || RD=true; done
   BASE=$CO/$MOD/target/bb-test-reports/$TICKET; mkdir -p "$BASE"
@@ -135,14 +155,7 @@ if [ "${1:-}" = __launch ]; then
     [ "$r" -le "$RC" ] || RC=$r
   done
   JUNIT=$(resolved_junit "$CP")
-  if [ "${JUNIT%% *}" != v ]; then   # the refusal replaces the verdict on every surface (header: RESOLVED JUNIT CHECK)
-    WHY="junit version: ${JUNIT#x }; the launcher is junit-platform $LAUNCHER_VERSION"; WHY=${WHY//[$'\n\r']/ }
-    ( flock 9; [ ! -f "$Q/running/$TICKET" ] || printf 'refused=%s\nverdict_source=guard\n' "$WHY" >> "$Q/running/$TICKET" ) 9> "$Q/.lock"
-    printf '%s\n' "$WHY" > "$CO/.bb/refused"
-    rm -rf "$BASE.refused"; mv "$BASE" "$BASE.refused"; mv "$OUT" "$BASE.refused/console.txt"
-    echo "bb-test: REFUSED (rc 15): $WHY; this run's test outcome is not a verdict (kept in $BASE.refused)"
-    exit 15
-  fi
+  [ "${JUNIT%% *}" = v ] || refuse "junit version: ${JUNIT#x }; the launcher is junit-platform $LAUNCHER_VERSION"
   source_is java
   cat "$OUT"; rm -f "$OUT"
   echo "bb-test: resolved junit on the test classpath: ${JUNIT#v }"
