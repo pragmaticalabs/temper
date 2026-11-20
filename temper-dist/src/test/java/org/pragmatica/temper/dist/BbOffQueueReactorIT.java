@@ -25,7 +25,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 /// [#offQueueReactors_areListedWithOwnerAndFullCwd_theQueuesAndContainersAreNot] red; drop the cgroup/container test ->
 /// [#aTemperJobContainer_isNotOffQueue_andNeitherIsAQueueBuildContainer] red; break the owner prefix rule (`%%-*` -> `##*-`) ->
 /// [#theOwner_isTheCheckoutPrefix_elseUnowned] red; stop `bb-tickets` printing `offq` ->
-/// [#bbTickets_carriesTheLaunchersInItsTrailer_escaped_andNothingWhenThereAreNone] red.
+/// [#bbTickets_carriesTheLaunchersInItsTrailer_escaped_andAnEmptyListWhenThereAreNone_noKeyWhenTheReadFails] red.
 class BbOffQueueReactorIT {
     private static final String ID_TEMPER = "a".repeat(64);
     private static final String ID_QUEUE = "b".repeat(64);
@@ -202,7 +202,7 @@ class BbOffQueueReactorIT {
     }
 
     @Test
-    void bbTickets_carriesTheLaunchersInItsTrailer_escaped_andNothingWhenThereAreNone() throws Exception {
+    void bbTickets_carriesTheLaunchersInItsTrailer_escaped_andAnEmptyListWhenThereAreNone_noKeyWhenTheReadFails() throws Exception {
         for (var sub : List.of("running", "waiting", "done")) {
             Files.createDirectories(dir.resolve("q").resolve(sub));
         }
@@ -213,7 +213,24 @@ class BbOffQueueReactorIT {
                                   null);
 
         assertThat(none.rc()).as(none.stderr()).isZero();
-        assertThat(none.stdout()).as("no launcher: the trailer an old reader always saw").doesNotContain("offq");
+        assertThat(none.stdout().lines().toList().getLast()).as("a successful read that found none says so")
+                  .endsWith(",\"offq\":[]}");
+        var stub = Files.createDirectories(dir.resolve("stub"));
+
+        Files.copy(BbFixtures.OPS_BB.resolve("bb-tickets"), stub.resolve("bb-tickets"));
+        Files.setPosixFilePermissions(stub.resolve("bb-tickets"),
+                                      java.nio.file.attribute.PosixFilePermissions.fromString("rwxr-xr-x"));
+        Files.writeString(stub.resolve("bb-queue"), "#!/bin/sh\nexit 1\n");
+        Files.setPosixFilePermissions(stub.resolve("bb-queue"),
+                                      java.nio.file.attribute.PosixFilePermissions.fromString("rwxr-xr-x"));
+        var failed = BbFixtures.run(List.of(stub.resolve("bb-tickets").toString()),
+                                    env,
+                                    dir,
+                                    null);
+
+        assertThat(failed.rc()).as(failed.stderr()).isZero();
+        assertThat(failed.stdout().lines().toList().getLast()).as("a failed read has no offq key, so the controller keeps its list")
+                  .doesNotContain("offq");
         var odd = dir.resolve("a\"b\\c d");
 
         processes("  200     1 9000 /usr/bin/java -classpath boot " + marker);

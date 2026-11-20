@@ -41,8 +41,9 @@ import static org.pragmatica.lang.Option.option;
 ///
 /// `off-queue-reactor` fires once per launcher the host's listing names as not started by the queue (`offq`), keyed by
 /// `pid:startS` so a reused pid is a new launcher; `lingering-reactor` once when that launcher's age (`at − startS`) reaches
-/// [#LINGERING_REACTOR_MIN]. Both marks are cleared when the launcher is no longer listed. A listing without `offq` (an older
-/// `bb-tickets`, or one whose `bb-queue offq` failed that round) lists none, so the marks clear and re-fire when it returns.
+/// [#LINGERING_REACTOR_MIN]. Both marks are cleared when the launcher is no longer listed. A listing whose `offq` was not
+/// read (an older `bb-tickets`, or `bb-queue offq` failed or timed out that round) never reaches here as "none": the store
+/// carries the baseline's list forward, so only a successful read that lacks the launcher clears its marks.
 public final class TicketAlarms {
     /// `queue-wait` fires again here, when above the configured limit.
     static final int QUEUE_WAIT_SECOND_MIN = 180;

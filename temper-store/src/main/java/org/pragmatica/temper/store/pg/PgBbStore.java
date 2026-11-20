@@ -94,8 +94,33 @@ record PgBbStore(Db db) implements BbStore {
                   .flatMap(_ -> snapshotIn(tx, host))
                   .flatMap(baseline -> baseline.filter(known -> !known.takenAt()
                                                                       .isBefore(now))
-                                               .fold(() -> applied(tx, host, now, listing, json, round, baseline),
+                                               .fold(() -> withOffq(listing, json, baseline).async()
+                                                                   .flatMap(carried -> applied(tx,
+                                                                                               host,
+                                                                                               now,
+                                                                                               carried.listing(),
+                                                                                               carried.json(),
+                                                                                               round,
+                                                                                               baseline)),
                                                      known -> stale(host, now, known)));
+    }
+
+    private record Carried(Listing listing, Encoded json) {}
+
+    /// A listing whose host did not report `offq` keeps the baseline's list (a failed `bb-queue offq` is not a launcher leaving).
+    private static Result<Carried> withOffq(Listing listing, Encoded json, Option<BbSnapshot> baseline) {
+        return listing.offqRead() || baseline.isEmpty()
+               ? Result.success(new Carried(listing, json))
+               : baseline.fold(() -> Result.success(new Carried(listing, json)),
+                               known -> Json.write(known.offq())
+                                            .mapError(Rows.corrupt("bb_snapshot"))
+                                            .map(offq -> new Carried(Listing.listing(listing.queue(),
+                                                                                     listing.tickets(),
+                                                                                     listing.hostAt(),
+                                                                                     listing.skewS(),
+                                                                                     known.offq()),
+                                                                     new Encoded(json.tickets(),
+                                                                                 offq))));
     }
 
     /// Snapshot, collect state and source first, then the marks, then the events last (order lock).

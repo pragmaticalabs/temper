@@ -98,16 +98,13 @@ public sealed interface Conditions {
         return ! PORTGROUP_LONG.equals(kind) && !OFF_QUEUE_REACTOR.equals(kind);
     }
 
-    /// `<host> <kind> <ticket|-> age=<n>m limit=<n>m`; `days=<d>` for host-retiring and `skew=<s>s` for clock-skew,
-    /// and `pid=<n> owner=<o> cwd=<path>` (last: a path may hold spaces) for the off-queue kinds, stand where the alarm has them (each figure is printed when the alarm carries it).
+    /// `<host> <kind> <ticket|-> age=<n>m limit=<n>m`; `days=<d>` for host-retiring and `skew=<s>s` for clock-skew
+    /// stand where the alarm has them (each figure is printed when the alarm carries it).
     private static String alarmLine(String host, Alarm alarm) {
         var figures = Stream.of(alarm.ageMin().map(age -> "age=" + age + "m"),
                                 alarm.limitMin().map(limit -> "limit=" + limit + "m"),
                                 alarm.days().map(days -> "days=" + days),
-                                alarm.skewS().map(skew -> "skew=" + skew + "s"),
-                                alarm.pid().map(pid -> "pid=" + pid),
-                                alarm.owner().map(owner -> "owner=" + owner),
-                                alarm.cwd().map(cwd -> "cwd=" + cwd))
+                                alarm.skewS().map(skew -> "skew=" + skew + "s"))
                             .flatMap(Option::stream);
 
         return Stream.concat(Stream.of(host,

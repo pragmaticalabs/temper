@@ -717,9 +717,9 @@ class AlarmCheckTest {
 
     private static String reactorAlarm(String kind, String limit) {
         return "{\"kind\":\"" + kind
-             + "\",\"ticket\":null,\"ageMin\":45,\"limitMin\":" + limit
+             + "\",\"ticket\":\"pid=77 owner=unowned cwd=/home/aether/v3455d dir\",\"ageMin\":45,\"limitMin\":" + limit
              + ",\"days\":null,\"skewS\":null,"
-             + "\"firedAt\":\"2026-10-13T09:55:00Z\",\"pid\":77,\"owner\":\"unowned\",\"cwd\":\"/home/aether/v3455d dir\"}";
+             + "\"firedAt\":\"2026-10-13T09:55:00Z\"}";
     }
 
     /// `off-queue-reactor` is seen the moment a hand-run maven starts, so alone it does not open `host-alarms`; its escalation
@@ -735,7 +735,7 @@ class AlarmCheckTest {
                                                            reactorAlarm("lingering-reactor", "30"))));
 
         assertThat(both.conditions()).contains(Condition.firing(AlarmCode.HOST_ALARMS,
-                                                                "bigboy off-queue-reactor - age=45m pid=77 owner=unowned cwd=/home/aether/v3455d dir\n"
-                                                               + "bigboy lingering-reactor - age=45m limit=30m pid=77 owner=unowned cwd=/home/aether/v3455d dir\n\n/fleet/alarms"));
+                                                                "bigboy off-queue-reactor pid=77 owner=unowned cwd=/home/aether/v3455d dir age=45m\n"
+                                                               + "bigboy lingering-reactor pid=77 owner=unowned cwd=/home/aether/v3455d dir age=45m limit=30m\n\n/fleet/alarms"));
     }
 }

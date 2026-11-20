@@ -124,9 +124,7 @@ class OffQueueReactorAlarmsTest {
         var listed = FleetAlarms.view(now, expected, List.of(holding), List.of(), rows).hosts().getFirst().alarms();
 
         assertThat(listed).extracting(Alarm::kind).containsExactly(BbAlarm.OFF_QUEUE_REACTOR, BbAlarm.LINGERING_REACTOR);
-        assertThat(listed).extracting(Alarm::pid).containsOnly(some(77L));
-        assertThat(listed).extracting(Alarm::owner).containsOnly(some("unowned"));
-        assertThat(listed).extracting(Alarm::cwd).containsOnly(some(CWD));
+        assertThat(listed).extracting(Alarm::ticket).containsOnly(some("pid=77 owner=unowned cwd=" + CWD));
         assertThat(listed).extracting(Alarm::ageMin).containsOnly(some(45));
         assertThat(listed).extracting(Alarm::limitMin).containsExactly(none(), some(30));
         var left = BbSnapshot.bbSnapshot(HOST,
@@ -144,4 +142,51 @@ class OffQueueReactorAlarmsTest {
                                     rows).hosts().getFirst().alarms()).as("a mark whose launcher is gone from the latest snapshot is not current")
                   .isEmpty();
     }
+
+    /// The `GET /fleet/alarms` reply of this controller decodes with the strict decoder (`FAIL_ON_UNKNOWN_PROPERTIES`) of a CLI
+    /// that predates the off-queue kinds: `MainView` is the 7-field `FleetAlarmsView` of ffb423990, frozen here. So the CLI need not
+    /// roll out first. Mutation: add a field to `FleetAlarmsView.Alarm` -> red (unknown property).
+    @Test
+    void theReplyWithReactorAlarms_decodesWithThePreReactorViewShape() {
+        var now = Instant.ofEpochSecond(AT + 20);
+        var launcher = BbOffQueue.bbOffQueue(77, AT - 45 * 60, "unowned", CWD);
+        var rows = List.of(BbAlarm.bbAlarm(HOST, BbAlarm.OFF_QUEUE_REACTOR, launcher.key(), "0", now),
+                           BbAlarm.bbAlarm(HOST, BbAlarm.LINGERING_REACTOR, launcher.key(), "30", now));
+        var snapshot = BbSnapshot.bbSnapshot(HOST,
+                                             now,
+                                             some("present"),
+                                             List.of(),
+                                             some(Instant.ofEpochSecond(AT)),
+                                             some(0),
+                                             List.of(launcher));
+        var view = FleetAlarms.view(now,
+                                    List.of(TicketRoutes.Expected.expected(HOST, "hostlink", Option.<Instant> none())),
+                                    List.of(snapshot),
+                                    List.of(),
+                                    rows);
+        var json = TemperJson.mapper().writeAsString(view).unwrap();
+        var old = TemperJson.mapper().readString(json, MainView.class).unwrap();
+
+        assertThat(old.hosts().getFirst().alarms()).extracting(MainAlarm::kind)
+                  .containsExactly(BbAlarm.OFF_QUEUE_REACTOR, BbAlarm.LINGERING_REACTOR);
+        assertThat(old.hosts().getFirst().alarms().getFirst().ticket()).isEqualTo(some("pid=77 owner=unowned cwd=" + CWD));
+    }
+
+    record MainAlarm(String kind,
+                     Option<String> ticket,
+                     Option<Integer> ageMin,
+                     Option<Integer> limitMin,
+                     Option<Integer> days,
+                     Option<Integer> skewS,
+                     Instant firedAt) {}
+
+    record MainHost(String host,
+                    String status,
+                    Option<Instant> takenAt,
+                    Option<Instant> hostAt,
+                    Option<Integer> skewS,
+                    Option<Instant> retireAt,
+                    List<MainAlarm> alarms) {}
+
+    record MainView(int v, Instant asOf, List<MainHost> hosts) {}
 }

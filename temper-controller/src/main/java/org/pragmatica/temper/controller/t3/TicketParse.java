@@ -33,12 +33,12 @@ public final class TicketParse {
     private sealed interface Line {
         record Ticket(BbTicket ticket) implements Line {}
 
-        record Trailer(int count, String queue, long at, List<BbOffQueue> offq) implements Line {}
+        record Trailer(int count, String queue, long at, List<BbOffQueue> offq, boolean offqRead) implements Line {}
     }
 
     /// A proven reply: the tickets, the trailer's `queue` (`present` | `absent`), its `at` (epoch seconds, host clock) and its
     /// optional `offq` (the host's off-queue maven launchers).
-    public record Reply(List<BbTicket> tickets, String queue, Instant at, List<BbOffQueue> offq) {}
+    public record Reply(List<BbTicket> tickets, String queue, Instant at, List<BbOffQueue> offq, boolean offqRead) {}
 
     private TicketParse() {}
 
@@ -72,12 +72,12 @@ public final class TicketParse {
                            .toList();
         var trailers = lines.size() - tickets.size();
 
-        return lines.isEmpty() || !(lines.getLast() instanceof Line.Trailer(var count, var queue, var at, var offq))
+        return lines.isEmpty() || !(lines.getLast() instanceof Line.Trailer(var count, var queue, var at, var offq, var offqRead))
                ? TicketError.Truncated.TRUNCATED.result()
                : trailers != 1
                  ? TicketError.Malformed.malformed(lines.size()).result()
                  : count == tickets.size()
-                   ? Result.success(new Reply(tickets, queue, Instant.ofEpochSecond(at), offq))
+                   ? Result.success(new Reply(tickets, queue, Instant.ofEpochSecond(at), offq, offqRead))
                    : TicketError.Truncated.TRUNCATED.result();
     }
 
@@ -112,7 +112,8 @@ public final class TicketParse {
                ? Result.success(new Line.Trailer(count.intValue(),
                                                  queue.stringValue(),
                                                  node.path("at").longValue(),
-                                                 offQueue(node.path("offq"))))
+                                                 offQueue(node.path("offq")),
+                                                 node.path("offq").isArray()))
                : TicketError.Malformed.malformed(0).result();
     }
 

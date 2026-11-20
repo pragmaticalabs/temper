@@ -273,6 +273,53 @@ class TicketCollectorIT {
         assertThat(store.bb().collects().await(Pg.WAIT).unwrap().getFirst().failingSince()).isEqualTo(none());
     }
 
+    // ---- off-queue launchers across a failed `bb-queue offq` ------------------------------------------------------
+    private static String trailer(String offq) {
+        return "{\"v\":1,\"end\":true,\"count\":0,\"queue\":\"present\",\"at\":1793900000" + offq + "}\n";
+    }
+
+    private List<BbAlarm> reactorMarks() {
+        return store.bb()
+                    .alarms()
+                    .await(Pg.WAIT)
+                    .unwrap()
+                    .stream()
+                    .filter(row -> BbAlarm.OFF_QUEUE_REACTOR.equals(row.kind()))
+                    .toList();
+    }
+
+    /// A round whose `bb-queue offq` failed (the trailer has no `offq` key) sits between two sightings of one launcher: the
+    /// marks and the snapshot's list are kept, so the launcher is one alarm, not two (a re-fire would open a second
+    /// `host-alarms` issue). Only a successful read that lacks the launcher (`"offq":[]`) clears the marks.
+    /// Mutation: carry nothing forward for an unread `offq` (treat it as none) -> the mark's `firedAt` is the third round's, red.
+    @Test
+    void aFailedOffqRead_betweenTwoSightings_isOneAlarm_andOnlyASuccessfulEmptyReadClears() {
+        var replies = new java.util.concurrent.ConcurrentLinkedQueue<String>();
+        TicketTransport transport = _ -> Promise.success(replies.poll());
+        var collector = collector(TicketDiff.NONE, target("h1", transport));
+        var seen = ",\"offq\":[{\"pid\":200,\"startS\":1793899000,\"owner\":\"unowned\",\"cwd\":\"/h/x\"}]";
+
+        replies.add(trailer(seen));
+        collector.round().await(Pg.WAIT).unwrap();
+        var fired = reactorMarks();
+
+        assertThat(fired).hasSize(1);
+        replies.add(trailer(""));
+        now.set(T0.plusSeconds(30));
+        collector.round().await(Pg.WAIT).unwrap();
+        assertThat(reactorMarks()).as("a failed read keeps the marks").isEqualTo(fired);
+        assertThat(store.bb().snapshot("h1").await(Pg.WAIT).unwrap().unwrap().offq()).as("and the snapshot's list")
+                  .hasSize(1);
+        replies.add(trailer(seen));
+        now.set(T0.plusSeconds(60));
+        collector.round().await(Pg.WAIT).unwrap();
+        assertThat(reactorMarks()).as("the launcher's second sighting is not a second alarm").isEqualTo(fired);
+        replies.add(trailer(",\"offq\":[]"));
+        now.set(T0.plusSeconds(90));
+        collector.round().await(Pg.WAIT).unwrap();
+        assertThat(reactorMarks()).as("a successful read without it clears").isEmpty();
+    }
+
     // ---- stop, the read bound, a store failure ---------------------------------------------------------------
     /// `stop` completes only when the read in flight has been recorded (no store write after the caller closes the
     /// store), and a round after `stop` reads nothing. Mutations: `stop` returns at once → red; the stopped flag is

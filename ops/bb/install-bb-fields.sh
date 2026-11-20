@@ -64,7 +64,7 @@ readonly BB_JBCTBOOT_NEW=3e5396ecee48b99949456cf805df1e60
 readonly BB_TICKETS_OLD=472cd816644fe0ee0902b8da3d33de8e   # before the per-ticket progressAt (issue #10)
 readonly BB_TICKETS_PRE31=e1aeba98541ba781295001f956b08c8d   # live since 2026-11-12: drops a ticket key with a capital letter
 readonly BB_TICKETS_PREOFFQ=6174119f0cd567c5dc462d1e063c6214   # the #31 version: no `offq` in the trailer (2026-11-20)
-readonly BB_TICKETS_NEW=66cf14514cad8d7c4034379216752a00
+readonly BB_TICKETS_NEW=de3cf1c430b8bff3778b44161d3640bf
 readonly BB_HOLD_OLD=0bc2401b6e94fd05b66e1df04387e2ac   # the 2026-11-09 host snapshot
 readonly BB_HOLD_NEW=3561bb8e22fc2f7f3e98dc795f31eecb
 readonly BB_WAIT_PRERC=da248f0b4f9248f2bfed64330b3ca66e   # live on all four hosts from 2026-11-12: the ticket rc= is read from .bb/rc (replaced by the exit-status record)

@@ -35,15 +35,22 @@ public interface BbStore {
 
     /// One proven `bb-tickets` reply: the trailer's `queue` (`present` | `absent`), the ticket lines in output order, the
     /// trailer's `at` (host clock) and the round's measured skew in whole seconds (positive = host ahead).
-    /// `offq` is the trailer's off-queue launchers (empty when the host reports none or an older `bb-tickets`).
-    record Listing(String queue, List<BbTicket> tickets, Instant hostAt, int skewS, List<BbOffQueue> offq) {
+    /// `offq` is the trailer's off-queue launchers; `offqRead` is false when the host did not report the list (an older
+    /// `bb-tickets`, or its `bb-queue offq` failed that round): the store then carries the baseline's `offq` forward, so a
+    /// failed read is not a launcher leaving.
+    record Listing(String queue,
+                   List<BbTicket> tickets,
+                   Instant hostAt,
+                   int skewS,
+                   List<BbOffQueue> offq,
+                   boolean offqRead) {
         public Listing {
             tickets = List.copyOf(tickets);
             offq = List.copyOf(offq);
         }
 
         public static Listing listing(String queue, List<BbTicket> tickets, Instant hostAt, int skewS) {
-            return new Listing(queue, tickets, hostAt, skewS, List.of());
+            return new Listing(queue, tickets, hostAt, skewS, List.of(), true);
         }
 
         public static Listing listing(String queue,
@@ -51,7 +58,11 @@ public interface BbStore {
                                       Instant hostAt,
                                       int skewS,
                                       List<BbOffQueue> offq) {
-            return new Listing(queue, tickets, hostAt, skewS, offq);
+            return new Listing(queue, tickets, hostAt, skewS, offq, true);
+        }
+
+        public static Listing listingOffqUnread(String queue, List<BbTicket> tickets, Instant hostAt, int skewS) {
+            return new Listing(queue, tickets, hostAt, skewS, List.of(), false);
         }
     }
 
