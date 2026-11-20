@@ -92,8 +92,9 @@ class BbQueueLedgerIT {
         reapEverythingUnder(dir);
     }
 
-    /// A waiter whose ticket is already `done` is still finishing (ledger removal, .bb files) while the temp directory is deleted: JUnit then fails
-    /// to close the extension context with DirectoryNotEmpty on the root (CI, 2026-11-20). Nothing started under <root> may outlive the test.
+    /// Nothing started under <root> may outlive the test: [#aLedgerLaunch_isNeverAnOffQueueReactor_evenAfterItsWaiterIsKilled] leaves an
+    /// orphaned job subshell that writes <co>/.bb/end and .bb/rc once its launch exits. The CI DirectoryNotEmpty on <root> (run 44763520377)
+    /// was not this: it was the waiter's ticket-log append after the done move, fixed in to_done (bb-queue-lib.sh, log before the move).
     private static void reapEverythingUnder(Path root) throws Exception {
         var alive = (Supplier<List<Long>>) () -> {
             try {
@@ -344,22 +345,35 @@ class BbQueueLedgerIT {
         assertThat(Files.readString(queue.resolve("done").resolve(second))).contains("\nrc=0\n");
     }
 
-    /// A bb-cp-record stand-in that starts a "maven" in its own session, names it in .bb/cp-record.pgid (with its real start time, or
-    /// `1` when `staleStart`), writes its pid to <dir>/victim.pid and then SIGKILLs itself, as `timeout -k` would.
-    private long sigkilledRecord(boolean staleStart) throws Exception {
+    /// A bb-cp-record stand-in that starts a "maven" in its own session whose group also holds a NON-leader child (as maven's surefire
+    /// forks are), names the leader in .bb/cp-record.pgid (with its real start time, or `1` when `staleStart`), writes the leader's and
+    /// the child's pids to <dir>/victim.pid and <dir>/victim-child.pid, and then SIGKILLs itself, as `timeout -k` would. Returns
+    /// {leader, child}. Probe (vbt5 M1): `kill -KILL -- "$PG"` (the pid, not the group) leaves the child alive -> red.
+    private long[] sigkilledRecord(boolean staleStart) throws Exception {
         BbFixtures.executable(tools.resolve("bb-cp-record"),
-                              "#!/bin/bash\nco=$2\nsetsid sleep 600 < /dev/null > /dev/null 2>&1 &\np=$!\n"
-                             + "for _ in $(seq 50); do [ \"$(ps -o pgid= -p $p | tr -d ' ')\" = \"$p\" ] && break; sleep 0.1; done\n" + (staleStart
-                                                                                                                                         ? "s=1\n"
-                                                                                                                                         : "s=$(sed 's/^.*) //' /proc/$p/stat | cut -d' ' -f20)\n")
+                              "#!/bin/bash\nco=$2\n"
+                             + "setsid bash -c 'sleep 600 & echo $! > \"$HOLD_DIR/victim-child.pid\"; wait' < /dev/null > /dev/null 2>&1 &\np=$!\n"
+                             + "for _ in $(seq 50); do [ \"$(ps -o pgid= -p $p | tr -d ' ')\" = \"$p\" ] && [ -s \"$HOLD_DIR/victim-child.pid\" ] && break; sleep 0.1; done\n"
+                             + (staleStart
+                                ? "s=1\n"
+                                : "s=$(sed 's/^.*) //' /proc/$p/stat | cut -d' ' -f20)\n")
                              + "echo \"$p $s\" > \"$co/.bb/cp-record.pgid\"\necho $p > \"$HOLD_DIR/victim.pid\"\nkill -KILL $$\n");
         var id = enqueue("quick");
 
         assertThat(within(30_000, () -> in("done", id))).as("the ticket finished").isTrue();
         assertThat(Files.readString(queue.resolve("done").resolve(id))).as("the record never changes the build's rc")
                   .contains("\nrc=0\n");
+        var leader = Long.parseLong(Files.readString(dir.resolve("victim.pid")).strip());
+        var child = Long.parseLong(Files.readString(dir.resolve("victim-child.pid")).strip());
 
-        return Long.parseLong(Files.readString(dir.resolve("victim.pid")).strip());
+        assertThat(child).as("the child is not the group leader").isNotEqualTo(leader);
+        return new long[]{leader, child};
+    }
+
+    private static void destroy(long... pids) {
+        for (var pid : pids) {
+            ProcessHandle.of(pid).ifPresent(ProcessHandle::destroyForcibly);
+        }
     }
 
     private String buildLog(String name) throws IOException {
@@ -368,31 +382,35 @@ class BbQueueLedgerIT {
 
     @Test
     void aSigkilledCpRecord_hasItsRecordedMavenGroupKilled() throws Exception {
-        var victim = sigkilledRecord(false);
+        var victims = sigkilledRecord(false);
 
         try {
             assertThat(within(10_000,
-                              () -> ProcessHandle.of(victim).isEmpty())).as("the recorded maven group was killed")
+                              () -> ProcessHandle.of(victims[0]).isEmpty())).as("the recorded maven (group leader) was killed")
                       .isTrue();
-            assertThat(buildLog("quick")).contains("cp-record's maven (process group " + victim + ") killed",
+            assertThat(within(10_000,
+                              () -> ProcessHandle.of(victims[1]).isEmpty())).as("a non-leader member of its group (a surefire fork) was killed too")
+                      .isTrue();
+            assertThat(buildLog("quick")).contains("cp-record's maven (process group " + victims[0] + ") killed",
                                                    "cp-record skipped");
             assertThat(dir.resolve("work").resolve(ME + "-quick").resolve(".bb/cp-record.pgid")).doesNotExist();
         } finally {
-            ProcessHandle.of(victim).ifPresent(ProcessHandle::destroyForcibly);
+            destroy(victims);
         }
     }
 
     @Test
     void aPgidFileWithAnotherStartTime_killsNothing() throws Exception {
-        var victim = sigkilledRecord(true);
+        var victims = sigkilledRecord(true);
 
         try {
             Thread.sleep(2_000);
-            assertThat(ProcessHandle.of(victim)).as("a recycled pid (start time differs) is never signalled")
+            assertThat(ProcessHandle.of(victims[0])).as("a recycled pid (start time differs) is never signalled")
                       .isPresent();
+            assertThat(ProcessHandle.of(victims[1])).as("nor its group").isPresent();
             assertThat(buildLog("quick")).doesNotContain("killed").contains("cp-record skipped");
         } finally {
-            ProcessHandle.of(victim).ifPresent(ProcessHandle::destroyForcibly);
+            destroy(victims);
         }
     }
 

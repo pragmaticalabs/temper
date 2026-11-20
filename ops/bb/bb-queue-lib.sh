@@ -36,7 +36,7 @@ PSLIST=${BB_TEST_PS:-}   # TEST ONLY: a file of "pid ppid rss_kb args..." lines,
 # hosts). There is no environment fallback on purpose: pick runs with the ENQUEUER's environment, so an env value would let a submitter
 # lift the host's bound. No override (load or memory starvation) passes it.
 MAXREACT=${BB_TEST_MAX_REACTORS_FILE:-$HOME/work/max-reactors}
-# TICKET LOG (2026-11-11): one TSV line per ticket when it reaches done/ (see ticket_log).
+# TICKET LOG (2026-11-11): one TSV line per ticket as it moves to done/, written just before the move (see to_done, ticket_log).
 TLOG=${BB_TEST_TICKET_LOG:-$HOME/work/bb-ticket-log.tsv}
 # LIB_READONLY: set by bb-queue itself for `offq` (what bb-tickets calls), a reader that must not create a queue directory.
 [ -n "${LIB_READONLY:-}" ] || mkdir -p "$Q/waiting" "$Q/running" "$Q/done"
@@ -399,11 +399,14 @@ mem_held() {
       else printf "held: MemAvailable %.1f GB < floor %d GB\n", $2 / 1048576, fl }; exit }' "$MEMINFO" 2>/dev/null || true
 }
 
-# to_done <ticket file>: move a ticket that has just got its terminal state lines to done/, then log it. Caller holds the queue lock.
-to_done() { local id=${1##*/}; mv "$1" "$Q/done/$id" && ticket_log "$Q/done/$id"; return 0; }
+# to_done <ticket file>: log a ticket that has just got its terminal state lines, then move it to done/. Caller holds the queue lock.
+# Log BEFORE the move (vbt5 M2): done/<id> is what every poller waits for, so nothing of the ticket's may be written after it appears.
+# With the log after the move, a test that returned on done/<id> had its TempDir deleted while the waiter's `>> $TLOG` re-created
+# log.tsv at the root: JUnit "Failed to close extension context", DirectoryNotEmpty on <root> (CI run 44763520377).
+to_done() { local id=${1##*/}; ticket_log "$1"; mv "$1" "$Q/done/$id"; return 0; }
 # utc <epoch>: ISO-8601 UTC, or '-' for an empty/zero value.
 utc() { case "$1" in ''|0|*[!0-9]*) echo -;; *) date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ;; esac; }
-# ticket_log <done file>: append ONE line to $TLOG (append-only, never rewritten): a single printf of < 4000 bytes (below PIPE_BUF) to
+# ticket_log <ticket file>: append ONE line to $TLOG (append-only, never rewritten): a single printf of < 4000 bytes (below PIPE_BUF) to
 # an O_APPEND fd, issued under the queue lock. A header line is written first if the file is empty. Columns, tab separated:
 #   host ticket owner checkout port_group group_id enqueued granted ended wait_s run_s rc state args
 # times ISO-8601 UTC; group_id = isolated slot number, "host" (host-exclusive group ticket) or '-'; wait_s = granted-enqueued (never
