@@ -691,7 +691,7 @@ class BbIncrementalIT {
                 dir.resolve("loadavg").toString());
         var run = BbFixtures.run(List.of("bash",
                                          "-c",
-                                         "eval \"set -- $1\"; exec bash \"$2\" __run \"$3\" \"$@\"",
+                                         "b=$2; i=$3; eval \"set -- $1\"; exec bash \"$b\" __run \"$i\" \"$@\"",
                                          "x",
                                          value(lines, "args"),
                                          tools.resolve("bb-build").toString(),
