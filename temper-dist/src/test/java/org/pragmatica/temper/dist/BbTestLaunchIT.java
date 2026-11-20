@@ -65,7 +65,7 @@ class BbTestLaunchIT {
     void fixture() throws Exception {
         assumeTrue(BbFixtures.linux(), "bb-build needs GNU tools, flock and pgrep");
         launcher = Path.of(System.getProperty("user.home")).resolve(SEED);
-        assertThat(launcher).as("the seeded console launcher (present on every build host)").exists();
+        assumeTrue(Files.exists(launcher), "the seeded console launcher is on build hosts only (CI runners have no ~/work/temper-m2-seed)");
         tools = dir.resolve("tools");
         for (var f : List.of("bb-build", "bb-test", "bb-cp-record", "bb-testcount")) {
             BbFixtures.executable(tools.resolve(f),
