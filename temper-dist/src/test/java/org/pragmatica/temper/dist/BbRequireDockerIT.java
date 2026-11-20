@@ -83,6 +83,7 @@ class BbRequireDockerIT {
         Files.copy(BbFixtures.OPS_BB.resolve("bb-portgroup.py"),
                    tools.resolve("bb-portgroup.py"),
                    StandardCopyOption.REPLACE_EXISTING);
+        BbFixtures.executable(tools.resolve("bb-cp-record"), "#!/bin/sh\nexit 0\n");
         BbFixtures.executable(tools.resolve("bb-netns-run"), "#!/bin/sh\necho \"NETNS $*\"\n");
         var mvn = BbFixtures.executable(dir.resolve("stub/mvn"), "#!/bin/sh\necho \"HOST $*\"\n");
 
