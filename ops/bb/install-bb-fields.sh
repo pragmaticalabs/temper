@@ -62,7 +62,7 @@ readonly BB_BUILD_PRECAP=8478b2174ce3ff6de293b55a283e3ce7   # the #53 version: c
 readonly BB_BUILD_PREJBCT=12c68a554862caa672f7211456dfc84c   # the #56 version: no jbct plugin bootstrap hook, no bb-cp-record hook, no BB_LAUNCH
 readonly BB_BUILD_PREHELP=a942996fc17ef7851bac693f135defc2   # the #64/#66 version: no --help, no bb-cp-record hook, no BB_LAUNCH, no launch ledger (bb-test lane)
 readonly BB_BUILD_PRERESULT=24183c7d359b4030faeef894bbe4ba52   # the #67 version: --help and bb-result, no bb-cp-record hook, no launch ledger
-readonly BB_BUILD_NEW=8c599a0aa9251288644bced5953bb194
+readonly BB_BUILD_NEW=1204c063e5c141767db5684aa0c6f90e
 # bb-jbct-bootstrap: absent on every host before its first install; bb-build calls it, so it is installed first.
 readonly BB_JBCTBOOT_NEW=3e5396ecee48b99949456cf805df1e60
 # bb-result: absent on every host before its first install. No trailing comment on a pin line: bb-drift reads it by pattern.
@@ -73,7 +73,7 @@ readonly BB_TICKETS_PREOFFQ=6174119f0cd567c5dc462d1e063c6214   # the #31 version
 readonly BB_TICKETS_NEW=8d34d9dc9ab2a4f867af863ec21be77e
 readonly BB_HOLD_OLD=0bc2401b6e94fd05b66e1df04387e2ac   # the 2026-11-09 host snapshot
 readonly BB_HOLD_PRELEDGER=3561bb8e22fc2f7f3e98dc795f31eecb   # the #56 version: its slot was counted by pattern, not recorded in the launch ledger
-readonly BB_HOLD_NEW=d754a917592555bd787d1ddb9819e518
+readonly BB_HOLD_NEW=c8c6947d1de945e38c5cf08f8448dae9
 readonly BB_WAIT_PRERC=da248f0b4f9248f2bfed64330b3ca66e   # live on all four hosts from 2026-11-12: the ticket rc= is read from .bb/rc (replaced by the exit-status record)
 readonly BB_WAIT_NEW=d5b0ff8d43994a78cd188b4a41fcd995
 # bb-await (issue #48): absent on every host before its first install. No trailing comment on a pin line: bb-drift reads it by pattern.
@@ -84,7 +84,7 @@ readonly BB_PORTGROUP_PREV=a93ade2ff7dddcc75cee3d4169a08499   # the 2026-11-09 h
 readonly BB_PORTGROUP_NEW=884caf3cf37b12cf5cf1d97e96f76a4c
 # The bb-test lane helpers: absent on every host before their first install. No trailing comment on a pin line: bb-drift reads it by pattern.
 readonly BB_CPRECORD_NEW=8c79a293cb8eb4adf36b6e74fef05b93
-readonly BB_TEST_NEW=aa3da4cd7e387f90a50ed8d9183db8f6
+readonly BB_TEST_NEW=04b08af2b9200919efb19fd8c5fe8c28
 readonly BB_TESTCOUNT_NEW=7ef8a4c3eba2a517146eed6d7ac31511
 readonly BB_MUTATE_OLD=f9bfbd37c5feafe67995f6716e8fecb0   # the host snapshot, identical on all four hosts: batch credit unsound for multi-module specs
 readonly BB_MUTATE_PREVIA=2c341d44d428ba445db7ea03ee90af64   # the batch-sound version (#41): does not export BB_VIA (issue #46)
