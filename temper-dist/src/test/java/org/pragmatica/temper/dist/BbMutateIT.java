@@ -201,6 +201,26 @@ class BbMutateIT {
         assertThat(out.md()).doesNotContain("UNPROVEN");
     }
 
+    /// The floor test hook takes only an integer 1..3600: 0, garbage, inf or nan would disable or garble the bound, so each is
+    /// refused with rc 2 before any build is enqueued.
+    @Test
+    void aMalformedFloorHook_isRefusedBeforeAnyBuild() throws Exception {
+        Files.writeString(home.resolve("scenario.json"), modules(null));
+        Files.writeString(dir.resolve(specName), "{\"build\":{},\"mutations\":[" + mutation("mA", "A", "ATest", "MUT") + "]}");
+        for (var bad : List.of("0", "3601", "abc", "inf", "nan", "-5")) {
+            var run = BbFixtures.run(List.of("python3", TOOL.toString(), co.toString(), dir.resolve(specName).toString(),
+                                             dir.resolve("out").toString(), "--batch"),
+                                     Map.of("PATH", System.getenv("PATH"), "HOME", home.toString(), "BB_OWNER", "t",
+                                            "BB_MUTATE_BOUND_FLOOR_SECS", bad),
+                                     null,
+                                     null);
+
+            assertThat(run.rc()).as(bad + ": " + run.stderr()).isEqualTo(2);
+            assertThat(run.stderr()).contains("BB_MUTATE_BOUND_FLOOR_SECS must be an integer 1..3600");
+        }
+        assertThat(Files.exists(home.resolve("builds.log")) ? Files.readAllLines(home.resolve("builds.log")) : List.of()).isEmpty();
+    }
+
     /// Derived bound = max(3 x control, 180 s): a 0 s control gives 180, and the log names the control seconds and the source.
     @Test
     void aDerivedBound_isFlooredAt180Seconds_andLogsItsSource() throws Exception {

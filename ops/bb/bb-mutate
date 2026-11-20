@@ -423,6 +423,9 @@ def main():
     os.makedirs(out, exist_ok=True)
     LOG = open(os.path.join(out, "bb-mutate.log"), "a")
     log(f"start co={co} spec={spec_p} mode={mode} timeout={timeout_min}m")
+    floor_env = os.environ.get("BB_MUTATE_BOUND_FLOOR_SECS")  # test hook only: an integer 1..3600, else refused before any build
+    if floor_env is not None and (not re.fullmatch(r"[1-9][0-9]{0,3}", floor_env) or int(floor_env) > 3600):
+        die(2, f"refusing: BB_MUTATE_BOUND_FLOOR_SECS must be an integer 1..3600, got {floor_env!r}")
     spec = json.load(open(spec_p))
     build, muts = spec["build"], spec["mutations"]
     ids = [m.get("id") for m in muts]
@@ -473,7 +476,7 @@ def main():
         die(3, "tree dirty after control build:\n" + porcelain(co))
     ctl_mvn = ctl.get("mvn_secs") or ctl["secs"]
     explicit = bool(build.get("mutantTimeoutSecs"))
-    floor = float(os.environ.get("BB_MUTATE_BOUND_FLOOR_SECS", DERIVED_FLOOR_SECS))  # env: test hook only
+    floor = int(floor_env) if floor_env is not None else DERIVED_FLOOR_SECS  # env: test hook only (validated at start)
     bound = float(build["mutantTimeoutSecs"]) if explicit else max(3 * ctl_mvn, floor)
     bound_desc = f"per-mutant bound {int(bound)}s ({'explicit' if explicit else 'derived'}; control maven {ctl_mvn}s)"
     timeout_outcome = "TIMEOUT" if explicit else "UNPROVEN"

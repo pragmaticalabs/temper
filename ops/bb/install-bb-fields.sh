@@ -75,7 +75,7 @@ readonly BB_PORTGROUP_NEW=884caf3cf37b12cf5cf1d97e96f76a4c
 readonly BB_MUTATE_OLD=f9bfbd37c5feafe67995f6716e8fecb0   # the host snapshot, identical on all four hosts: batch credit unsound for multi-module specs
 readonly BB_MUTATE_PREVIA=2c341d44d428ba445db7ea03ee90af64   # the batch-sound version (#41): does not export BB_VIA (issue #46)
 readonly BB_MUTATE_PREBOUND=130f094861c0f835869ff42230d7bffb   # live on all four hosts: derived per-mutant bound from a no-recompile control, a TIMEOUT read as detected
-readonly BB_MUTATE_NEW=4967c75de54f910fe04097536bf23d55
+readonly BB_MUTATE_NEW=d3df886ad061091e999853c716593a90
 readonly TARGET_RE='^[a-z_][a-z0-9_-]{0,31}@[A-Za-z0-9.:-]+$'
 
 HERE=$(cd "$(dirname "$0")" && pwd)
