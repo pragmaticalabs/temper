@@ -39,7 +39,7 @@ readonly BB_LIB_PREMEM=a8fb757b12597e167b9804f7d14327e0   # the #42 version: no 
 readonly BB_LIB_PRECAP=cca5e8cd6942f988bb932f37f4de93e1   # the #53 version: no host reactor cap, no off-queue JVM headroom (issue #56)
 readonly BB_LIB_PREOFFQ=e1b318e7bef1d4acff934b041d5ecc1a   # the #56/#64 version: no off-queue reactor list (2026-11-20); the cap counts reactors by process pattern
 readonly BB_LIB_PRELEDGER=2569b8af2cf8acc063024e553be66a93   # the #66 version: the cap counts reactors by process pattern (replaced by the launch ledger)
-readonly BB_LIB_NEW=7337b0b0780d9a50f9a48a1b31f7e52d
+readonly BB_LIB_NEW=7eaf76a33ec71888d45c4432e77ae11a
 readonly BB_QUEUE_OLD=7efbfbecb9739fed35223cdc97eb185d
 readonly BB_QUEUE_PREV=a04b7be02f840d4f1e2bd19c54c52b3f
 readonly BB_QUEUE_LIVE=af86457ae18f4ca331e47137cd088bc7   # what the 2026-11-11 hosts run: its header says `group tickets running:`, which the worker cannot parse
@@ -84,7 +84,7 @@ readonly BB_PORTGROUP_PREV=a93ade2ff7dddcc75cee3d4169a08499   # the 2026-11-09 h
 readonly BB_PORTGROUP_NEW=884caf3cf37b12cf5cf1d97e96f76a4c
 # The bb-test lane helpers: absent on every host before their first install. No trailing comment on a pin line: bb-drift reads it by pattern.
 readonly BB_CPRECORD_NEW=8c79a293cb8eb4adf36b6e74fef05b93
-readonly BB_TEST_NEW=3660d80fc8440b96e53a26880496081a
+readonly BB_TEST_NEW=aa3da4cd7e387f90a50ed8d9183db8f6
 readonly BB_TESTCOUNT_NEW=7ef8a4c3eba2a517146eed6d7ac31511
 readonly BB_MUTATE_OLD=f9bfbd37c5feafe67995f6716e8fecb0   # the host snapshot, identical on all four hosts: batch credit unsound for multi-module specs
 readonly BB_MUTATE_PREVIA=2c341d44d428ba445db7ea03ee90af64   # the batch-sound version (#41): does not export BB_VIA (issue #46)
