@@ -100,7 +100,12 @@ if [ "${1:-}" = __run ]; then
   RDF=(-Daether.requireDocker=true); [ "$(field "$T" requireDocker)" != 0 ] || RDF=()   # #31: the ticket's own record decides
   SLOT=""; [ "$(field "$T" iso)" = 1 ] && SLOT=$(pg_free_slot)
   printf 'started=%s\nwaited=%s\n' "$NOW" "$WAITED" >> "$T"; [ -z "$SLOT" ] || printf 'group_slot=%s\n' "$SLOT" >> "$T"; mv "$T" "$Q/running/$ID"; T=$Q/running/$ID
+  # GRANT + LEDGER ATOMIC (vbt6 B2): the job subshell inherits fd 8 (the same open file description, so the same flock) and writes its
+  # own ledger entry, keyed to its own pid, before it closes fd 8. The waiter closes its fd 8 instead of `flock -u` (which would unlock the
+  # shared description for both), so the lock is released only once BOTH have closed it: a waiter SIGKILLed after the spawn can no longer
+  # let the next grant read a ledger without this launch. A subshell killed before its entry has launched nothing.
   (
+    ledger_add "$ID" "$BASHPID"; exec 8>&-
     cd "$CO"; : > "$B/build.log"
     if wants_jbct "$@"; then   # jbct plugin bootstrap (see bb-jbct-bootstrap); any other ticket never touches the helper, installed or not
       HELPER=$(dirname "$SELF")/bb-jbct-bootstrap
@@ -125,12 +130,11 @@ if [ "${1:-}" = __run ]; then
     fi
     write_rc "$B" "$rc"   # convenience copy for pollers, 444; the ticket's rc= comes from this subshell's exit status below
     exit "$rc"
-  ) 8>&- &
-  C=$!
-  ledger_add "$ID" "$C"   # the job subshell lives as long as maven / bb-test's java / bb-netns-run (and survives a kill -9 of this waiter)
-  flock -u 8   # the lock covers the slot decision and the ledger write only, never the launch's run time
+  ) &
+  C=$!   # the job subshell lives as long as maven / bb-test's java / bb-netns-run (and survives a kill -9 of this waiter)
+  exec 8>&-   # the lock covers the slot decision and the ledger write only, never the launch's run time (released when the subshell closes fd 8)
   wait "$C"; BRC=$?   # the build's exit status: the verdict. Never re-read from $B/rc, which a lane can delete or rewrite
-  flock 8
+  exec 8> "$Q/.lock"; flock 8
   [ -f "$T" ] || exit 0   # cancel or reap already finalized this ticket (first writer wins): do not recreate running/<id> or overwrite done/<id>
   printf 'state=finished\nrc=%s\nended=%s\n' "$BRC" "$(cat "$B/end" 2>/dev/null || date +%s)" >> "$T"
   to_done "$T"

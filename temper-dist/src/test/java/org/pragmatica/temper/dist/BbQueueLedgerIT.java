@@ -7,6 +7,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
 
@@ -281,6 +282,50 @@ class BbQueueLedgerIT {
     }
 
     /// The live Hold process whose argument is <dir>/<name>.
+    /// vbt6 B2: a waiter SIGKILLed after it spawned the launch and before the launch's ledger entry is written (window widened by a
+    /// test-local `sleep 6` before the only ledger_add) must not let a second ticket past host cap 1: the grant and the ledger entry are
+    /// one step for the next grant (the job subshell writes its own entry under the inherited queue lock). Red on 32e2ad8b6, where the
+    /// waiter wrote the entry after the spawn and its death released the lock with the ledger at 0. The slot does not leak either.
+    @Test
+    void aWaiterSigkilledBetweenSpawnAndLedgerWrite_neverLetsASecondTicketPastTheCap() throws Exception {
+        var src = Files.readString(BbFixtures.OPS_BB.resolve("bb-build"));
+        var widened = src.replace("ledger_add \"$ID\"", "sleep 6; ledger_add \"$ID\"");
+
+        assertThat(widened.split("sleep 6; ledger_add", -1)).as("exactly one ledger_add widened").hasSize(2);
+        BbFixtures.executable(tools.resolve("bb-build"), widened);
+        var first = enqueue("hold-a");
+        var waiter = new AtomicReference<List<Long>>(List.of());
+
+        assertThat(within(30_000, () -> {
+            List<Long> pids;
+            try {
+                pids = BbFixtures.waiters(first);
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+            waiter.set(pids.stream()
+                           .filter(p -> ProcessHandle.of(p).flatMap(ProcessHandle::parent).map(h -> !pids.contains(h.pid())).orElse(true))
+                           .toList());
+            return in("running", first) && pids.size() >= 2;
+        })).as("the launch subshell was spawned").isTrue();
+        assertThat(waiter.get()).as("one waiter").hasSize(1);
+        BbFixtures.kill(waiter.get());
+        assertThat(within(5_000, () -> ProcessHandle.of(waiter.get().get(0)).isEmpty())).as("the waiter is dead").isTrue();
+        assertThat(BbFixtures.waiters(first)).as("its launch subshell lives on").isNotEmpty();
+        var second = enqueue("quick");
+        var overGranted = within(15_000, () -> in("done", second));
+        var ledger = ledgerCount(Map.of());
+
+        Files.writeString(dir.resolve("hold-a.go"), "");
+        assertThat(overGranted).as("no over-grant: the second ticket finished while the first launch held host cap 1 (ledger count then: "
+                                   + ledger + ")")
+                  .isFalse();
+        assertThat(ledger).as("the first launch is in the ledger").isEqualTo("1");
+        assertThat(within(60_000, () -> in("done", second))).as("the second ticket runs once the first launch exits").isTrue();
+        assertThat(within(30_000, () -> in("done", first))).as("no leak: the first ticket leaves running/ (reaped) once its launch exits")
+                  .isTrue();
+    }
+
     private ProcessHandle holder(String name) {
         var arg = dir.resolve(name).toString();
 

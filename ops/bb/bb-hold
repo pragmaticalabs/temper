@@ -80,7 +80,7 @@ release() {
   fi
   flock -u 8
 }
-finish() { RC=$1; ENDED=$(date +%s); PHASE=exited; write_state; rm -f "$D/pid"; exit "$1"; }
+finish() { RC=$1; ENDED=$(date +%s); PHASE=exited; write_state; rm -f "$D/pid"; exit "$1"; }   # writes $D AFTER release's done move: a poller of done/<id> can see done before this state (vbt6 Info; no IT waits on both)
 # the caller owns the container: only our own helper child (sleep / docker wait) is stopped; a still-running argv
 # (e.g. "docker run -d" mid-pull) and the container itself are left alone
 on_signal() {
