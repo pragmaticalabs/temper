@@ -11,11 +11,12 @@
 # refused. LAUNCHER: junit-platform-console-standalone 1.13.4, sha256-pinned, read from the host seed
 # (~/work/temper-m2-seed/org/junit/platform/...); absent or wrong sha = rc 14, the path and sha named; nothing is installed here.
 # VERSION GUARD (rc 15, checked with the launcher, at enqueue and at launch): the junit-platform version the checkout builds against,
-# read from /project/properties of its root pom.xml by an XML parse (comments, dependencyManagement and plugin config are never read): exactly one literal
+# read from /project/properties of its root pom.xml by an XML parse (comments and plugin config are never read for it): exactly one literal
 # <junit-platform.version>, else exactly one literal <junit.version> 5.N.P read as platform 1.N.P, must equal LAUNCHER_VERSION. A different version = rc 15
 # naming both; anything else (no property, two definitions, a ${ref}, a -SNAPSHOT or other non-literal, a 6.x junit.version, an unparsable pom) = rc 15, fail closed,
-# "cannot be determined". Every override of either property also = rc 15: a <profile> (root pom or a pom on the module path), a module-path
-# pom's own properties, two <properties> blocks, a -D in .mvn/maven.config or in the launch args (vbt4 M1).
+# "cannot be determined". Every override of either property also = rc 15: a <profile> (root pom or a pom on the module path or <parent> chain),
+# such a pom's own properties, a <parent> outside the checkout, a literal org.junit* dependency version (a junit-bom import included), two
+# <properties> blocks, a mention in .mvn/maven.config (-D or --define=), a -D in the launch args (vbt4 M1, vbt5 H1).
 # VERDICT SOURCE (vbt4 L2): the launch writes verdict_source=guard (a launch-time guard refused: rc 12/14/15) or verdict_source=java (java
 # ran; rc = its exit status) on the ticket, so a java System.exit(12|14|15) never reads as a guard.
 # Call rc: 0 queued (as bb-build); 2 usage; 12 stale-jar guard; 14 launcher jar absent/not the pin; 15 checkout's junit-platform version differs from
@@ -41,11 +42,14 @@ launcher_ok() {
 platform_version_of() {  # <checkout> <module>: "v <version>" its root pom pins, or "x <why it cannot be determined>" (fail closed)
   python3 -I - "$1" "$2" 2> /dev/null <<'PY' || echo "x the version parse failed"
 import os, re, sys, xml.etree.ElementTree as ET
-# /project/properties of the root pom only (comments, dependencyManagement and plugin config are never read). Exactly one literal
+# /project/properties of the root pom only (comments and plugin config are never read for the value). Exactly one literal
 # <junit-platform.version>, else (none at all) exactly one literal <junit.version> 5.N.P read as platform 1.N.P. Fail closed (rc 15) on:
-# two <properties> blocks, two definitions, a ${ref}, a non-literal or a 6.x; and on every OVERRIDE of either property (vbt4 M1): a
-# <profile>'s properties in the root pom or in any pom from the root down to the module, a module-path pom's own properties, and a
-# -D of either name in .mvn/maven.config. The launch-time -D args are checked by the caller (jvm_args_ok).
+# two <properties> blocks, two definitions, a ${ref}, a non-literal or a 6.x; and on every OVERRIDE of either property (vbt4 M1, vbt5 H1):
+# a <profile>'s properties in the root pom or in any pom from the root down to the module or on the module's local <parent> chain, such
+# a pom's own properties, a <parent> that is not a pom in the checkout, an org.junit* <dependency> anywhere in those poms or the root pom
+# (dependencyManagement, a junit-bom import, plugin dependencies) whose version is set but is not ${junit.version} or
+# ${junit-platform.version}, and any mention of either name in .mvn/maven.config (-D, -D name, --define=name). The launch-time -D
+# args are checked by the caller (jvm_args_ok).
 NAMES = ('junit-platform.version', 'junit.version')
 co, module = sys.argv[1], sys.argv[2].strip('/')
 local = lambda t: t.rsplit('}', 1)[-1] if isinstance(t, str) else ''
@@ -72,20 +76,55 @@ if len(props) > 1:
     no('the root pom has %d <properties> blocks' % len(props))
 for name in defines(profile_props(root)):
     no('a <profile> in the root pom sets <%s>' % name)
+REFS = ('${junit-platform.version}', '${junit.version}')
+child = lambda e, tag: next((c for c in e if local(c.tag) == tag), None)
+text = lambda e, tag: None if child(e, tag) is None else (child(e, tag).text or '').strip()
+def junit_literals(path, proj):  # any org.junit* <dependency> (incl. a dependencyManagement import of junit-bom) whose version is set but is not a REF
+    for dep in proj.iter():
+        if local(dep.tag) == 'dependency' and (text(dep, 'groupId') or '').startswith('org.junit') and text(dep, 'version') not in (None,) + REFS:
+            no('%s sets the version of %s:%s to %s, not to a junit version property' % (os.path.relpath(path, co), text(dep, 'groupId'), text(dep, 'artifactId'), text(dep, 'version')))
+def overrides(path, proj):
+    for name in defines([c for c in proj if local(c.tag) == 'properties'] + profile_props(proj)):
+        no('%s sets <%s>' % (os.path.relpath(path, co), name))
+    junit_literals(path, proj)
+junit_literals(os.path.join(co, 'pom.xml'), root)
+rootpom = os.path.realpath(os.path.join(co, 'pom.xml'))
 d = co
 for part in module.split('/'):
     d = os.path.join(d, part)
     pom = os.path.join(d, 'pom.xml')
-    if os.path.isfile(pom):
-        mod = project(pom)
-        for name in defines([c for c in mod if local(c.tag) == 'properties'] + profile_props(mod)):
-            no('%s sets <%s>' % (os.path.relpath(pom, co), name))
+    if os.path.isfile(pom) and os.path.realpath(pom) != rootpom:
+        overrides(pom, project(pom))
+# the module's <parent> chain (vbt5 H1-ii): a parent found by relativePath off the module's dir path is an inherited override too.
+# Followed until it reaches the root pom or a pom without <parent>; a parent that is not a pom in the checkout (empty relativePath,
+# no file there, another artifactId: maven then resolves it from a repository) = fail closed.
+pom = os.path.join(co, module, 'pom.xml')
+for _ in range(64):
+    if not os.path.isfile(pom) or os.path.realpath(pom) == rootpom:
+        break
+    par = child(project(pom), 'parent')
+    if par is None:
+        break
+    rel = text(par, 'relativePath')
+    nxt = os.path.normpath(os.path.join(os.path.dirname(pom), '../pom.xml' if rel is None else rel))
+    if os.path.isdir(nxt):
+        nxt = os.path.join(nxt, 'pom.xml')
+    real = os.path.realpath(nxt)
+    if rel == '' or not os.path.isfile(nxt) or not real.startswith(os.path.realpath(co) + os.sep):
+        no('%s has a <parent> that is not a pom in the checkout' % os.path.relpath(pom, co))
+    if text(project(nxt), 'artifactId') != text(par, 'artifactId'):
+        no('%s has a <parent> %s that %s is not' % (os.path.relpath(pom, co), text(par, 'artifactId'), os.path.relpath(nxt, co)))
+    if real != rootpom:
+        overrides(nxt, project(nxt))
+    pom = nxt
+else:
+    no('the <parent> chain of %s/pom.xml does not end' % module)
 try:
     cfg = open(os.path.join(co, '.mvn', 'maven.config'), encoding='utf-8', errors='replace').read()
 except OSError:
     cfg = ''
 for name in NAMES:
-    if re.search(r'(-D|--define)\s*' + re.escape(name) + r'(=|\s|$)', cfg):
+    if re.search(r'(?<![A-Za-z0-9_.-])' + re.escape(name) + r'(?![A-Za-z0-9_.-])', cfg):  # any mention: -D, -D name, --define=name (vbt5 H1-i)
         no('.mvn/maven.config sets -D%s' % name)
 vals = lambda name: [(c.text or '').strip() for p in props for c in p if local(c.tag) == name]
 plat, junit = vals('junit-platform.version'), vals('junit.version')

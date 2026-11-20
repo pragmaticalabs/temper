@@ -420,9 +420,12 @@ class BbTestGuardIT {
     @Test
     void digest_aNonUtf8FileName_isRefusedWithRc12_andAMessage_neverATraceback() throws Exception {
         recorded();
-        var made = BbFixtures.run(List.of("bash", "-c", "touch lib/$'\\xff'.txt"), Map.of(), co, null);
+        var made = BbFixtures.run(List.of("bash", "-c", "touch lib/$'\\xff'.txt"), Map.of("LC_ALL", "C"), co, null);
 
-        assumeTrue(made.rc() == 0, "this filesystem refuses a non-UTF-8 file name (e.g. ZFS utf8only=on): " + made.stderr());
+        // only EILSEQ (errno 84, a filesystem that refuses a non-UTF-8 name: ZFS utf8only=on) skips; any other touch failure fails (vbt5 L1)
+        assumeTrue(made.rc() == 0 || !made.stderr().contains("Invalid or incomplete multibyte or wide character"),
+                   "this filesystem refuses a non-UTF-8 file name (EILSEQ): " + made.stderr());
+        assertThat(made.rc()).as("touch of the non-UTF-8 name: " + made.stderr()).isZero();
         var run = check();
 
         assertThat(run.rc()).isEqualTo(12);
@@ -518,6 +521,66 @@ class BbTestGuardIT {
 
         refused15(run);
         assertThat(run.stderr()).contains(".mvn/maven.config sets -Djunit-platform.version");
+    }
+
+    // ---- vbt5 H1: three overrides the vbt4 M1 guard let through (each row was v 1.13.4 = accepted against that guard) ----
+    @Test
+    void versionGuard_aMavenConfigLongDefineWithEquals_isRefusedWithRc15() throws Exception {
+        Files.createDirectories(co.resolve(".mvn"));
+        Files.writeString(co.resolve(".mvn").resolve("maven.config"), "-B\n--define=junit.version=5.12.2\n");
+        var run = bbTestWithRootPom(ROOT_POM, tmp.resolve("no-launcher.jar"));
+
+        refused15(run);
+        assertThat(run.stderr()).contains(".mvn/maven.config sets -Djunit.version");
+    }
+
+    private static final String APP_WITH_PARENT = "<project><modelVersion>4.0.0</modelVersion><parent><groupId>g</groupId><artifactId>%s</artifactId><version>1</version>"
+                                                + "<relativePath>%s</relativePath></parent><artifactId>app</artifactId></project>";
+
+    @Test
+    void versionGuard_aModuleParentByRelativePathOffItsDirPath_settingTheProperty_isRefusedWithRc15() throws Exception {
+        Files.createDirectories(co.resolve("parent"));
+        Files.writeString(co.resolve("parent").resolve("pom.xml"),
+                          "<project><modelVersion>4.0.0</modelVersion><groupId>g</groupId><artifactId>parent</artifactId><version>1</version>"
+                         + "<properties><junit.version>5.12.2</junit.version></properties></project>");
+        Files.writeString(co.resolve("app").resolve("pom.xml"), APP_WITH_PARENT.formatted("parent", "../parent/pom.xml"));
+        var run = bbTestWithRootPom(ROOT_POM, tmp.resolve("no-launcher.jar"));
+
+        refused15(run);
+        assertThat(run.stderr()).contains("parent/pom.xml sets <junit.version>");
+    }
+
+    @Test
+    void versionGuard_aModuleParentChainThroughAnotherDirToTheRoot_withoutAnOverride_reachesTheLauncherCheck() throws Exception {
+        Files.createDirectories(co.resolve("parent"));
+        Files.writeString(co.resolve("parent").resolve("pom.xml"),
+                          "<project><modelVersion>4.0.0</modelVersion><parent><groupId>g</groupId><artifactId>root</artifactId><version>1</version></parent>"
+                         + "<artifactId>parent</artifactId></project>");
+        Files.writeString(co.resolve("app").resolve("pom.xml"), APP_WITH_PARENT.formatted("parent", "../parent"));
+        var run = bbTestWithRootPom(ROOT_POM, tmp.resolve("no-launcher.jar"));
+
+        assertThat(run.rc()).as(run.stderr()).isEqualTo(14);
+    }
+
+    @Test
+    void versionGuard_aModuleParentResolvedFromARepository_isRefusedWithRc15() throws Exception {
+        Files.writeString(co.resolve("app").resolve("pom.xml"), APP_WITH_PARENT.formatted("external", ""));
+        var run = bbTestWithRootPom(ROOT_POM, tmp.resolve("no-launcher.jar"));
+
+        refused15(run);
+        assertThat(run.stderr()).contains("app/pom.xml has a <parent> that is not a pom in the checkout");
+    }
+
+    @Test
+    void versionGuard_aModuleJunitBomImportAtALiteralVersion_isRefusedWithRc15() throws Exception {
+        Files.writeString(co.resolve("app").resolve("pom.xml"),
+                          "<project><modelVersion>4.0.0</modelVersion><groupId>g</groupId><artifactId>app</artifactId><version>1</version>"
+                         + "<dependencyManagement><dependencies><dependency><groupId>org.junit</groupId><artifactId>junit-bom</artifactId>"
+                         + "<version>5.12.2</version><type>pom</type><scope>import</scope></dependency></dependencies></dependencyManagement></project>");
+        var run = bbTestWithRootPom(ROOT_POM, tmp.resolve("no-launcher.jar"));
+
+        refused15(run);
+        assertThat(run.stderr()).contains("app/pom.xml sets the version of org.junit:junit-bom to 5.12.2");
     }
 
     @Test
