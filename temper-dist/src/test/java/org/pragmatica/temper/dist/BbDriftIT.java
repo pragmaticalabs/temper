@@ -45,7 +45,8 @@ class BbDriftIT {
                                                            "kiln-ingest",
                                                            "bb-checkout",
                                                            "bb-probe-reap",
-                                                           "bb-mutate");
+                                                           "bb-mutate",
+                                                           "bb-jbct-bootstrap");
 
     private static final Map<String, String> VENDOR_PINS = Map.of("bb-build-direct",
                                                                   "50aa0b772fa7f916e2983be40e328b32",
@@ -465,7 +466,9 @@ class BbDriftIT {
                           "bb-netns-run",
                           "BB_NETNS_NEW",
                           "bb-portgroup.py",
-                          "BB_PORTGROUP_NEW");
+                          "BB_PORTGROUP_NEW",
+                          "bb-jbct-bootstrap",
+                          "BB_JBCTBOOT_NEW");
 
         for (var e : pins.entrySet()) {
             assertThat(BbFixtures.md5(OPS_BB.resolve(e.getKey()))).as(e.getKey()).isEqualTo(pin(e.getValue()));

@@ -1,6 +1,5 @@
 package org.pragmatica.temper.dist;
 
-
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -17,6 +16,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+
 /// `ops/bb/bb-temper` automatic host choice and the per-checkout host binding (owner 2026-11-05) against `ssh`/`scp`
 /// stubs first on `PATH`. The hosts reply is injected through the test-only `BB_HOSTS_CMD` seam. Baseline scores:
 /// cloudbb-4 0.00, cloudbb-3 0.25, bigboy 0.50; each skip row breaks cloudbb-4 (the best) in one way, so the pick
@@ -30,24 +30,63 @@ class BbTemperHostIT {
     private static final long GIB = 1024L * 1024L * 1024L;
 
     /// One host entry of the controller reply; the defaults are a healthy idle host.
-    private record H(String name, String state, String link, boolean retired, String retireAt, double load5, int cores, int running,
-                      int waiting, int active, long memKb, long disk) {
+    private record H(String name,
+                     String state,
+                     String link,
+                     boolean retired,
+                     String retireAt,
+                     double load5,
+                     int cores,
+                     int running,
+                     int waiting,
+                     int active,
+                     long memKb,
+                     long disk) {
         static H of(String name, double load5, int cores) {
             return new H(name, "UP", "UP", false, null, load5, cores, 0, 0, 0, 16 * GIB_KB, 100 * GIB);
         }
 
-        H withState(String v) { return new H(name, v, link, retired, retireAt, load5, cores, running, waiting, active, memKb, disk); }
-        H asRetired() { return new H(name, state, link, true, retireAt, load5, cores, running, waiting, active, memKb, disk); }
-        H retiringAt(Instant v) { return new H(name, state, link, retired, v.toString(), load5, cores, running, waiting, active, memKb, disk); }
-        H withMem(long v) { return new H(name, state, link, retired, retireAt, load5, cores, running, waiting, active, v, disk); }
-        H withDisk(long v) { return new H(name, state, link, retired, retireAt, load5, cores, running, waiting, active, memKb, v); }
-        H queue(int r, int w, int a) { return new H(name, state, link, retired, retireAt, load5, cores, r, w, a, memKb, disk); }
+        H withState(String v) {
+            return new H(name, v, link, retired, retireAt, load5, cores, running, waiting, active, memKb, disk);
+        }
+
+        H asRetired() {
+            return new H(name, state, link, true, retireAt, load5, cores, running, waiting, active, memKb, disk);
+        }
+
+        H retiringAt(Instant v) {
+            return new H(name, state, link, retired, v.toString(), load5, cores, running, waiting, active, memKb, disk);
+        }
+
+        H withMem(long v) {
+            return new H(name, state, link, retired, retireAt, load5, cores, running, waiting, active, v, disk);
+        }
+
+        H withDisk(long v) {
+            return new H(name, state, link, retired, retireAt, load5, cores, running, waiting, active, memKb, v);
+        }
+
+        H queue(int r, int w, int a) {
+            return new H(name, state, link, retired, retireAt, load5, cores, r, w, a, memKb, disk);
+        }
 
         String json() {
-            return "{\"name\":\"" + name + "\",\"state\":\"" + state + "\",\"link\":\"" + link + "\",\"active\":" + active
-                   + ",\"facts\":{\"load1\":" + load5 + ",\"load5\":" + load5 + ",\"cores\":" + cores + ",\"bbRunning\":" + running
-                   + ",\"bbWaiting\":" + waiting + ",\"memAvailableKb\":" + memKb + ",\"freeWorkspaceBytes\":" + disk
-                   + "},\"sharedCpu\":false,\"retireAt\":" + (retireAt == null ? "null" : "\"" + retireAt + "\"") + ",\"retired\":" + retired + "}";
+            return "{\"name\":\"" + name
+                 + "\",\"state\":\"" + state
+                 + "\",\"link\":\"" + link
+                 + "\",\"active\":" + active
+                 + ",\"facts\":{\"load1\":" + load5
+                 + ",\"load5\":" + load5
+                 + ",\"cores\":" + cores
+                 + ",\"bbRunning\":" + running
+                 + ",\"bbWaiting\":" + waiting
+                 + ",\"memAvailableKb\":" + memKb
+                 + ",\"freeWorkspaceBytes\":" + disk
+                 + "},\"sharedCpu\":false,\"retireAt\":" + (retireAt == null
+                                                            ? "null"
+                                                            : "\"" + retireAt + "\"")
+                 + ",\"retired\":" + retired
+                 + "}";
         }
     }
 
@@ -62,60 +101,115 @@ class BbTemperHostIT {
         home = Files.createDirectories(dir.resolve("home"));
         bin = Files.createDirectories(dir.resolve("bin"));
         TestHosts.write(home);
-        MacScripts.executable(bin.resolve("ssh"), "for a in \"$@\"; do printf '%s\\n' \"$a\" >> \"$STUBS/ssh.args\"; done\necho -- >> \"$STUBS/ssh.args\"\n"
-                                                   + "exit \"$(cat \"$STUBS/ssh.rc\" 2> /dev/null || echo 0)\"\n");
+        MacScripts.executable(bin.resolve("ssh"),
+                              "[ \"${@: -1}\" = true ] && { echo probe >> \"$STUBS/probe.log\"; exit 0; }  # bb-temper's path probe (2026-11-19): counted apart from the real calls\nfor a in \"$@\"; do printf '%s\\n' \"$a\" >> \"$STUBS/ssh.args\"; done\necho -- >> \"$STUBS/ssh.args\"\n"
+                             + "exit \"$(cat \"$STUBS/ssh.rc\" 2> /dev/null || echo 0)\"\n");
         MacScripts.executable(bin.resolve("scp"), "exit 0\n");
-        var gitInit = BbFixtures.process("git", "-c", "user.email=t@t", "-c", "user.name=t", "init", "-q").directory(dir.toFile()).inheritIO();
+        var gitInit = BbFixtures.process("git", "-c", "user.email=t@t", "-c", "user.name=t", "init", "-q")
+                                .directory(dir.toFile())
+                                .inheritIO();
         var git = gitInit.start();
+
         assertThat(git.waitFor()).isZero();
-        var gitCommit = BbFixtures.process("git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "i")
-                .directory(dir.toFile()).inheritIO();
+        var gitCommit = BbFixtures.process("git",
+                                           "-c",
+                                           "user.email=t@t",
+                                           "-c",
+                                           "user.name=t",
+                                           "commit",
+                                           "-q",
+                                           "--allow-empty",
+                                           "-m",
+                                           "i")
+                                  .directory(dir.toFile())
+                                  .inheritIO();
         var commit = gitCommit.start();
+
         assertThat(commit.waitFor()).isZero();
     }
 
     private Map<String, String> env(String... more) {
-        var env = new LinkedHashMap<>(MacScripts.env(Map.of("HOME", home.toString(), "PATH", bin + ":/usr/bin:/bin", "STUBS", dir.toString(), "BB_OWNER", "t3")));
+        var env = new LinkedHashMap<>(MacScripts.env(Map.of("HOME",
+                                                            home.toString(),
+                                                            "PATH",
+                                                            bin + ":/usr/bin:/bin",
+                                                            "STUBS",
+                                                            dir.toString(),
+                                                            "BB_OWNER",
+                                                            "t3")));
+
         for (var i = 0; i < more.length; i += 2) {
             env.put(more[i], more[i + 1]);
         }
+
         return env;
     }
 
     private String hosts(H... hosts) throws IOException {
         var body = new ArrayList<String>();
+
         for (var h : hosts) {
             body.add(h.json());
         }
+
         var file = Files.writeString(dir.resolve("hosts.json"), "[" + String.join(",", body) + "]");
+
         return "cat " + file;
     }
 
-    private H bigboy() { return H.of("bigboy", 8, 16); }
-    private H c4() { return H.of("cloudbb-4", 0, 8); }
-    private H c3() { return H.of("cloudbb-3", 2, 8); }
+    private H bigboy() {
+        return H.of("bigboy", 8, 16);
+    }
+
+    private H c4() {
+        return H.of("cloudbb-4", 0, 8);
+    }
+
+    private H c3() {
+        return H.of("cloudbb-3", 2, 8);
+    }
 
     private MacScripts.Result bb(Map<String, String> env, String... args) throws Exception {
         var command = new ArrayList<>(List.of("bash", MacScripts.BB_TEMPER.toString()));
+
         command.addAll(List.of(args));
+
         return MacScripts.run(command, env, dir);
     }
 
     private MacScripts.Result checkout(String hostsCmd, String... more) throws Exception {
         var env = env(more);
+
         env.put("BB_HOSTS_CMD", hostsCmd);
+
         return bb(env, "checkout", "t3-x");
     }
 
-    private Path binding() { return home.resolve(".temper/bb-bind/t3-x"); }
+    private Path binding() {
+        return home.resolve(".temper/bb-bind/t3-x");
+    }
 
-    private String bound() throws IOException { return Files.readString(binding()).strip(); }
+    private String bound() throws IOException {
+        return Files.readString(binding()).strip();
+    }
+
+    /// bb-temper's path probes (`ssh ... true`) the stub saw: they are not real calls, so they are counted on their own.
+    private long probes() throws IOException {
+        var file = dir.resolve("probe.log");
+
+        return Files.exists(file)
+               ? Files.readAllLines(file).size()
+               : 0;
+    }
 
     private List<List<String>> sshCalls() throws IOException {
         var file = dir.resolve("ssh.args");
         var calls = new ArrayList<List<String>>();
         var current = new ArrayList<String>();
-        for (var line : Files.exists(file) ? Files.readAllLines(file) : List.<String>of()) {
+
+        for (var line : Files.exists(file)
+                        ? Files.readAllLines(file)
+                        : List.<String> of()) {
             if (line.equals("--")) {
                 calls.add(current);
                 current = new ArrayList<>();
@@ -123,6 +217,7 @@ class BbTemperHostIT {
                 current.add(line);
             }
         }
+
         return calls;
     }
 
@@ -139,7 +234,9 @@ class BbTemperHostIT {
         var run = checkout(hosts(bigboy(), c3(), c4()));
 
         assertPicked(run, "cloudbb-4", C4);
-        assertThat(run.err()).contains("bb-temper: host cloudbb-4 (score 0.00; ").contains("cloudbb-3 0.25").contains("bigboy 0.50");
+        assertThat(run.err()).contains("bb-temper: host cloudbb-4 (score 0.00; ")
+                  .contains("cloudbb-3 0.25")
+                  .contains("bigboy 0.50");
     }
 
     /// Score = (load5 + 4 * (running + waiting + active)) / cores: queued work outweighs load.
@@ -162,7 +259,9 @@ class BbTemperHostIT {
 
     @Test
     void auto_skipsAHostWhoseLinkIsDown() throws Exception {
-        var run = checkout(hosts(bigboy(), c3(), new H("cloudbb-4", "UP", "DOWN", false, null, 0, 8, 0, 0, 0, 16 * GIB_KB, 100 * GIB)));
+        var run = checkout(hosts(bigboy(),
+                                 c3(),
+                                 new H("cloudbb-4", "UP", "DOWN", false, null, 0, 8, 0, 0, 0, 16 * GIB_KB, 100 * GIB)));
 
         assertPicked(run, "cloudbb-3", C3);
         assertThat(run.err()).contains("cloudbb-4 skip: link DOWN");
@@ -178,7 +277,9 @@ class BbTemperHostIT {
 
     @Test
     void auto_skipsAHostRetiringWithinTwoHours() throws Exception {
-        var run = checkout(hosts(bigboy(), c3(), c4().retiringAt(Instant.now().plus(1, ChronoUnit.HOURS))));
+        var run = checkout(hosts(bigboy(),
+                                 c3(),
+                                 c4().retiringAt(Instant.now().plus(1, ChronoUnit.HOURS))));
 
         assertPicked(run, "cloudbb-3", C3);
         assertThat(run.err()).contains("cloudbb-4 skip: retires within 2 h");
@@ -188,7 +289,6 @@ class BbTemperHostIT {
     @Test
     void auto_keepsAHostRetiringLater() throws Exception {
         var later = Instant.now().plus(3, ChronoUnit.HOURS).plusNanos(123456789);
-
         var run = checkout(hosts(bigboy(), c3(), c4().retiringAt(later)));
 
         assertPicked(run, "cloudbb-4", C4);
@@ -213,7 +313,9 @@ class BbTemperHostIT {
     /// Exactly the limits qualify (20 GiB, 6 GiB).
     @Test
     void auto_theLimitsThemselvesQualify() throws Exception {
-        var run = checkout(hosts(bigboy(), c3(), c4().withDisk(20 * GIB).withMem(6 * GIB_KB)));
+        var run = checkout(hosts(bigboy(),
+                                 c3(),
+                                 c4().withDisk(20 * GIB).withMem(6 * GIB_KB)));
 
         assertPicked(run, "cloudbb-4", C4);
     }
@@ -222,15 +324,20 @@ class BbTemperHostIT {
     @Test
     void auto_aTieGoesBigboyThenC3ThenC4() throws Exception {
         var all = checkout(hosts(H.of("cloudbb-3", 1, 8), H.of("cloudbb-4", 1, 8), H.of("bigboy", 1, 8)));
+
         assertPicked(all, "bigboy", BIGBOY);
         Files.delete(binding());
         Files.deleteIfExists(dir.resolve("ssh.args"));
+        var noBigboy = checkout(hosts(H.of("cloudbb-3", 1, 8),
+                                      H.of("cloudbb-4", 1, 8),
+                                      H.of("bigboy", 1, 8).withState("DOWN")));
 
-        var noBigboy = checkout(hosts(H.of("cloudbb-3", 1, 8), H.of("cloudbb-4", 1, 8), H.of("bigboy", 1, 8).withState("DOWN")));
         assertPicked(noBigboy, "cloudbb-3", C3);
     }
 
-    private H d1() { return H.of("cloudbb-d1", 0, 64); }
+    private H d1() {
+        return H.of("cloudbb-d1", 0, 64);
+    }
 
     /// cloudbb-d1 is reserved for the maintainer's timing runs (2026-11-07): UP, idle and with the most cores it would score best (0.00),
     /// yet it is neither picked nor listed as a candidate.
@@ -250,7 +357,8 @@ class BbTemperHostIT {
 
         assertThat(run.rc()).as(run.err()).isZero();
         assertThat(bound()).isEqualTo("bigboy");
-        assertThat(run.err()).contains("bb-temper: host bigboy (fallback: no host qualifies: ").doesNotContain("cloudbb-d1");
+        assertThat(run.err()).contains("bb-temper: host bigboy (fallback: no host qualifies: ")
+                  .doesNotContain("cloudbb-d1");
     }
 
     @Test
@@ -277,6 +385,7 @@ class BbTemperHostIT {
         assertThat(run.rc()).as(run.err()).isZero();
         assertThat(bound()).isEqualTo("bigboy");
         assertThat(sshCalls()).isNotEmpty().allSatisfy(call -> assertThat(call).contains(BIGBOY));
+        assertThat(probes()).as("bigboy has no jump, so no path probe").isZero();
         assertThat(run.err()).contains("bb-temper: host bigboy (fallback: controller unreachable)");
     }
 
@@ -294,7 +403,8 @@ class BbTemperHostIT {
         var run = checkout(hosts(bigboy().withState("DOWN"), c3().asRetired(), c4().withDisk(0)));
 
         assertThat(run.rc()).as(run.err()).isZero();
-        assertThat(run.err()).contains("bb-temper: host bigboy (fallback: no host qualifies: ").contains("bigboy skip: state DOWN");
+        assertThat(run.err()).contains("bb-temper: host bigboy (fallback: no host qualifies: ")
+                  .contains("bigboy skip: state DOWN");
         assertThat(bound()).isEqualTo("bigboy");
     }
 
@@ -305,6 +415,7 @@ class BbTemperHostIT {
 
         assertThat(run.rc()).as(run.err()).isZero();
         var first = sshCalls().getFirst();
+
         assertThat(first).contains(BIGBOY);
         assertThat(first.getLast()).isEqualTo("curl -sf -m 5 -H \"Authorization: Bearer $(cat ~/.config/temper/read-token)\" http://localhost:7070/api/v1/hosts");
         assertThat(run.err()).contains("fallback: controller unreachable");
@@ -314,13 +425,14 @@ class BbTemperHostIT {
     @Test
     void explicitHost_makesNoControllerCall_andIsBound() throws Exception {
         var marker = dir.resolve("called");
-
         var run = checkout("touch " + marker + "; " + hosts(c4()), "BB_HOST", "cloudbb-3");
 
         assertThat(run.rc()).as(run.err()).isZero();
         assertThat(marker).doesNotExist();
         assertThat(run.err()).doesNotContain("bb-temper: host");
-        assertThat(sshCalls()).isNotEmpty().allSatisfy(call -> assertThat(call).contains(C3).doesNotContain("http://localhost:7070/api/v1/hosts"));
+        assertThat(sshCalls()).isNotEmpty()
+                  .allSatisfy(call -> assertThat(call).contains(C3)
+                                                .doesNotContain("http://localhost:7070/api/v1/hosts"));
         assertThat(bound()).isEqualTo("cloudbb-3");
     }
 
@@ -344,7 +456,6 @@ class BbTemperHostIT {
     @Test
     void noHostConfig_isExit78_beforeAnySsh() throws Exception {
         Files.delete(home.resolve(".config/bb-temper/hosts"));
-
         var run = checkout(hosts(bigboy(), c3(), c4()), "BB_HOST", "bigboy");
 
         assertThat(run.rc()).isEqualTo(78);
@@ -359,19 +470,17 @@ class BbTemperHostIT {
     void theConfig_definesTheHosts_theHomeHost_andTheAutoSet() throws Exception {
         Files.writeString(home.resolve(".config/bb-temper/hosts"),
                           "key ~/.ssh/k\nhost lab builder@192.0.2.20 - - auto\nhost cloudbb-4 " + C4 + " - - explicit\n");
-
         var explicit = checkout(hosts(c4()), "BB_HOST", "lab");
 
         assertThat(explicit.rc()).as(explicit.err()).isZero();
-        assertThat(sshCalls()).isNotEmpty().allSatisfy(call -> assertThat(call).contains("builder@192.0.2.20", "-i", home + "/.ssh/k"));
+        assertThat(sshCalls()).isNotEmpty()
+                  .allSatisfy(call -> assertThat(call).contains("builder@192.0.2.20", "-i", home + "/.ssh/k"));
         Files.delete(binding());
         Files.delete(dir.resolve("ssh.args"));
-
         var auto = checkout(hosts(H.of("lab", 8, 16), c4()));
 
         assertPicked(auto, "lab", "builder@192.0.2.20");
         Files.delete(binding());
-
         var fallback = checkout("false");
 
         assertThat(fallback.rc()).as(fallback.err()).isZero();
@@ -381,8 +490,8 @@ class BbTemperHostIT {
 
     @Test
     void aMalformedHostLine_isExit78_naming_theLine() throws Exception {
-        Files.writeString(home.resolve(".config/bb-temper/hosts"), "key ~/.ssh/k\nhost bigboy " + BIGBOY + " " + BIGBOY + " - auto\n");
-
+        Files.writeString(home.resolve(".config/bb-temper/hosts"),
+                          "key ~/.ssh/k\nhost bigboy " + BIGBOY + " " + BIGBOY + " - auto\n");
         var run = checkout(hosts(bigboy()), "BB_HOST", "bigboy");
 
         assertThat(run.rc()).isEqualTo(78);
@@ -393,12 +502,13 @@ class BbTemperHostIT {
     /// A hosts file saved with CRLF line ends parses exactly like the LF one: the \r is never part of a field.
     @Test
     void aCrlfHostConfig_parsesLikeTheLfOne() throws Exception {
-        Files.writeString(home.resolve(".config/bb-temper/hosts"), "key ~/.ssh/k\r\nhost lab builder@192.0.2.20 - - auto\r\n");
-
+        Files.writeString(home.resolve(".config/bb-temper/hosts"),
+                          "key ~/.ssh/k\r\nhost lab builder@192.0.2.20 - - auto\r\n");
         var run = checkout(hosts(bigboy()), "BB_HOST", "lab");
 
         assertThat(run.rc()).as(run.err()).isZero();
-        assertThat(sshCalls()).isNotEmpty().allSatisfy(call -> assertThat(call).contains("builder@192.0.2.20", "-i", home + "/.ssh/k"));
+        assertThat(sshCalls()).isNotEmpty()
+                  .allSatisfy(call -> assertThat(call).contains("builder@192.0.2.20", "-i", home + "/.ssh/k"));
     }
 
     /// Two `key` lines are malformed even when they name the same path: exit 78 naming the second line.
@@ -406,7 +516,6 @@ class BbTemperHostIT {
     void aRepeatedKeyLine_isExit78_naming_theLine() throws Exception {
         Files.writeString(home.resolve(".config/bb-temper/hosts"),
                           "key ~/.ssh/k\nkey ~/.ssh/k\nhost bigboy " + BIGBOY + " - - auto\n");
-
         var run = checkout(hosts(bigboy()), "BB_HOST", "bigboy");
 
         assertThat(run.rc()).isEqualTo(78);
@@ -417,7 +526,6 @@ class BbTemperHostIT {
     @Test
     void aFailedCheckout_leavesNoBinding() throws Exception {
         Files.writeString(dir.resolve("ssh.rc"), "1\n");
-
         var run = checkout(hosts(bigboy(), c3(), c4()));
 
         assertThat(run.rc()).isEqualTo(3);
@@ -435,7 +543,6 @@ class BbTemperHostIT {
         assertPicked(checkout(hosts(bigboy(), c3(), c4())), "cloudbb-4", C4);
         Files.deleteIfExists(dir.resolve("ssh.args"));
         var fake = MacScripts.executable(bin.resolve("fake-submit"), "printf '%s\\n' \"$1\" > \"$STUBS/submit.host\"\n");
-
         var build = bb(env("BB_SUBMIT", fake.toString()), "build", "t3-x");
         var report = bb(env(), "report", "t3-x");
 
@@ -447,26 +554,38 @@ class BbTemperHostIT {
 
     @Test
     void laterVerbs_withoutABinding_areRefused() throws Exception {
-        for (var args : List.of(List.of("build", "t3-x"), List.of("wait", "t3-x"), List.of("report", "t3-x"),
-                                List.of("fetch", "t3-x", dir.resolve("out").toString()), List.of("rm", "t3-x"))) {
+        for (var args : List.of(List.of("build", "t3-x"),
+                                List.of("wait", "t3-x"),
+                                List.of("report", "t3-x"),
+                                List.of("fetch",
+                                        "t3-x",
+                                        dir.resolve("out").toString()),
+                                List.of("rm", "t3-x"))) {
             var run = bb(env("BB_SUBMIT", "/bin/true"), args.toArray(String[]::new));
 
             assertThat(run.rc()).as(args.toString()).isEqualTo(3);
             assertThat(run.err()).as(args.toString()).contains("bb-temper: no host binding for t3-x; set BB_HOST");
         }
+
         assertThat(sshCalls()).isEmpty();
     }
 
     @Test
     void laterVerbs_withAConflictingBbHost_areRefused() throws Exception {
         bind("cloudbb-d1");
-        for (var args : List.of(List.of("build", "t3-x"), List.of("wait", "t3-x"), List.of("report", "t3-x"),
-                                List.of("fetch", "t3-x", dir.resolve("out").toString()), List.of("rm", "t3-x"))) {
+        for (var args : List.of(List.of("build", "t3-x"),
+                                List.of("wait", "t3-x"),
+                                List.of("report", "t3-x"),
+                                List.of("fetch",
+                                        "t3-x",
+                                        dir.resolve("out").toString()),
+                                List.of("rm", "t3-x"))) {
             var run = bb(env("BB_SUBMIT", "/bin/true", "BB_HOST", "bigboy"), args.toArray(String[]::new));
 
             assertThat(run.rc()).as(args.toString()).isEqualTo(3);
             assertThat(run.err()).as(args.toString()).contains("t3-x is bound to cloudbb-d1, not bigboy");
         }
+
         assertThat(sshCalls()).isEmpty();
         assertThat(bound()).isEqualTo("cloudbb-d1");
     }
@@ -474,8 +593,8 @@ class BbTemperHostIT {
     @Test
     void laterVerbs_withTheSameExplicitHost_orNoBinding_runAsBefore() throws Exception {
         bind("cloudbb-d1");
-
         var same = bb(env("BB_HOST", "cloudbb-d1"), "report", "t3-x");
+
         Files.delete(binding());
         var legacy = bb(env("BB_HOST", "bigboy"), "report", "t3-x");
 
@@ -489,7 +608,6 @@ class BbTemperHostIT {
     @Test
     void rm_removesTheBinding_afterTheRemoteRm() throws Exception {
         bind("cloudbb-d1");
-
         var run = bb(env(), "rm", "t3-x");
 
         assertThat(run.rc()).as(run.err()).isZero();
@@ -505,11 +623,11 @@ class BbTemperHostIT {
     void rm_whenTheQueueRefuses_deletesNothing_andPassesItsExitCode() throws Exception {
         bind("cloudbb-d1");
         Files.writeString(dir.resolve("ssh.rc"), "3\n");
-
         var run = bb(env(), "rm", "t3-x");
 
         assertThat(run.rc()).isEqualTo(3);
-        assertThat(sshCalls()).singleElement().satisfies(call -> assertThat(call).contains("BB_OWNER=t3 ~/tools/bb-queue release ~/work/co/t3-x"));
+        assertThat(sshCalls()).singleElement()
+                  .satisfies(call -> assertThat(call).contains("BB_OWNER=t3 ~/tools/bb-queue release ~/work/co/t3-x"));
         assertThat(sshCalls().stream().flatMap(List::stream).anyMatch(a -> a.contains("rm -rf"))).isFalse();
         assertThat(binding()).exists();
     }
@@ -517,7 +635,6 @@ class BbTemperHostIT {
     @Test
     void rmKill_passesKillToTheRelease_thenDeletes() throws Exception {
         bind("cloudbb-d1");
-
         var run = bb(env(), "rm", "--kill", "t3-x");
 
         assertThat(run.rc()).as(run.err()).isZero();
@@ -531,7 +648,6 @@ class BbTemperHostIT {
     void rm_whenTheRemoteRmFails_keepsTheBinding() throws Exception {
         bind("cloudbb-d1");
         Files.writeString(dir.resolve("ssh.rc"), "1\n");
-
         var run = bb(env(), "rm", "t3-x");
 
         assertThat(run.rc()).isEqualTo(1);
@@ -543,7 +659,6 @@ class BbTemperHostIT {
     void checkout_withALiveBinding_looksOnTheBoundHost_notAFreshPick() throws Exception {
         bind("cloudbb-3");
         Files.writeString(dir.resolve("ssh.rc"), "1\n");
-
         var run = checkout(hosts(bigboy(), c3(), c4()));
 
         assertThat(run.rc()).isEqualTo(3);
@@ -556,22 +671,44 @@ class BbTemperHostIT {
     @Test
     void cloudHost_withASpaceInHome_quotesThePathsInsideTheSshOptions() throws Exception {
         var spaced = Files.createDirectories(dir.resolve("ho me"));
-        TestHosts.write(spaced);
 
-        var run = checkout(hosts(c4()), "HOME", spaced.toString(), "BB_HOST", "cloudbb-3");
+        TestHosts.write(spaced);
+        var run = checkout(hosts(c4()), "HOME", spaced.toString(), "BB_HOST", "cloudbb-3", "BB_PATH", "jump");
 
         assertThat(run.rc()).as(run.err()).isZero();
         var args = sshCalls().get(0);
-        assertThat(args).contains("UserKnownHostsFile=\"" + spaced + "/" + TestHosts.KNOWN + "\"");
-        assertThat(args).anySatisfy(a -> assertThat(a).startsWith("ProxyCommand=ssh -i \"" + spaced + "/" + TestHosts.KEY + "\" "));
+
+        assertThat(args).contains("UserKnownHostsFile=\"" + spaced + "/" + TestHosts.KNOWN + "\"",
+                                  "ControlPath=\"" + spaced + "/.ssh/cm/bbj-%C\"");
+        assertThat(probes()).isEqualTo(1);
+        assertThat(args).anySatisfy(a -> assertThat(a).startsWith("ProxyCommand=ssh -i \"" + spaced
+                                                                 + "/" + TestHosts.KEY
+                                                                 + "\" "));
         assertThat(Files.readString(spaced.resolve(".temper/bb-bind/t3-x")).strip()).isEqualTo("cloudbb-3");
+    }
+
+    /// The direct path of a jumped host (2026-11-19) pins the host key through the same quoted option: a space in HOME must not split it.
+    @Test
+    void cloudHost_withASpaceInHome_directPath_quotesTheKnownHostsPath_andHasNoProxy() throws Exception {
+        var spaced = Files.createDirectories(dir.resolve("ho me"));
+
+        TestHosts.write(spaced);
+        var run = checkout(hosts(c4()), "HOME", spaced.toString(), "BB_HOST", "cloudbb-3", "BB_PATH", "direct");
+
+        assertThat(run.rc()).as(run.err()).isZero();
+        var args = sshCalls().get(0);
+
+        assertThat(args).contains("UserKnownHostsFile=\"" + spaced + "/" + TestHosts.KNOWN + "\"",
+                                  "StrictHostKeyChecking=yes",
+                                  "ControlPath=\"" + spaced + "/.ssh/cm/bbd-%C\"");
+        assertThat(probes()).as("one direct probe, forced by BB_PATH, no cache read").isEqualTo(1);
+        assertThat(args).noneSatisfy(a -> assertThat(a).startsWith("ProxyCommand="));
     }
 
     /// ssh's own failure (255) is reported as such, not as "exists".
     @Test
     void checkout_whenSshItselfFails_reportsTheConnectionFailure_notExists() throws Exception {
         Files.writeString(dir.resolve("ssh.rc"), "255\n");
-
         var run = checkout(hosts(bigboy(), c3(), c4()), "BB_HOST", "bigboy");
 
         assertThat(run.rc()).isEqualTo(255);
@@ -584,7 +721,6 @@ class BbTemperHostIT {
     void checkout_explicitHost_withALiveBindingElsewhere_isRefused() throws Exception {
         bind("bigboy");
         Files.writeString(dir.resolve("ssh.rc"), "1\n");
-
         var run = checkout(hosts(c4()), "BB_HOST", "cloudbb-3");
 
         assertThat(run.rc()).isEqualTo(3);
@@ -597,7 +733,6 @@ class BbTemperHostIT {
     @Test
     void checkout_explicitHost_withAStaleBinding_overwritesItWithANote() throws Exception {
         bind("bigboy");
-
         var run = checkout(hosts(c4()), "BB_HOST", "cloudbb-3");
 
         assertThat(run.rc()).as(run.err()).isZero();
@@ -610,7 +745,6 @@ class BbTemperHostIT {
     @Test
     void checkout_withTheLockHeld_isRefused_andLeavesTheLock() throws Exception {
         var lock = Files.createDirectories(home.resolve(".temper/bb-bind/t3-x.lock"));
-
         var run = checkout(hosts(bigboy(), c3(), c4()));
 
         assertThat(run.rc()).isEqualTo(3);
@@ -627,7 +761,6 @@ class BbTemperHostIT {
 
         assertThat(checkout(hosts(bigboy(), c3(), c4())).rc()).isZero();
         assertThat(lock).doesNotExist();
-
         Files.writeString(dir.resolve("ssh.rc"), "1\n");
         assertThat(checkout(hosts(bigboy(), c3(), c4())).rc()).isEqualTo(3);
         assertThat(lock).doesNotExist();

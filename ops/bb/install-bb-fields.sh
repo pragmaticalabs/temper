@@ -2,7 +2,7 @@
 # install-bb-fields.sh -- installs the reviewed ops/bb/bb-build (ticket owner fields, T3), ops/bb/bb-tickets and, since
 # 2026-11-09 (orphan-ticket fix), ops/bb/bb-queue-lib.sh and ops/bb/bb-queue into ~/tools on bb hosts. Since 2026-11-11 (queue
 # tools: load gate, port groups) the set also holds bb-hold, bb-wait, bb-netns-run and bb-portgroup.py, which the new bb-build and
-# bb-queue call. Since the incremental build (bb-build --since) it also holds bb-modules.py, which bb-build calls and which imports bb-portgroup.py from its own directory. Since the bb-mutate batch fix it also holds bb-mutate (the mutation-testing harness; nothing else calls it). Since issue #48 it also holds bb-await (the one bounded wait for agent lanes). Since issue #53 bb-queue-lib.sh holds grants while MemAvailable is below a per-host floor, and bb-queue shows that gate. Since issue #56 it also bounds grants by a per-host reactor cap (~/work/max-reactors) and subtracts off-queue JVM headroom from MemAvailable; bb-queue shows the cap. The host's operator runs it, after the diff and md5s have been reviewed. Nothing in a build or a test ever runs it against a real host.
+# bb-queue call. Since the bb-mutate batch fix it also holds bb-mutate (the mutation-testing harness; nothing else calls it). Since the incremental build (bb-build --since) it also holds bb-modules.py, which bb-build calls and which imports bb-portgroup.py from its own directory. Since issue #48 it also holds bb-await (the one bounded wait for agent lanes). Since issue #53 bb-queue-lib.sh holds grants while MemAvailable is below a per-host floor, and bb-queue shows that gate. Since 2026-11-19 it also holds bb-jbct-bootstrap (the helper bb-build calls before a jbct run). Since issue #56 it also bounds grants by a per-host reactor cap (~/work/max-reactors) and subtracts off-queue JVM headroom from MemAvailable; bb-queue shows the cap. The host's operator runs it, after the diff and md5s have been reviewed. Nothing in a build or a test ever runs it against a real host.
 #
 # Usage: install-bb-fields.sh user@address [user@address ...]     at least one target; there is no default host
 #   Each target matches ^[a-z_][a-z0-9_-]{0,31}@[A-Za-z0-9.:-]+$. The md5 precondition is PER HOST: a host whose files differ
@@ -12,11 +12,11 @@
 #   everything before <target>, and then no config is read.
 # Phase 0, local: the eleven files of ops/bb (next to this script) named below must be the pinned reviewed files, else exit 65
 #   with no ssh made.
-# Phase 1, read-only, EVERY target first: installed bb-build is one of BB_BUILD_OLD|MID|PREV|LIVE|PRE31|PRERC|PREVIA|PREMEM|PRECAP|PRESINCE|NEW, bb-queue-lib.sh one of BB_LIB_OLD|PREV|PRERC|PREMEM|PRECAP|NEW,
+# Phase 1, read-only, EVERY target first: installed bb-build is one of BB_BUILD_OLD|MID|PREV|LIVE|PRE31|PRERC|PREVIA|PREMEM|PRECAP|PREJBCT|PRESINCE|NEW, bb-queue-lib.sh one of BB_LIB_OLD|PREV|PRERC|PREMEM|PRECAP|NEW,
 #   bb-queue one of BB_QUEUE_OLD|PREV|LIVE|PRE31|PRERC|PREVIA|PREMEM|PRECAP|NEW, bb-tickets is absent, BB_TICKETS_OLD|PRE31|NEW, bb-hold is absent, BB_HOLD_OLD (the 2026-11-09
-#   host snapshot) or BB_HOLD_NEW, bb-wait is absent, BB_WAIT_PRERC or its NEW, bb-await is absent or BB_AWAIT_NEW, bb-netns-run is absent, BB_NETNS_PREV or BB_NETNS_NEW, bb-portgroup.py is absent, BB_PORTGROUP_PREV, BB_PORTGROUP_PRESINCE or BB_PORTGROUP_NEW, bb-modules.py is absent or BB_MODULES_NEW, bb-mutate is absent, BB_MUTATE_OLD, BB_MUTATE_PREVIA or BB_MUTATE_NEW. Any mismatch prints `refused <target> <file> installed=<md5|absent>
+#   host snapshot) or BB_HOLD_NEW, bb-wait is absent, BB_WAIT_PRERC or its NEW, bb-await is absent or BB_AWAIT_NEW, bb-netns-run is absent, BB_NETNS_PREV or BB_NETNS_NEW, bb-portgroup.py is absent, BB_PORTGROUP_PREV, BB_PORTGROUP_PRESINCE or BB_PORTGROUP_NEW, bb-modules.py is absent or BB_MODULES_NEW, bb-mutate is absent, BB_MUTATE_OLD, BB_MUTATE_PREVIA or BB_MUTATE_NEW, bb-jbct-bootstrap is absent or BB_JBCTBOOT_NEW. Any mismatch prints `refused <target> <file> installed=<md5|absent>
 #   expected=<pin>[|<pin>...]` (every accepted pin except `absent`, in the order above) for every mismatch on every target and exits 65 having written nothing anywhere; an unreachable target is 69.
-# Phase 2, per target and per file to change (bb-mutate, bb-tickets, bb-hold, bb-wait, bb-await, bb-netns-run, bb-portgroup.py, bb-modules.py, bb-queue-lib.sh, bb-queue,
+# Phase 2, per target and per file to change (bb-mutate, bb-tickets, bb-hold, bb-wait, bb-await, bb-netns-run, bb-portgroup.py, bb-modules.py, bb-jbct-bootstrap, bb-queue-lib.sh, bb-queue,
 #   then bb-build: the helpers and the lib before the tools that call or source them), one remote `bash -s` script: receive the file as
 #   ~/tools/<f>.new (base64 on stdin); its md5 must be the pinned one; re-check that the installed file is still what phase 1
 #   saw (closes the race with phase 1); chmod 0755; cp -p an existing file (not bb-tickets) to <f>.bak-<oldmd5> (an existing .bak of that name is
@@ -56,8 +56,11 @@ readonly BB_BUILD_PRERC=50920a7137f237aaa512d84d117ad4f2   # live on all four ho
 readonly BB_BUILD_PREVIA=01e0bc34ea0effa8a8273a781f8ea52d   # live from the 2026-11-13 install: no via= ticket field (issue #46)
 readonly BB_BUILD_PREMEM=eb10b2f4ea6c244444e95aa56bcf7e09
 readonly BB_BUILD_PRECAP=8478b2174ce3ff6de293b55a283e3ce7   # the #53 version: comments only differ (issue #56)
-readonly BB_BUILD_PRESINCE=12c68a554862caa672f7211456dfc84c   # the #56 version: no --since (docs/bb-build-once-design.md section 1)
-readonly BB_BUILD_NEW=23cc986fcbe369ab32f3e8b9c834c55c
+readonly BB_BUILD_PREJBCT=12c68a554862caa672f7211456dfc84c   # the #56 version: no jbct plugin bootstrap hook
+readonly BB_BUILD_PRESINCE=a942996fc17ef7851bac693f135defc2   # the #64 version: jbct bootstrap hook, no --since (docs/bb-build-once-design.md section 1)
+readonly BB_BUILD_NEW=ff3f99dd5c48a239431e786b65cb763a
+# bb-jbct-bootstrap: absent on every host before its first install; bb-build calls it, so it is installed first.
+readonly BB_JBCTBOOT_NEW=3e5396ecee48b99949456cf805df1e60
 readonly BB_TICKETS_OLD=472cd816644fe0ee0902b8da3d33de8e   # before the per-ticket progressAt (issue #10)
 readonly BB_TICKETS_PRE31=e1aeba98541ba781295001f956b08c8d   # live since 2026-11-12: drops a ticket key with a capital letter
 readonly BB_TICKETS_NEW=6174119f0cd567c5dc462d1e063c6214
@@ -92,19 +95,21 @@ done
 
 # The files, in install order (helpers and the lib before the tools that call or source them), with what each may be on a host.
 # absent_ok: the file may be missing. bash 3.2 compatible: no associative arrays.
-FILES=(bb-mutate bb-tickets bb-hold bb-wait bb-await bb-netns-run bb-portgroup.py bb-modules.py bb-queue-lib.sh bb-queue bb-build)
-PROBE_ORDER=(bb-build bb-queue-lib.sh bb-queue bb-tickets bb-hold bb-wait bb-await bb-netns-run bb-portgroup.py bb-modules.py bb-mutate)   # refusal lines come in this order
+FILES=(bb-mutate bb-tickets bb-hold bb-wait bb-await bb-netns-run bb-portgroup.py bb-modules.py bb-jbct-bootstrap bb-queue-lib.sh bb-queue bb-build)
+PROBE_ORDER=(bb-build bb-queue-lib.sh bb-queue bb-tickets bb-hold bb-wait bb-await bb-netns-run bb-portgroup.py bb-modules.py bb-mutate bb-jbct-bootstrap)   # refusal lines come in this order
 new_of() {
   case $1 in
     bb-build) echo "$BB_BUILD_NEW" ;; bb-queue-lib.sh) echo "$BB_LIB_NEW" ;; bb-queue) echo "$BB_QUEUE_NEW" ;;
     bb-tickets) echo "$BB_TICKETS_NEW" ;; bb-hold) echo "$BB_HOLD_NEW" ;; bb-wait) echo "$BB_WAIT_NEW" ;; bb-await) echo "$BB_AWAIT_NEW" ;;
     bb-netns-run) echo "$BB_NETNS_NEW" ;; bb-portgroup.py) echo "$BB_PORTGROUP_NEW" ;;
-    bb-modules.py) echo "$BB_MODULES_NEW" ;; bb-mutate) echo "$BB_MUTATE_NEW" ;;
+    bb-modules.py) echo "$BB_MODULES_NEW" ;;
+    bb-mutate) echo "$BB_MUTATE_NEW" ;;
+    bb-jbct-bootstrap) echo "$BB_JBCTBOOT_NEW" ;;
   esac
 }
 accepted_of() {  # the md5s a host may hold besides absent, in the order the refusal names them
   case $1 in
-    bb-build) echo "$BB_BUILD_OLD $BB_BUILD_MID $BB_BUILD_PREV $BB_BUILD_LIVE $BB_BUILD_PRE31 $BB_BUILD_PRERC $BB_BUILD_PREVIA $BB_BUILD_PREMEM $BB_BUILD_PRECAP $BB_BUILD_PRESINCE $BB_BUILD_NEW" ;;
+    bb-build) echo "$BB_BUILD_OLD $BB_BUILD_MID $BB_BUILD_PREV $BB_BUILD_LIVE $BB_BUILD_PRE31 $BB_BUILD_PRERC $BB_BUILD_PREVIA $BB_BUILD_PREMEM $BB_BUILD_PRECAP $BB_BUILD_PREJBCT $BB_BUILD_PRESINCE $BB_BUILD_NEW" ;;
     bb-queue-lib.sh) echo "$BB_LIB_OLD $BB_LIB_PREV $BB_LIB_PRERC $BB_LIB_PREMEM $BB_LIB_PRECAP $BB_LIB_NEW" ;;
     bb-queue) echo "$BB_QUEUE_OLD $BB_QUEUE_PREV $BB_QUEUE_LIVE $BB_QUEUE_PRE31 $BB_QUEUE_PRERC $BB_QUEUE_PREVIA $BB_QUEUE_PREMEM $BB_QUEUE_PRECAP $BB_QUEUE_NEW" ;;
     bb-hold) echo "$BB_HOLD_OLD $BB_HOLD_NEW" ;;
@@ -140,7 +145,7 @@ else
 fi
 
 # ---- phase 1: read-only, every target
-PROBE='for f in bb-build bb-queue-lib.sh bb-queue bb-tickets bb-hold bb-wait bb-await bb-netns-run bb-portgroup.py bb-modules.py bb-mutate; do
+PROBE='for f in bb-build bb-queue-lib.sh bb-queue bb-tickets bb-hold bb-wait bb-await bb-netns-run bb-portgroup.py bb-modules.py bb-mutate bb-jbct-bootstrap; do
   if [ -f "$HOME/tools/$f" ]; then printf "%s %s\n" "$f" "$(md5sum < "$HOME/tools/$f" | cut -d" " -f1)"; else printf "%s absent\n" "$f"; fi
 done'
 INST=()   # per target and file (FILES order): the installed md5 (or absent), as phase 1 saw it, at index target * ${#FILES[@]} + file

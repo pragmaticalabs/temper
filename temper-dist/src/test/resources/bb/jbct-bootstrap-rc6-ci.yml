@@ -1,0 +1,17 @@
+jobs:
+  b:
+    steps:
+        run: mvn install -B -DskipTests -pl jbct/jbct-maven-plugin,jbct/slice-processor,aether/pg-tools/pg-codegen -am
+      # still broke ./build.sh, because `mvn install` compiles unformatted, lint-violating sources
+        run: mvn install -B -DskipTests -pl jbct/jbct-maven-plugin,jbct/slice-processor,aether/pg-tools/pg-codegen -am
+        run: mvn install -B -DskipTests -pl "${{ steps.plan.outputs.modules }}" -am
+        run: mvn install -B -DskipTests -pl jbct/jbct-maven-plugin,jbct/slice-processor,aether/pg-tools/pg-codegen -am
+        run: mvn install -B -DskipTests
+        run: mvn -B -f aether/tests/blueprints/test-stream-repl/pom.xml clean install -DskipTests
+        run: mvn install -B -DskipTests -pl jbct/jbct-maven-plugin,jbct/slice-processor,aether/pg-tools/pg-codegen -am
+        run: mvn install -B -DskipTests -pl aether/ember -am
+        run: mvn install -B -DskipTests -pl jbct/jbct-maven-plugin,jbct/slice-processor,aether/pg-tools/pg-codegen -am
+        run: mvn install -B -DskipTests -pl integrations/consensus -am
+        run: mvn install -B -DskipTests -pl jbct/jbct-maven-plugin,jbct/slice-processor,aether/pg-tools/pg-codegen -am
+        run: mvn install -B -DskipTests -Pwith-e2e -pl "${{ steps.plan.outputs.modules }}" -am
+        run: mvn -B -f aether/tests/blueprints/test-stream-repl/pom.xml clean install -DskipTests
