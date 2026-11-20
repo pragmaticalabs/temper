@@ -22,6 +22,7 @@ import org.pragmatica.temper.cli.config.AlarmConfig;
 import org.pragmatica.temper.cli.transport.Controller;
 import org.pragmatica.temper.cli.transport.HttpCall;
 import org.pragmatica.temper.cli.transport.HttpReply;
+import org.pragmatica.temper.protocol.api.FleetAlarmsView;
 import org.pragmatica.temper.protocol.json.TemperJson;
 
 import org.junit.jupiter.api.Test;
@@ -715,9 +716,24 @@ class AlarmCheckTest {
                                                                      + "bigboy portgroup-long r9 age=400m limit=360m\n\n/fleet/alarms"));
     }
 
+    private static final String REACTOR_CWD = "/home/aether/v3455d dir%20x";
+
+    private static String reactorTicket() {
+        return FleetAlarmsView.Alarm.reactorAlarm("off-queue-reactor",
+                                                  Option.none(),
+                                                  Option.none(),
+                                                  Instant.EPOCH,
+                                                  77,
+                                                  "unowned",
+                                                  REACTOR_CWD)
+                                    .ticket()
+                                    .or("");
+    }
+
     private static String reactorAlarm(String kind, String limit) {
         return "{\"kind\":\"" + kind
-             + "\",\"ticket\":\"pid=77 owner=unowned cwd=/home/aether/v3455d dir\",\"ageMin\":45,\"limitMin\":" + limit
+             + "\",\"ticket\":\"" + reactorTicket()
+             + "\",\"ageMin\":45,\"limitMin\":" + limit
              + ",\"days\":null,\"skewS\":null,"
              + "\"firedAt\":\"2026-10-13T09:55:00Z\"}";
     }
@@ -735,7 +751,19 @@ class AlarmCheckTest {
                                                            reactorAlarm("lingering-reactor", "30"))));
 
         assertThat(both.conditions()).contains(Condition.firing(AlarmCode.HOST_ALARMS,
-                                                                "bigboy off-queue-reactor pid=77 owner=unowned cwd=/home/aether/v3455d dir age=45m\n"
-                                                               + "bigboy lingering-reactor pid=77 owner=unowned cwd=/home/aether/v3455d dir age=45m limit=30m\n\n/fleet/alarms"));
+                                                                "bigboy off-queue-reactor pid=77 owner=unowned cwd=/home/aether/v3455d%20dir%2520x age=45m\n"
+                                                               + "bigboy lingering-reactor pid=77 owner=unowned cwd=/home/aether/v3455d%20dir%2520x age=45m limit=30m\n\n/fleet/alarms"));
+        var line = both.conditions()
+                       .stream()
+                       .filter(Condition.Firing.class::isInstance)
+                       .map(c -> ((Condition.Firing) c).detail())
+                       .findFirst()
+                       .orElseThrow()
+                       .lines()
+                       .findFirst()
+                       .orElseThrow();
+        var encoded = line.substring(line.indexOf(" cwd=") + 5, line.lastIndexOf(" age="));
+
+        assertThat(FleetAlarmsView.Alarm.decodeCwd(encoded)).isEqualTo(REACTOR_CWD);
     }
 }
