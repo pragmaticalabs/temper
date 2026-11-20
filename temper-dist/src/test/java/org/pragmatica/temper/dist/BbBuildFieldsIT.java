@@ -276,4 +276,24 @@ class BbBuildFieldsIT {
         assertThat(listingWith.stdout()).contains(id).isEqualTo(listingWithout.stdout());
         assertThat(listingWith.stdout()).doesNotContain("t3wpb").doesNotContain("lead1").doesNotContain("37444");
     }
+    /// `--help` / `-h` alone: the usage (bb-build's header) on stdout, exit 0, stderr empty, nothing written, no BB_OWNER needed. Anything
+    /// else with those words (a checkout named --help plus args) is not help.
+    /// Mutation: drop the --help branch -> exit 2 with no output, red.
+    @Test
+    void help_printsTheUsageToStdout_exit0_andTouchesNothing() throws Exception {
+        for (var flag : List.of("--help", "-h")) {
+            var env = new HashMap<String, String>();
+            env.put("PATH", System.getenv("PATH"));
+            env.put("HOME", Files.createDirectories(dir.resolve("helphome")).toString());
+            var queue = dir.resolve("helpq");
+            env.put("BB_TEST_QUEUE_ROOT", queue.toString());
+            var outcome = BbFixtures.run(List.of(BB_BUILD.toString(), flag), env, null, null);
+
+            assertThat(outcome.rc()).as(flag + ": " + outcome.stderr()).isZero();
+            assertThat(outcome.stderr()).isEmpty();
+            assertThat(outcome.stdout()).startsWith("bb-build <checkout-dir> [mvn args...]").contains("TICKET OWNER FIELDS").doesNotContain("set -euo pipefail");
+            assertThat(queue).doesNotExist();
+            assertThat(dir.resolve("helphome")).isEmptyDirectory();
+        }
+    }
 }
