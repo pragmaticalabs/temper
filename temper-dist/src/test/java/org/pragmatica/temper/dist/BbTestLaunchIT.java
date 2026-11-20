@@ -342,7 +342,7 @@ class BbTestLaunchIT {
         assertThat(Files.readString(co.resolve(".bb/rc")).strip()).as(".bb/rc holds the refusal code, never java's 0").isEqualTo("15");
         assertThat(run.doneText()).contains("\nrefused=junit version: " + why, "\nverdict_source=guard\n").doesNotContain("verdict_source=java");
         assertThat(Files.readString(co.resolve(".bb/refused"))).contains(why);
-        var row = Files.readAllLines(dir.resolve("home/work/bb-ticket-log.tsv")).stream().filter(l -> l.contains("\t" + run.id() + "\t")).toList();
+        var row = Files.readAllLines(dir.resolve("ticket-log.tsv")).stream().filter(l -> l.contains("\t" + run.id() + "\t")).toList();
 
         assertThat(row).as("one ledger row for the ticket").hasSize(1);
         assertThat(row.get(0).split("\t")[12]).as("the ledger's state column").isEqualTo("refused");
@@ -361,7 +361,7 @@ class BbTestLaunchIT {
         var old = Path.of(System.getProperty("user.home")).resolve(OLD_API);
 
         assumeTrue(Files.exists(old), "the seeded junit-jupiter-api 5.11.4 is on build hosts only");
-        var extra = Map.of("RECORD_EXTRA", old.toString());
+        var extra = Map.of("RECORD_EXTRA", old.toString(), "BB_TEST_TICKET_LOG", dir.resolve("ticket-log.tsv").toString());
 
         assertThat(build(extra).rc()).as(log()).isZero();
         var run = bbTest(extra, "fx.CalcTest#passes");
