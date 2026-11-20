@@ -199,6 +199,9 @@ class BbInstallIT {
         assertThat(pin("BB_BUILD_PRECAP")).isEqualTo(BbFixtures.md5(prev("bb-build.precap")));
         assertThat(pin("BB_LIB_PRECAP")).isEqualTo(BbFixtures.md5(prev("bb-queue-lib.sh.precap")));
         assertThat(pin("BB_QUEUE_PRECAP")).isEqualTo(BbFixtures.md5(prev("bb-queue.precap")));
+        assertThat(pin("BB_LIB_PREOFFQ")).isEqualTo(BbFixtures.md5(prev("bb-queue-lib.sh.preoffq")));
+        assertThat(pin("BB_QUEUE_PREOFFQ")).isEqualTo(BbFixtures.md5(prev("bb-queue.preoffq")));
+        assertThat(pin("BB_TICKETS_PREOFFQ")).isEqualTo(BbFixtures.md5(prev("bb-tickets.preoffq")));
         assertThat(pin("BB_HOLD_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-hold")));
         assertThat(pin("BB_WAIT_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-wait")));
         assertThat(pin("BB_AWAIT_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-await")));
@@ -486,6 +489,40 @@ class BbInstallIT {
         }
     }
 
+    /// The bb-queue-lib.sh, bb-queue and bb-tickets before the off-queue reactor list (BB_*_PREOFFQ, 2026-11-20) are accepted sources and are
+    /// replaced, backed up under their md5. Mutation: leave a PREOFFQ out of its accepted list -> the install is refused (65), red.
+    @Test
+    void aHostRunningThePreOffQueueTools_isUpdatedToTheOnesThatListOffQueueReactors() throws Exception {
+        var tools = host("h1");
+
+        assertThat(install("builder@h1").rc()).isZero();
+        var names = List.of("bb-queue-lib.sh", "bb-queue", "bb-tickets");
+
+        for (var name : names) {
+            Files.write(tools.resolve(name), prev(name + ".preoffq"));
+        }
+
+        var run = install("builder@h1");
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        for (var name : names) {
+            var key = switch (name) {
+                case "bb-queue-lib.sh" -> "BB_LIB_";
+                case "bb-queue" -> "BB_QUEUE_";
+                default -> "BB_TICKETS_";
+            };
+
+            assertThat(run.stdout()).contains("installed builder@h1 " + name
+                                             + " before=" + pin(key + "PREOFFQ")
+                                             + " after=" + pin(key + "NEW"));
+            assertThat(tools.resolve(name)).hasBinaryContent(Files.readAllBytes(OPS_BB.resolve(name)));
+            if (!name.equals("bb-tickets")) {
+                // the installer backs up every file but bb-tickets
+                assertThat(tools.resolve(name + ".bak-" + pin(key + "PREOFFQ"))).hasBinaryContent(prev(name + ".preoffq"));
+            }
+        }
+    }
+
     /// The bb-netns-run of 2026-11-11 (BB_NETNS_PREV, no docker socket in the container; live on c3/c4/d1) is an accepted source and is replaced, backed up under its md5.
     @Test
     void aHostRunningThePreviousNetnsRun_isUpdatedToTheOneThatReachesDocker() throws Exception {
@@ -688,6 +725,7 @@ class BbInstallIT {
                            + "|621b2252c3da05e7dd1161d076908864|" + pin("BB_LIB_PRERC")
                            + "|" + pin("BB_LIB_PREMEM")
                            + "|" + pin("BB_LIB_PRECAP")
+                           + "|" + pin("BB_LIB_PREOFFQ")
                            + "|" + pin("BB_LIB_NEW"))
                   .contains("bb-queue installed=" + BbFixtures.md5("unrelated tool\n".getBytes())
                            + " expected=" + BbFixtures.BB_QUEUE_OLD
@@ -697,6 +735,7 @@ class BbInstallIT {
                            + "|" + pin("BB_QUEUE_PREVIA")
                            + "|" + pin("BB_QUEUE_PREMEM")
                            + "|" + pin("BB_QUEUE_PRECAP")
+                           + "|" + pin("BB_QUEUE_PREOFFQ")
                            + "|" + pin("BB_QUEUE_NEW"));
     }
 

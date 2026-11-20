@@ -42,6 +42,24 @@ class TicketParseTest {
         assertThat(tickets.get(1).waiterState().isPresent()).as("a done ticket has waiter null").isFalse();
     }
 
+    /// The trailer's optional `offq`: read when well formed; a malformed list or element never fails the collection (the tickets
+    /// must still be read), and an old host's trailer without it reads as none.
+    /// Mutation: fail the reply on a malformed `offq` -> the second assertion is red.
+    @Test
+    void theTrailersOffq_isReadTolerantly_neverFailingTheTickets() {
+        var good = "{\"v\":1,\"end\":true,\"count\":1,\"queue\":\"present\",\"at\":1793700000,\"offq\":[{\"pid\":12,\"startS\":1793699000,"
+                 + "\"owner\":\"v3436i\",\"cwd\":\"/h/work/co/v3436i-head\"},{\"pid\":\"x\"},{\"pid\":13,\"startS\":5,\"owner\":\"unowned\",\"cwd\":\"/h/a b\"}]}";
+        var broken = "{\"v\":1,\"end\":true,\"count\":1,\"queue\":\"present\",\"at\":1793700000,\"offq\":\"nope\"}";
+        var read = TicketParse.parse(MAPPER, RUNNING + "\n" + good + "\n").unwrap();
+
+        assertThat(read.offq()).extracting(o -> o.key() + " " + o.owner() + " " + o.cwd())
+                  .containsExactly("12:1793699000 v3436i /h/work/co/v3436i-head", "13:5 unowned /h/a b");
+        assertThat(TicketParse.parse(MAPPER, RUNNING + "\n" + broken + "\n").unwrap().offq()).isEmpty();
+        assertThat(TicketParse.parse(MAPPER,
+                                     RUNNING + "\n" + trailer(1) + "\n").unwrap().offq()).as("an old host")
+                  .isEmpty();
+    }
+
     @Test
     void aReplyWithoutItsTrailer_isTruncated() {
         assertThat(failure(RUNNING + "\n" + DONE + "\n")).isEqualTo("truncated");

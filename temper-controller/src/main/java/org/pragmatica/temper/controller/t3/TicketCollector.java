@@ -239,10 +239,11 @@ public final class TicketCollector {
     private record Read(String output, Instant t1) {}
 
     private static BbStore.Listing listing(Instant t0, Instant t1, TicketParse.Reply reply) {
-        return BbStore.Listing.listing(reply.queue(),
-                                       reply.tickets(),
-                                       reply.at(),
-                                       TicketAlarms.skew(t0, t1, reply.at()));
+        var skew = TicketAlarms.skew(t0, t1, reply.at());
+
+        return reply.offqRead()
+               ? BbStore.Listing.listing(reply.queue(), reply.tickets(), reply.at(), skew, reply.offq())
+               : BbStore.Listing.listingOffqUnread(reply.queue(), reply.tickets(), reply.at(), skew);
     }
 
     /// A transport that throws instead of answering fails the read as one that could not start.
