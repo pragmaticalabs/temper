@@ -275,7 +275,7 @@ class TicketCollectorIT {
 
     // ---- off-queue launchers across a failed `bb-queue offq` ------------------------------------------------------
     private static String trailer(String offq) {
-        return "{\"v\":1,\"end\":true,\"count\":0,\"queue\":\"present\",\"at\":1793900000" + offq + "}\n";
+        return "{\"v\":1,\"end\":true,\"count\":0,\"queue\":\"present\",\"at\":" + T0.getEpochSecond() + offq + "}\n";
     }
 
     private List<BbAlarm> reactorMarks() {
@@ -297,7 +297,8 @@ class TicketCollectorIT {
         var replies = new java.util.concurrent.ConcurrentLinkedQueue<String>();
         TicketTransport transport = _ -> Promise.success(replies.poll());
         var collector = collector(TicketDiff.NONE, target("h1", transport));
-        var seen = ",\"offq\":[{\"pid\":200,\"startS\":1793899000,\"owner\":\"unowned\",\"cwd\":\"/h/x\"}]";
+        var seen = ",\"offq\":[{\"pid\":200,\"startS\":" + (T0.getEpochSecond() - 1000)
+                 + ",\"owner\":\"unowned\",\"cwd\":\"/h/x\"}]";
 
         replies.add(trailer(seen));
         collector.round().await(Pg.WAIT).unwrap();
