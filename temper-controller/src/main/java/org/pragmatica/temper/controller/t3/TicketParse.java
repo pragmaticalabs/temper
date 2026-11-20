@@ -13,6 +13,7 @@ import org.pragmatica.json.JsonMapper;
 import org.pragmatica.lang.Cause;
 import org.pragmatica.lang.Option;
 import org.pragmatica.lang.Result;
+import org.pragmatica.temper.store.api.BbOffQueue;
 import org.pragmatica.temper.store.api.BbTicket;
 
 import tools.jackson.databind.JsonNode;
@@ -25,17 +26,19 @@ import tools.jackson.databind.JsonNode;
 /// wrong `count` is `truncated`. A queue root that does not exist (`queue` absent, zero lines) is a success with no tickets.
 public final class TicketParse {
     private static final Pattern ID = Pattern.compile("^[A-Za-z0-9._-]{1,64}$");
+    private static final int OFFQ_MAX = 64;
     private static final List<String> DIRS = List.of("running", "waiting", "done");
 
     /// One line as read: a ticket, or the trailer with its `count`.
     private sealed interface Line {
         record Ticket(BbTicket ticket) implements Line {}
 
-        record Trailer(int count, String queue, long at) implements Line {}
+        record Trailer(int count, String queue, long at, List<BbOffQueue> offq) implements Line {}
     }
 
-    /// A proven reply: the tickets, the trailer's `queue` (`present` | `absent`) and its `at` (epoch seconds, host clock).
-    public record Reply(List<BbTicket> tickets, String queue, Instant at) {}
+    /// A proven reply: the tickets, the trailer's `queue` (`present` | `absent`), its `at` (epoch seconds, host clock) and its
+    /// optional `offq` (the host's off-queue maven launchers).
+    public record Reply(List<BbTicket> tickets, String queue, Instant at, List<BbOffQueue> offq) {}
 
     private TicketParse() {}
 
@@ -69,12 +72,12 @@ public final class TicketParse {
                            .toList();
         var trailers = lines.size() - tickets.size();
 
-        return lines.isEmpty() || !(lines.getLast() instanceof Line.Trailer(var count, var queue, var at))
+        return lines.isEmpty() || !(lines.getLast() instanceof Line.Trailer(var count, var queue, var at, var offq))
                ? TicketError.Truncated.TRUNCATED.result()
                : trailers != 1
                  ? TicketError.Malformed.malformed(lines.size()).result()
                  : count == tickets.size()
-                   ? Result.success(new Reply(tickets, queue, Instant.ofEpochSecond(at)))
+                   ? Result.success(new Reply(tickets, queue, Instant.ofEpochSecond(at), offq))
                    : TicketError.Truncated.TRUNCATED.result();
     }
 
@@ -108,8 +111,35 @@ public final class TicketParse {
                                                                                                                                                                                                                                                                                                                                                              .longValue())
                ? Result.success(new Line.Trailer(count.intValue(),
                                                  queue.stringValue(),
-                                                 node.path("at").longValue()))
+                                                 node.path("at").longValue(),
+                                                 offQueue(node.path("offq"))))
                : TicketError.Malformed.malformed(0).result();
+    }
+
+    /// The trailer's optional `offq`: a missing or malformed list is none, and an element that is not
+    /// `{pid, startS, owner, cwd}` is dropped, never a failed collection (the tickets must still be read). At most [#OFFQ_MAX].
+    private static List<BbOffQueue> offQueue(JsonNode node) {
+        return node.isArray()
+               ? StreamSupport.stream(node.spliterator(),
+                                      false)
+                              .flatMap(TicketParse::offQueueEntry)
+                              .limit(OFFQ_MAX)
+                              .toList()
+               : List.of();
+    }
+
+    private static Stream<BbOffQueue> offQueueEntry(JsonNode node) {
+        var pid = node.path("pid");
+        var start = node.path("startS");
+        var owner = node.path("owner");
+        var cwd = node.path("cwd");
+
+        return pid.isIntegralNumber() && pid.canConvertToLong() && pid.longValue() > 0 && start.isIntegralNumber() && start.canConvertToLong() && start.longValue() >= 0 && owner.isString() && cwd.isString()
+               ? Stream.of(BbOffQueue.bbOffQueue(pid.longValue(),
+                                                 start.longValue(),
+                                                 owner.stringValue(),
+                                                 cwd.stringValue()))
+               : Stream.empty();
     }
 
     /// An `at` beyond what an [Instant] holds is not a time.

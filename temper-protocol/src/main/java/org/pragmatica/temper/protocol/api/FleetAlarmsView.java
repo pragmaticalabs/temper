@@ -48,14 +48,32 @@ public record FleetAlarmsView(int v, Instant asOf, List<HostAlarms> hosts) {
     /// One current alarm. `ticket`, `ageMin` and `limitMin` belong to the per-ticket kinds (`queue-wait`,
     /// `portgroup-held`, `portgroup-long`; `waiter-gone` has a ticket only), `days` to `host-retiring`, `skewS` to `clock-skew`.
     /// `ageMin` is as of the host's `hostAt`: the ticket's wait or run time, but for `portgroup-held` its stall (time since
-    /// its last progress); `firedAt` is on the controller clock.
+    /// its last progress); `firedAt` is on the controller clock. `pid`, `owner` and `cwd` belong to the off-queue kinds
+    /// (`off-queue-reactor`, `lingering-reactor`): the launcher's pid, its owner (the checkout prefix under ~/work/co, else
+    /// `unowned`) and its full working directory; `ageMin` is its age and `limitMin` the lingering limit (`lingering-reactor` only).
+    /// A reply of a controller older than these fields reads them as none.
     public record Alarm(String kind,
                         Option<String> ticket,
                         Option<Integer> ageMin,
                         Option<Integer> limitMin,
                         Option<Integer> days,
                         Option<Integer> skewS,
-                        Instant firedAt) {
+                        Instant firedAt,
+                        Option<Long> pid,
+                        Option<String> owner,
+                        Option<String> cwd) {
+        public Alarm {
+            pid = pid == null
+                  ? Option.none()
+                  : pid;
+            owner = owner == null
+                    ? Option.none()
+                    : owner;
+            cwd = cwd == null
+                  ? Option.none()
+                  : cwd;
+        }
+
         public static Alarm alarm(String kind,
                                   Option<String> ticket,
                                   Option<Integer> ageMin,
@@ -63,7 +81,35 @@ public record FleetAlarmsView(int v, Instant asOf, List<HostAlarms> hosts) {
                                   Option<Integer> days,
                                   Option<Integer> skewS,
                                   Instant firedAt) {
-            return new Alarm(kind, ticket, ageMin, limitMin, days, skewS, firedAt);
+            return new Alarm(kind,
+                             ticket,
+                             ageMin,
+                             limitMin,
+                             days,
+                             skewS,
+                             firedAt,
+                             Option.none(),
+                             Option.none(),
+                             Option.none());
+        }
+
+        public static Alarm reactorAlarm(String kind,
+                                         Option<Integer> ageMin,
+                                         Option<Integer> limitMin,
+                                         Instant firedAt,
+                                         long pid,
+                                         String owner,
+                                         String cwd) {
+            return new Alarm(kind,
+                             Option.none(),
+                             ageMin,
+                             limitMin,
+                             Option.none(),
+                             Option.none(),
+                             firedAt,
+                             Option.some(pid),
+                             Option.some(owner),
+                             Option.some(cwd));
         }
     }
 }

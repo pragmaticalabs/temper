@@ -242,7 +242,8 @@ public final class TicketCollector {
         return BbStore.Listing.listing(reply.queue(),
                                        reply.tickets(),
                                        reply.at(),
-                                       TicketAlarms.skew(t0, t1, reply.at()));
+                                       TicketAlarms.skew(t0, t1, reply.at()),
+                                       reply.offq());
     }
 
     /// A transport that throws instead of answering fails the read as one that could not start.

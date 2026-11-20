@@ -17,6 +17,10 @@ public record BbAlarm(String host, String kind, String subject, String threshold
     public static final String WAITER_GONE = "waiter-gone";
     public static final String CLOCK_SKEW = "clock-skew";
     public static final String HOST_RETIRING = "host-retiring";
+    /// A maven launcher on the host that the queue did not start; subject `pid:startS`, threshold `0`.
+    public static final String OFF_QUEUE_REACTOR = "off-queue-reactor";
+    /// The same launcher still running at the lingering limit; subject `pid:startS`, threshold the limit in minutes.
+    public static final String LINGERING_REACTOR = "lingering-reactor";
     /// The subject of a `clock-skew` mark (one per host).
     public static final String NO_TICKET = "-";
     /// The threshold of a `waiter-gone` mark.

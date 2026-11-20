@@ -11,6 +11,7 @@ import java.util.stream.Stream;
 
 import org.pragmatica.lang.Option;
 import org.pragmatica.temper.store.api.BbAlarm;
+import org.pragmatica.temper.store.api.BbOffQueue;
 import org.pragmatica.temper.store.api.BbSnapshot;
 import org.pragmatica.temper.store.api.BbStore.Listing;
 import org.pragmatica.temper.store.api.BbStore.RoundWrite;
@@ -24,7 +25,7 @@ import static org.pragmatica.lang.Option.option;
 
 
 /// The alarms one successful collection makes: `clock-skew`,
-/// `queue-wait`, `portgroup-held`, `portgroup-long` and `waiter-gone`, from the new listing, the baseline and the host's `bb_alarm` rows.
+/// `queue-wait`, `portgroup-held`, `portgroup-long`, `waiter-gone`, `off-queue-reactor` and `lingering-reactor`, from the new listing, the baseline and the host's `bb_alarm` rows.
 /// Pure: it runs inside the collection's transaction on the rows that transaction read, so an event is made only for a
 /// key that is absent, and its mark is written with it.
 ///
@@ -37,6 +38,11 @@ import static org.pragmatica.lang.Option.option;
 /// judged by the stall clock from its start) is at least the stall limit behind the listing's `at`; its mark is
 /// cleared as soon as the ticket progresses, so the next stall fires again. `portgroup-long` is the age backstop
 /// (`at − started` at the age limit, once), whatever the progress.
+///
+/// `off-queue-reactor` fires once per launcher the host's listing names as not started by the queue (`offq`), keyed by
+/// `pid:startS` so a reused pid is a new launcher; `lingering-reactor` once when that launcher's age (`at − startS`) reaches
+/// [#LINGERING_REACTOR_MIN]. Both marks are cleared when the launcher is no longer listed. A listing without `offq` (an older
+/// `bb-tickets`, or one whose `bb-queue offq` failed that round) lists none, so the marks clear and re-fire when it returns.
 public final class TicketAlarms {
     /// `queue-wait` fires again here, when above the configured limit.
     static final int QUEUE_WAIT_SECOND_MIN = 180;
@@ -44,8 +50,14 @@ public final class TicketAlarms {
     static final int SKEW_BOUND_S = 30;
     /// ...and re-arms at or below this many (G-S1-4).
     static final int SKEW_REARM_S = 20;
+    /// `lingering-reactor` fires when an off-queue maven launcher has run this many minutes. The one site of the figure. 30 is a guess,
+    /// anchored on the queue's own tickets over 7 days (run_s p99 about 46 min, 1.6% above 30 min): the incident that asked for the
+    /// alarm blocked a host for 45 min; an off-queue launcher is already off-contract, so a legitimately long ticket cannot trip it.
+    static final int LINGERING_REACTOR_MIN = 30;
     /// `waiter-gone` needs two listings at least this far apart on the host clock (G-S1-3).
     static final long GRACE_S = 30;
+    /// The threshold of an `off-queue-reactor` mark: it has no limit.
+    private static final String OFF_QUEUE_THRESHOLD = "0";
     private static final String SOURCE = "controller";
     private static final String GONE = "gone";
     /// The host listing's per-ticket progress time (epoch seconds), added to running tickets by `bb-tickets`.
@@ -171,6 +183,7 @@ public final class TicketAlarms {
         baseline.onPresent(snapshot -> in.tickets()
                                          .values()
                                          .forEach(ticket -> waiterGone(in, snapshot, ticket, out)));
+        offQueue(in, listing.offq(), out);
         rows.stream()
             .filter(row -> perTicket(row.kind()) && !in.tickets()
                                                        .containsKey(row.subject()))
@@ -222,6 +235,10 @@ public final class TicketAlarms {
 
     private static boolean perTicket(String kind) {
         return kind.equals(BbAlarm.QUEUE_WAIT) || kind.equals(BbAlarm.PORTGROUP_HELD) || kind.equals(BbAlarm.PORTGROUP_LONG) || kind.equals(BbAlarm.WAITER_GONE);
+    }
+
+    private static boolean reactorKind(String kind) {
+        return kind.equals(BbAlarm.OFF_QUEUE_REACTOR) || kind.equals(BbAlarm.LINGERING_REACTOR);
     }
 
     private static boolean groupHolder(BbTicket ticket) {
@@ -411,6 +428,63 @@ public final class TicketAlarms {
         return ticket.waiterState()
                      .filter(GONE::equals)
                      .isPresent();
+    }
+
+    // ---- off-queue-reactor, lingering-reactor -----------------------------------------------------------------
+    private static void offQueue(In in, List<BbOffQueue> reactors, Out out) {
+        reactors.forEach(reactor -> {
+            offQueueReactor(in, reactor, out);
+            lingeringReactor(in, reactor, out);
+        });
+        in.rows()
+          .stream()
+          .filter(row -> reactorKind(row.kind()) && reactors.stream()
+                                                            .noneMatch(reactor -> reactor.key()
+                                                                                         .equals(row.subject())))
+          .forEach(out.clear::add);
+    }
+
+    private static void offQueueReactor(In in, BbOffQueue reactor, Out out) {
+        if (!in.marked(BbAlarm.OFF_QUEUE_REACTOR, reactor.key(), OFF_QUEUE_THRESHOLD)) {
+            out.events.add(in.event(BbAlarm.OFF_QUEUE_REACTOR,
+                                    in.host() + "/" + reactor.key(),
+                                    reactorKeys(in, reactor)));
+            out.fire.add(in.mark(BbAlarm.OFF_QUEUE_REACTOR, reactor.key(), OFF_QUEUE_THRESHOLD));
+        }
+    }
+
+    private static void lingeringReactor(In in, BbOffQueue reactor, Out out) {
+        var threshold = Integer.toString(LINGERING_REACTOR_MIN);
+
+        if (reactorAgeS(in, reactor) >= LINGERING_REACTOR_MIN * 60L && !in.marked(BbAlarm.LINGERING_REACTOR,
+                                                                                  reactor.key(),
+                                                                                  threshold)) {
+            var payload = reactorKeys(in, reactor);
+
+            payload.put("limitMin", LINGERING_REACTOR_MIN);
+            out.events.add(in.event(BbAlarm.LINGERING_REACTOR,
+                                    in.host() + "/" + reactor.key(),
+                                    payload));
+            out.fire.add(in.mark(BbAlarm.LINGERING_REACTOR, reactor.key(), threshold));
+        }
+    }
+
+    /// Age on the host's clock, from one listing; a start after `at` counts as 0.
+    private static long reactorAgeS(In in, BbOffQueue reactor) {
+        return Math.max(0,
+                        in.at() - reactor.startS());
+    }
+
+    private static ObjectNode reactorKeys(In in, BbOffQueue reactor) {
+        var node = JsonNodeFactory.instance.objectNode();
+
+        node.put("host", in.host());
+        node.put("pid", reactor.pid());
+        node.put("owner", reactor.owner());
+        node.put("cwd", reactor.cwd());
+        node.put("ageMin", reactorAgeS(in, reactor) / 60);
+
+        return node;
     }
 
     // ---- payload ----------------------------------------------------------------------------------------------

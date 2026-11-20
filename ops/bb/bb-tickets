@@ -23,7 +23,9 @@
 #
 # Output, JSON lines on stdout:
 #   {"v":1,"ticket":"<id>","dir":"running|waiting|done","waiter":"alive|gone"|null,"fields":{...},"dropped":[...]}
-#   {"v":1,"end":true,"count":<ticket lines>,"queue":"present|absent","at":<epoch s>}
+#   {"v":1,"end":true,"count":<ticket lines>,"queue":"present|absent","at":<epoch s>[,"offq":[{"pid":<n>,"startS":<epoch s>,"owner":"<o>","cwd":"<path>"},...]]}
+# offq (2026-11-20): the maven launchers the queue did not start, from `bb-queue offq` beside this script (see offqueue_reactors in bb-queue-lib.sh);
+# the key is absent when there is none or bb-queue is absent/older/fails, so an old reader sees the trailer it always saw. Bounded by `timeout 10`.
 # The trailer is the proof of completeness. The output is assembled before the first byte is written, so a failure prints
 # nothing. Exit 0; 64 usage; 69 no pgrep; 74 a directory that exists but cannot be read, or the process table cannot be read.
 # bash and GNU tools (find -printf, pgrep -a, sort, awk).
@@ -131,9 +133,19 @@ mode == 2 && NF == 3 && length($2) <= 64 {
   | sort -t "$(printf '\t')" -k1,1n -k2,2 -k3,3 \
   | awk -F '\t' '{ c[$1]++; if (($1 < 2 && c[$1] <= 500) || ($1 == 2 && c[$1] <= 200)) { sub(/^[^\t]*\t[^\t]*\t[^\t]*\t/, ""); print } }')
 
+OFFQ=""
+BBQ=$(dirname "$(readlink -f "$0")")/bb-queue
+if [ -x "$BBQ" ]; then
+  OFFQ=$(timeout 10 "$BBQ" offq 2> /dev/null | LC_ALL=C awk -F '\t' 'NF == 4 && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ { gsub(/[\\"]/, "\\\\&", $4); printf "%s{\"pid\":%s,\"startS\":%s,\"owner\":\"%s\",\"cwd\":\"%s\"}", (n++ ? "," : ""), $1, $2, $3, $4 }') || OFFQ=""
+fi
+
 COUNT=0
 if [ -n "$BODY" ]; then
   COUNT=$(printf '%s\n' "$BODY" | wc -l)
   printf '%s\n' "$BODY"
 fi
-printf '{"v":1,"end":true,"count":%s,"queue":"present","at":%s}\n' "$COUNT" "$NOW"
+if [ -n "$OFFQ" ]; then
+  printf '{"v":1,"end":true,"count":%s,"queue":"present","at":%s,"offq":[%s]}\n' "$COUNT" "$NOW" "$OFFQ"
+else
+  printf '{"v":1,"end":true,"count":%s,"queue":"present","at":%s}\n' "$COUNT" "$NOW"
+fi

@@ -714,4 +714,28 @@ class AlarmCheckTest {
                                                                       "bigboy portgroup-held r9 age=45m limit=30m\n"
                                                                      + "bigboy portgroup-long r9 age=400m limit=360m\n\n/fleet/alarms"));
     }
+
+    private static String reactorAlarm(String kind, String limit) {
+        return "{\"kind\":\"" + kind
+             + "\",\"ticket\":null,\"ageMin\":45,\"limitMin\":" + limit
+             + ",\"days\":null,\"skewS\":null,"
+             + "\"firedAt\":\"2026-10-13T09:55:00Z\",\"pid\":77,\"owner\":\"unowned\",\"cwd\":\"/home/aether/v3455d dir\"}";
+    }
+
+    /// `off-queue-reactor` is seen the moment a hand-run maven starts, so alone it does not open `host-alarms`; its escalation
+    /// `lingering-reactor` does, and the line names pid, owner and the full cwd. Mutation: open the issue for `off-queue-reactor`
+    /// too -> the first assertion is red; drop the three figures from the line -> the second is red.
+    @Test
+    void hostAlarms_offQueueReactorAlone_isClear_lingeringOpensItNamingPidOwnerAndCwd() {
+        var alone = withAlarms(HttpReply.httpReply(200, hostWith(reactorAlarm("off-queue-reactor", "null"))));
+
+        assertThat(alone.fires(AlarmCode.HOST_ALARMS)).isFalse();
+        var both = withAlarms(HttpReply.httpReply(200,
+                                                  hostWith(reactorAlarm("off-queue-reactor", "null"),
+                                                           reactorAlarm("lingering-reactor", "30"))));
+
+        assertThat(both.conditions()).contains(Condition.firing(AlarmCode.HOST_ALARMS,
+                                                                "bigboy off-queue-reactor - age=45m pid=77 owner=unowned cwd=/home/aether/v3455d dir\n"
+                                                               + "bigboy lingering-reactor - age=45m limit=30m pid=77 owner=unowned cwd=/home/aether/v3455d dir\n\n/fleet/alarms"));
+    }
 }

@@ -237,7 +237,13 @@ class DependenciesTest {
     /// default) → the named list carries `kiln`, `kiln:github`, `kiln:highwater`, red.
     @Test
     void s1_16_collectionAlarms_dependOnTheHostsTicketSource_hostRetiringOnNone() {
-        for (var kind : List.of("queue-wait", "portgroup-held", "portgroup-long", "waiter-gone", "clock-skew")) {
+        for (var kind : List.of("queue-wait",
+                                "portgroup-held",
+                                "portgroup-long",
+                                "waiter-gone",
+                                "clock-skew",
+                                "off-queue-reactor",
+                                "lingering-reactor")) {
             var named = Dependencies.dependencies(List.of(kind), List.of(match("host=h")));
 
             assertThat(named).as(kind).isEqualTo(new Dependencies(List.of("selfcheck:highwater", "tickets:h"), false));

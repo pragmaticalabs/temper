@@ -35,13 +35,23 @@ public interface BbStore {
 
     /// One proven `bb-tickets` reply: the trailer's `queue` (`present` | `absent`), the ticket lines in output order, the
     /// trailer's `at` (host clock) and the round's measured skew in whole seconds (positive = host ahead).
-    record Listing(String queue, List<BbTicket> tickets, Instant hostAt, int skewS) {
+    /// `offq` is the trailer's off-queue launchers (empty when the host reports none or an older `bb-tickets`).
+    record Listing(String queue, List<BbTicket> tickets, Instant hostAt, int skewS, List<BbOffQueue> offq) {
         public Listing {
             tickets = List.copyOf(tickets);
+            offq = List.copyOf(offq);
         }
 
         public static Listing listing(String queue, List<BbTicket> tickets, Instant hostAt, int skewS) {
-            return new Listing(queue, tickets, hostAt, skewS);
+            return new Listing(queue, tickets, hostAt, skewS, List.of());
+        }
+
+        public static Listing listing(String queue,
+                                      List<BbTicket> tickets,
+                                      Instant hostAt,
+                                      int skewS,
+                                      List<BbOffQueue> offq) {
+            return new Listing(queue, tickets, hostAt, skewS, offq);
         }
     }
 
