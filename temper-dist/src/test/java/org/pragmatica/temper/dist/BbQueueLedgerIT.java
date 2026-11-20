@@ -8,6 +8,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.BooleanSupplier;
+import java.util.function.Supplier;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -86,6 +87,29 @@ class BbQueueLedgerIT {
                     BbFixtures.kill(BbFixtures.waiters(id));
                 }
             }
+        }
+
+        reapEverythingUnder(dir);
+    }
+
+    /// A waiter whose ticket is already `done` is still finishing (ledger removal, .bb files) while the temp directory is deleted: JUnit then fails
+    /// to close the extension context with DirectoryNotEmpty on the root (CI, 2026-11-20). Nothing started under <root> may outlive the test.
+    private static void reapEverythingUnder(Path root) throws Exception {
+        var alive = (Supplier<List<Long>>) () -> {
+            try {
+                return BbFixtures.run(List.of("pgrep", "-u", System.getProperty("user.name"), "-f", "--", root.toString()), Map.of(), null, null)
+                                 .stdout()
+                                 .lines()
+                                 .filter(line -> !line.isBlank())
+                                 .map(line -> Long.parseLong(line.strip()))
+                                 .toList();
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+        };
+
+        if (!within(20_000, () -> alive.get().isEmpty())) {
+            BbFixtures.kill(alive.get());
         }
     }
 
