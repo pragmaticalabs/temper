@@ -220,6 +220,51 @@ class BbQueueLedgerIT {
         assertThat(within(15_000, () -> in("done", first))).isTrue();
     }
 
+    /// #66's offqueue_reactors and the ledger agree on what the queue launched: a ledger launch (here matched by the reactor pattern) is
+    /// the queue's own by its `bb-build __run` ancestry, also after a kill -9 of its waiter (the job subshell forked from the waiter keeps
+    /// its argv); a look-alike started outside the queue (detached, so this test's own build ticket is not its ancestor) is listed.
+    /// Probe: drop the ancestor test in offqueue_reactors -> red.
+    @Test
+    void aLedgerLaunch_isNeverAnOffQueueReactor_evenAfterItsWaiterIsKilled() throws Exception {
+        var id = enqueue("hold-o");
+
+        try {
+            assertThat(BbFixtures.process("bash", "-c", "setsid \"$0\" -cp \"$1\" \"$2\" \"$3\" < /dev/null > /dev/null 2>&1 &",
+                                          ProcessHandle.current().info().command().orElse("java"), holdClasses(), Hold.class.getName(),
+                                          dir.resolve("stray").toString()).start().waitFor()).isZero();
+            assertThat(within(30_000, () -> Files.exists(dir.resolve("hold-o.up"))
+                                            && Files.exists(dir.resolve("stray.up")))).as("both java processes started").isTrue();
+            var launch = holder("hold-o");
+            var stray = holder("stray");
+            var offq = Map.of("BB_TEST_PS", "", "BB_TEST_REACTOR_PATTERN", "[B]bQueueLedgerIT.Hold");
+            var listed = lib("offqueue_reactors", offq).stdout();
+
+            assertThat(listed).as("the stray is off-queue").contains(stray.pid() + "\t");
+            assertThat(listed).as("the ledger launch is the queue's own").doesNotContain(launch.pid() + "\t");
+            var waiter = launch.parent().flatMap(ProcessHandle::parent).orElseThrow();
+
+            assertThat(waiter.info().commandLine().orElse("")).contains("bb-build __run " + id);
+            waiter.destroyForcibly();
+            assertThat(within(10_000, () -> !waiter.isAlive())).isTrue();
+            assertThat(ledgerCount(Map.of())).as("the job subshell outlives its waiter").isEqualTo("1");
+            assertThat(lib("offqueue_reactors", offq).stdout()).as("still the queue's own").doesNotContain(launch.pid() + "\t")
+                                                               .contains(stray.pid() + "\t");
+        } finally {
+            Files.writeString(dir.resolve("hold-o.go"), "");
+            Files.writeString(dir.resolve("stray.go"), "");
+        }
+    }
+
+    /// The live Hold process whose argument is <dir>/<name>.
+    private ProcessHandle holder(String name) {
+        var arg = dir.resolve(name).toString();
+
+        return ProcessHandle.allProcesses()
+                            .filter(h -> h.info().arguments().map(a -> List.of(a).contains(arg)).orElse(false))
+                            .findFirst()
+                            .orElseThrow();
+    }
+
     @Test
     void aRecycledPid_isNotCounted_andReapDropsIt() throws Exception {
         var live = BbFixtures.process("sleep", "600").start();
