@@ -604,11 +604,11 @@ class BbTestGuardIT {
         return path;
     }
 
-    /// Probe: drop bb-test's pre-run entry check -> the .jar FIFOs hang the resolved check (cut by the timeout) and the bare FIFO and
-    /// /dev/zero reach java and pass (rc 0), all red.
+    /// Probe: drop bb-test's pre-run entry check -> red: the .jar FIFOs reach the stand-in java and are refused later under another reason
+    /// (resolved check: "does not exist"), the bare FIFO and /dev/zero reach java and pass (rc 0). The real-java hang is BbTestLaunchIT's row.
     @ParameterizedTest(name = "{0}")
     @ValueSource(strings = {"fifo.jar", "fifo", "/dev/zero", "link-to-fifo.jar"})
-    @Timeout(60)
+    @Timeout(value = 60, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
     void preRun_aClasspathEntryThatIsAFifoOrADevice_isRefusedWithRc15_beforeJavaRuns(String entry) throws Exception {
         Path path;
 
@@ -636,7 +636,7 @@ class BbTestGuardIT {
     /// A FIFO inside a recorded classes dir: the stale-jar guard digests every file there, and opening a FIFO blocks. It is refused (rc 12).
     /// Probe: drop sha_file's regular-file check -> check blocks on the FIFO, cut by the timeout, red.
     @Test
-    @Timeout(60)
+    @Timeout(value = 60, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
     void digest_aFifoInsideAClassesDir_isRefusedWithRc12_neverAHang() throws Exception {
         recorded();
         assertThat(BbFixtures.run(List.of("mkfifo", co.resolve("lib/target/classes/B.class").toString()), Map.of(), null, null).rc()).isZero();

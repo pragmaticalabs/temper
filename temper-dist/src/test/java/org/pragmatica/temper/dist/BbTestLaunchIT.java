@@ -387,10 +387,11 @@ class BbTestLaunchIT {
         return path;
     }
 
-    /// Probe: drop bb-test's pre-run entry check -> java blocks on the entry, the ticket never reaches done/, cut by the timeout, red.
+    /// Probe: drop bb-test's pre-run entry check -> red: real java blocks on either FIFO (the ticket never reaches done/, cut by the
+    /// timeout, measured on cloudbb-7) and runs past /dev/zero unrefused.
     @ParameterizedTest(name = "{0}")
     @ValueSource(strings = {"fifo.jar", "fifo", "/dev/zero"})
-    @Timeout(90)
+    @Timeout(value = 90, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
     void aFifoOrDeviceOnTheClasspath_isRefusedWithinSeconds_neverHangsTheTicket(String entry) throws Exception {
         var path = special(entry);
         var extra = Map.of("RECORD_EXTRA", path.toString(), "BB_TEST_TICKET_LOG", dir.resolve("ticket-log.tsv").toString());
@@ -409,7 +410,7 @@ class BbTestLaunchIT {
     /// vbt7 F5: bb-build clears .bb/refused at the start of every run, so a refusal never outlives the next run on the checkout.
     /// Probe m4: drop "$B/refused" from bb-build's __run rm -> .bb/refused survives the green re-run, red.
     @Test
-    @Timeout(120)
+    @Timeout(value = 120, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
     void aRefusedTicket_thenAGreenRerunOnTheSameCheckout_leavesNoRefusal() throws Exception {
         var extra = Map.of("RECORD_EXTRA", special("fifo.jar").toString());
 
