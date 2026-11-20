@@ -11,6 +11,7 @@ import java.util.regex.Pattern;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -686,6 +687,10 @@ class BbIncrementalIT {
 
         tickets.add(id);
         BbFixtures.kill(BbFixtures.waiters(id));
+        var waiting = queue.resolve("waiting").resolve(id);
+
+        Files.writeString(waiting,
+                          Files.readString(waiting).replace("\ncap=0\n", "\ncap=5\n"));  // the submit ran with BB_MAX_REACTORS=0 so nothing started; the run below admits it
         env.put("BB_MAX_REACTORS", "5");
         env.put("BB_TEST_LOADAVG",
                 dir.resolve("loadavg").toString());
@@ -720,6 +725,7 @@ class BbIncrementalIT {
     }
 
     @Test
+    @Timeout(180)
     void since_withAJbctGoal_stillRunsTheBootstrap_onTheFinalArgs() throws Exception {
         assumeTrue(BbFixtures.linux(), "bb-build needs GNU tools, flock and pgrep");
         var r = submitAndRun("jb", true, "-B", "jbct:check");
@@ -732,6 +738,7 @@ class BbIncrementalIT {
     }
 
     @Test
+    @Timeout(180)
     void since_withAJbctGoal_andNoHelper_isRefusedRc88_noMaven() throws Exception {
         assumeTrue(BbFixtures.linux(), "bb-build needs GNU tools, flock and pgrep");
         var r = submitAndRun("jb88", false, "-B", "jbct:check");
@@ -741,6 +748,7 @@ class BbIncrementalIT {
     }
 
     @Test
+    @Timeout(180)
     void since_plainTicket_neverExecsTheHelper() throws Exception {
         assumeTrue(BbFixtures.linux(), "bb-build needs GNU tools, flock and pgrep");
         var r = submitAndRun("jbplain", true, "-B", "test");
