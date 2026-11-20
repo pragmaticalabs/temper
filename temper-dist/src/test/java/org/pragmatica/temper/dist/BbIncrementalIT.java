@@ -642,4 +642,112 @@ class BbIncrementalIT {
                    ? Files.list(queue.resolve("waiting")).count()
                    : 0).isZero();
     }
+
+    /// --since composed with the jbct bootstrap (merge of #63 and #64): the narrowing happens at submit, the bootstrap at run, so the helper sees the
+    /// FINAL args (-pl S first) and a jbct goal under --since still bootstraps. The helper here is a recorder stub; its own rules live in BbJbctBootstrapIT.
+    /// Mutation: run the jbct hook before the narrowing (or drop it on the --since path) -> [#since_withAJbctGoal_stillRunsTheBootstrap_onTheFinalArgs] red.
+    private record Ran(int rc, String log, List<String> helperArgs, List<String> mvn) {}
+
+    private Ran submitAndRun(String name, boolean withHelper, String... goals) throws Exception {
+        var co = reactor(name);
+
+        commit(co, "m/src/main/java/A.java", "class A { int changed; }\n");
+        var tools = Files.createDirectories(dir.resolve("tools"));
+
+        try (var files = Files.list(BbFixtures.OPS_BB)) {
+            for (var f : files.filter(Files::isRegularFile).toList()) {
+                BbFixtures.executable(tools.resolve(f.getFileName()),
+                                      Files.readString(f));
+            }
+        }
+
+        var helperRec = dir.resolve("helper-rec");
+        var mvnRec = dir.resolve("mvn-rec");
+
+        if (withHelper) {
+            BbFixtures.executable(tools.resolve("bb-jbct-bootstrap"), "#!/bin/sh\necho \"$*\" >> " + helperRec + "\n");
+        } else {
+            Files.delete(tools.resolve("bb-jbct-bootstrap"));
+        }
+
+        BbFixtures.executable(dir.resolve("stub/mvn"), "#!/bin/sh\necho \"$*\" >> " + mvnRec + "\n");
+        Files.writeString(dir.resolve("loadavg"), "0.00 0.00 0.00 1/1 1\n");
+        var queue = dir.resolve("q");
+        var env = env(queue);
+        var submit = new ArrayList<String>(List.of(tools.resolve("bb-build").toString(),
+                                                   "--since",
+                                                   "base",
+                                                   co.toString()));
+
+        submit.addAll(List.of(goals));
+        var out = BbFixtures.run(submit, env, null, null);
+        var lines = ticket(queue, out);
+        var id = QUEUED.matcher(out.stdout()).results().findFirst().orElseThrow().group(1);
+
+        tickets.add(id);
+        BbFixtures.kill(BbFixtures.waiters(id));
+        env.put("BB_MAX_REACTORS", "5");
+        env.put("BB_TEST_LOADAVG",
+                dir.resolve("loadavg").toString());
+        var run = BbFixtures.run(List.of("bash",
+                                         "-c",
+                                         "eval \"set -- $1\"; exec bash \"$2\" __run \"$3\" \"$@\"",
+                                         "x",
+                                         value(lines, "args"),
+                                         tools.resolve("bb-build").toString(),
+                                         id),
+                                 env,
+                                 null,
+                                 null);
+        var done = queue.resolve("done").resolve(id);
+
+        assertThat(done).as(run.stdout() + run.stderr()).exists();
+        var rc = Files.readAllLines(done)
+                      .stream()
+                      .filter(l -> l.startsWith("rc="))
+                      .reduce((a, b) -> b)
+                      .map(l -> Integer.parseInt(l.substring(3)))
+                      .orElseThrow();
+
+        return new Ran(rc,
+                       Files.readString(co.resolve(".bb/build.log")),
+                       Files.exists(helperRec)
+                       ? Files.readAllLines(helperRec)
+                       : List.of(),
+                       Files.exists(mvnRec)
+                       ? Files.readAllLines(mvnRec)
+                       : List.of());
+    }
+
+    @Test
+    void since_withAJbctGoal_stillRunsTheBootstrap_onTheFinalArgs() throws Exception {
+        assumeTrue(BbFixtures.linux(), "bb-build needs GNU tools, flock and pgrep");
+        var r = submitAndRun("jb", true, "-B", "jbct:check");
+
+        assertThat(r.rc()).as(r.log()).isZero();
+        assertThat(r.helperArgs()).hasSize(1);
+        assertThat(r.helperArgs().get(0)).contains("-pl build-parent,d,m,u,x -B jbct:check");
+        assertThat(r.mvn()).hasSize(1);
+        assertThat(r.mvn().get(0)).startsWith("-pl build-parent,d,m,u,x -B jbct:check");
+    }
+
+    @Test
+    void since_withAJbctGoal_andNoHelper_isRefusedRc88_noMaven() throws Exception {
+        assumeTrue(BbFixtures.linux(), "bb-build needs GNU tools, flock and pgrep");
+        var r = submitAndRun("jb88", false, "-B", "jbct:check");
+
+        assertThat(r.rc()).as(r.log()).isEqualTo(88);
+        assertThat(r.mvn()).isEmpty();
+    }
+
+    @Test
+    void since_plainTicket_neverExecsTheHelper() throws Exception {
+        assumeTrue(BbFixtures.linux(), "bb-build needs GNU tools, flock and pgrep");
+        var r = submitAndRun("jbplain", true, "-B", "test");
+
+        assertThat(r.rc()).as(r.log()).isZero();
+        assertThat(r.helperArgs()).isEmpty();
+        assertThat(r.mvn()).hasSize(1);
+        assertThat(r.mvn().get(0)).startsWith("-pl build-parent,d,m,u,x -B test");
+    }
 }
