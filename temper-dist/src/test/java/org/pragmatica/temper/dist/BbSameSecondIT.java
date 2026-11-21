@@ -382,7 +382,7 @@ class BbSameSecondIT {
         var old = build("-B", "verify");
 
         BbFixtures.executable(dir.resolve("tools/bb-build-direct"),
-                              "#!/bin/sh\ncd \"$1\" && mkdir -p .bb && echo 1700000001 > .bb/start && echo 7 > .bb/rc\n");
+                              "#!/bin/sh\ncd \"$1\" && mkdir -p .bb && echo 1700000001 > .bb/start && rm -f .bb/rc && echo 7 > .bb/rc\n");
         var e = new HashMap<>(env);
 
         e.put("BB_QUEUE", "0");
