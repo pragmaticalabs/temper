@@ -37,6 +37,18 @@
 # .bb/cp/manifest for bb-test's stale-jar guard); its failure is logged and never changes rc, and it is bounded by BB_CP_RECORD_TIMEOUT seconds
 # (default 300; on timeout: "cp-record skipped: timeout" in the log, any record removed, write_rc delayed by at most the bound + 10 s). BB_LAUNCH=<cmd> makes the waiter run <cmd> instead of maven
 # (bb-test's own __launch mode); such a ticket sets BB_NO_CP_RECORD=1 and BB_DEDUP=0.
+# LAUNCH FIELDS (#76, CTO ruling 2026-11-21): every job gets BB_TICKET=<its id> (bb-netns-run passes it into the container); bb-test's __launch
+# never sees the queue and writes its ticket fields to .bb/fields.<id>. That file is UNTRUSTED (test code can write the checkout). Once the
+# job has exited, the waiter reads it (before the queue lock: a regular file, not a symlink, at most 64 KiB, under a 10 s timeout) and
+# appends, under the queue lock in the same append as (just before) state=finished/rc=, ONLY lines of this grammar (C locale, byte counts):
+#   verdict_source=guard | verdict_source=java     (nothing else)
+#   refused=<v>   v: 1..1024 bytes, no control byte (so no CR/LF/NUL injection), first byte not '='
+# Every other line is rejected by its key (malformed: no <[A-Za-z0-9_]{1,32}>= key), and so is the whole file when the ticket is not a
+# BB_LAUNCH one (not_launch), it names another id (foreign_file), it is not regular (not_regular), it cannot be read (unreadable) or
+# .bb/ticket does not read <id> (ticket_mismatch). Rejections are recorded as one fields_rejected=<token>[,<token>...] line (at most 256
+# bytes; details in build.log). A BB_LAUNCH ticket with no accepted verdict_source gets verdict_source=missing (a crash, OOM or kill
+# before bb-test wrote it). A rejection or a missing verdict is never a pass: a job rc of 0 is then recorded as rc=18; a non-zero rc is
+# kept. .bb/rc stays the job's own exit status. Every .bb/fields.* is removed at the grant and after the read.
 # Every ticket reaching done/ appends one line to ~/work/bb-ticket-log.tsv. `bb-wait <ticket>` blocks until it finishes (exit = rc).
 # TICKET OWNER FIELDS (T3, 2026-11): the ticket gains optional key=value lines after group_reason= and before args= (readers
 # take the LAST line of a key, so every existing reader ignores them): session_pid, session_start (epoch s) and session_label
@@ -110,7 +122,7 @@ if [ "${1:-}" = __run ]; then
   done
   # granted (lock held): launch, record the launch in the LEDGER (the next grant counts it from that line), release the lock at once
   NOW=$(date +%s)
-  rm -f "$B/queued" "$B/rc" "$B/end" "$B/refused"; touch "$B/run.marker"; echo "$NOW" > "$B/start"; echo "$ID" > "$B/ticket"; printf '%q ' "$@" > "$B/args"   # for bb-report's EMPTY RUN check
+  rm -f "$B/queued" "$B/rc" "$B/end" "$B/refused" "$B"/fields.*; touch "$B/run.marker"; echo "$NOW" > "$B/start"; echo "$ID" > "$B/ticket"; printf '%q ' "$@" > "$B/args"   # for bb-report's EMPTY RUN check
   RDF=(-Daether.requireDocker=true); [ "$(field "$T" requireDocker)" != 0 ] || RDF=()   # #31: the ticket's own record decides
   SLOT=""; [ "$(field "$T" iso)" = 1 ] && SLOT=$(pg_free_slot)
   printf 'started=%s\nwaited=%s\n' "$NOW" "$WAITED" >> "$T"; [ -z "$SLOT" ] || printf 'group_slot=%s\n' "$SLOT" >> "$T"; mv "$T" "$Q/running/$ID"; T=$Q/running/$ID
@@ -129,7 +141,7 @@ if [ "${1:-}" = __run ]; then
     if [ "$(field "$T" iso)" = 1 ]; then
       "$(dirname "$SELF")/bb-netns-run" "$ID" "$CO" "$MVN" "$@" ${RDF[@]+"${RDF[@]}"} >> "$B/build.log" 2>&1
     else
-      env -u HCLOUD_TOKEN JAVA_HOME=/usr/lib/jvm/java-25-openjdk-amd64 "$MVN" "$@" ${RDF[@]+"${RDF[@]}"} >> "$B/build.log" 2>&1
+      env -u HCLOUD_TOKEN BB_TICKET="$ID" JAVA_HOME=/usr/lib/jvm/java-25-openjdk-amd64 "$MVN" "$@" ${RDF[@]+"${RDF[@]}"} >> "$B/build.log" 2>&1
     fi
     rc=$?; date +%s > "$B/end"
     if [ "$rc" = 0 ]; then   # bb-test lane: classpath + manifest of a GREEN build; bounded, and never changes rc
@@ -148,9 +160,32 @@ if [ "${1:-}" = __run ]; then
   C=$!   # the job subshell lives as long as maven / bb-test's java / bb-netns-run (and survives a kill -9 of this waiter)
   exec 8>&-   # the lock covers the slot decision and the ledger write only, never the launch's run time (released when the subshell closes fd 8)
   wait "$C"; BRC=$?   # the build's exit status: the verdict. Never re-read from $B/rc, which a lane can delete or rewrite
+  LF="" REJ=""   # LAUNCH FIELDS (header): read before the lock, so a slow or hostile file never holds the queue; set -e: every read is || true
+  rej() { case ",$REJ," in *",$1,"*) ;; *) REJ=${REJ:+$REJ,}$1;; esac; echo "bb-build: launch fields: rejected $1${2:+: $2}" >> "$B/build.log"; }
+  HT=""; [ ! -f "$B/ticket" ] || [ -L "$B/ticket" ] || HT=$(timeout -k 5 10 head -c 128 "$B/ticket" 2> /dev/null | head -n 1) || true
+  for f in "$B"/fields.*; do
+    [ -e "$f" ] || [ -L "$f" ] || continue
+    n=${f##*/fields.}
+    if [ -z "${BB_LAUNCH:-}" ]; then rej not_launch "$f"
+    elif [ "$n" != "$ID" ]; then rej foreign_file "$f names ticket $n, not $ID"
+    elif [ -L "$f" ] || [ ! -f "$f" ]; then rej not_regular "$f"
+    elif [ "$HT" != "$ID" ]; then rej ticket_mismatch ".bb/ticket reads '${HT//[^A-Za-z0-9_-]/?}', not $ID"
+    else
+      X=$(timeout -k 5 10 head -c 65536 "$f" 2> /dev/null | LC_ALL=C awk '
+        { k = ""; if (match($0, /^[A-Za-z0-9_]+=/) && RLENGTH <= 33) { k = substr($0, 1, RLENGTH - 1); v = substr($0, RLENGTH + 1) } }
+        k == "verdict_source" && (v == "guard" || v == "java") { print; next }
+        k == "refused" && length(v) <= 1024 && v ~ /^[^=[:cntrl:]][^[:cntrl:]]*$/ { print; next }
+        { print "#rej " (k == "" ? "malformed" : k) }') || rej unreadable "$f"
+      while IFS= read -r l; do case $l in '') ;; '#rej '*) rej "${l#\#rej }" "a line of $f";; *) LF=${LF:+$LF$'\n'}$l;; esac; done <<< "$X"
+    fi
+    rm -f "$f"
+  done
+  NOPASS=""; [ -z "$REJ" ] || { LF=${LF:+$LF$'\n'}fields_rejected=${REJ:0:256}; NOPASS=1; }
+  if [ -n "${BB_LAUNCH:-}" ] && ! grep -q '^verdict_source=' <<< "$LF"; then LF=${LF:+$LF$'\n'}verdict_source=missing; NOPASS=1; fi
+  WRC=$BRC; [ -z "$NOPASS" ] || [ "$BRC" != 0 ] || WRC=18   # never a pass (header: LAUNCH FIELDS); a non-zero rc is kept as it is
   exec 8> "$Q/.lock"; flock 8
   [ -f "$T" ] || exit 0   # cancel or reap already finalized this ticket (first writer wins): do not recreate running/<id> or overwrite done/<id>
-  printf 'state=finished\nrc=%s\nended=%s\n' "$BRC" "$(cat "$B/end" 2>/dev/null || date +%s)" >> "$T"
+  { [ -z "$LF" ] || printf '%s\n' "$LF"; printf 'state=finished\nrc=%s\nended=%s\n' "$WRC" "$(cat "$B/end" 2>/dev/null || date +%s)"; } >> "$T"
   to_done "$T"
   exit 0
 fi

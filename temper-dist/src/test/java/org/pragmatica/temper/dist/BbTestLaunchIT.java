@@ -36,13 +36,13 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 class BbTestLaunchIT {
     private static final Pattern QUEUED = Pattern.compile("queued ticket=(\\S+)");
 
-    private static final String SEED = "work/temper-m2-seed/org/junit/platform/junit-platform-console-standalone/1.13.4/junit-platform-console-standalone-1.13.4.jar";
+    static final String SEED = "work/temper-m2-seed/org/junit/platform/junit-platform-console-standalone/1.13.4/junit-platform-console-standalone-1.13.4.jar";
 
-    private static final String ROOT_POM = "<project><modelVersion>4.0.0</modelVersion><groupId>g</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><properties><junit.version>5.13.4</junit.version></properties></project>";
+    static final String ROOT_POM = "<project><modelVersion>4.0.0</modelVersion><groupId>g</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><properties><junit.version>5.13.4</junit.version></properties></project>";
 
-    private static final String CALC = "package fx;\npublic class Calc { public static int add(int a, int b) { return a + b; } }\n";
+    static final String CALC = "package fx;\npublic class Calc { public static int add(int a, int b) { return a + b; } }\n";
 
-    private static final String CALC_TEST = """
+    static final String CALC_TEST = """
         package fx;
         import org.junit.jupiter.api.Test;
         import static org.junit.jupiter.api.Assertions.assertEquals;

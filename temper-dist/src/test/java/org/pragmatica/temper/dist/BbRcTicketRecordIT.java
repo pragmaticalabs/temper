@@ -664,4 +664,107 @@ class BbRcTicketRecordIT {
         assertThat(run.rc()).as(run.err()).isEqualTo(4);
         assertThat(run.out()).contains("source=file").contains("rc=4");
     }
+
+    // ---- launch fields (#76, CTO ruling 2026-11-21): the container writes .bb/fields.<id>; the waiter copies only the grammar ------------
+
+    /// A ticket whose job is `body` run in its checkout, waited to done/. `launch`: a BB_LAUNCH ticket (what bb-test enqueues).
+    private String launched(String id, Path co, String body, boolean launch) throws Exception {
+        ticket("waiting", id, co, 5, 0);
+        var more = launch ? Map.of("BB_LAUNCH", dir.resolve("stubmvn").toString()) : Map.<String, String>of();
+        var waiter = waiter(id, body, more, dir.resolve("go-" + id));
+
+        assertThat(waiter.waitFor(30, TimeUnit.SECONDS)).as("waiter exits").isTrue();
+        assertThat(co.resolve(".bb/fields." + id)).as("the fields file is removed after the read").doesNotExist();
+
+        return Files.readString(queue.resolve("done").resolve(id));
+    }
+
+    @Test
+    void launchFields_forgedRcCoAndAnOffGrammarVerdict_areNotCopied_andTheTicketRecordsTheRejection_neverAPass() throws Exception {
+        var co = checkout("lf-forged");
+        var id = "500-" + BbFixtures.RUN;
+        var text = launched(id, co, "printf 'rc=0\\nco=/x\\nverdict_source=pwned\\n' > .bb/fields.$BB_TICKET; exit 0", true);
+
+        assertThat(text).doesNotContain("co=/x", "verdict_source=pwned");
+        assertThat(text.lines().filter(l -> l.startsWith("rc="))).as("one rc= line, the waiter's").hasSize(1);
+        assertThat(field("done", id, "co")).isEqualTo(co.toString());
+        assertThat(field("done", id, "fields_rejected")).isEqualTo("rc,co,verdict_source");
+        assertThat(field("done", id, "verdict_source")).isEqualTo("missing");
+        assertThat(field("done", id, "rc")).as("a rejection is never a pass: java's 0 is recorded as 18").isEqualTo("18");
+    }
+
+    @Test
+    void launchFields_inGrammar_areCopiedJustBeforeTheRc() throws Exception {
+        var co = checkout("lf-ok");
+        var java = launched("510-" + BbFixtures.RUN, co, "printf 'verdict_source=java\\n' > .bb/fields.$BB_TICKET; exit 0", true);
+
+        assertThat(java).contains("\nverdict_source=java\nstate=finished\nrc=0\n").doesNotContain("fields_rejected");
+        var max = "r".repeat(1024);
+        var refused = launched("511-" + BbFixtures.RUN, co,
+                               "printf 'refused=" + max + "\\nverdict_source=guard\\n' > .bb/fields.$BB_TICKET; exit 15", true);
+
+        assertThat(refused).contains("\nrefused=" + max + "\nverdict_source=guard\nstate=finished\nrc=15\n").doesNotContain("fields_rejected");
+    }
+
+    @Test
+    void launchFields_refusedOffGrammar_isRejected_eachForm() throws Exception {
+        var co = checkout("lf-grammar");
+        var id = "520-" + BbFixtures.RUN;
+        var text = launched(id, co, "printf 'refused==lead\\nrefused=tab\\there\\nrefused=" + "r".repeat(1025)
+                                    + "\\nrefused=\\nverdict_source=java\\r\\nverdict_source=guard\\n' > .bb/fields.$BB_TICKET; exit 15", true);
+
+        assertThat(text).doesNotContain("refused=", "verdict_source=java");
+        assertThat(field("done", id, "fields_rejected")).isEqualTo("refused,verdict_source");
+        assertThat(field("done", id, "verdict_source")).isEqualTo("guard");
+        assertThat(field("done", id, "rc")).as("a non-zero rc is kept").isEqualTo("15");
+    }
+
+    @Test
+    void launchFields_aLaunchThatWritesNothing_recordsAMissingVerdict_neverAPass() throws Exception {
+        var co = checkout("lf-missing");
+        var zero = "530-" + BbFixtures.RUN;
+
+        launched(zero, co, "exit 0", true);
+        assertThat(field("done", zero, "verdict_source")).isEqualTo("missing");
+        assertThat(field("done", zero, "rc")).isEqualTo("18");
+        var killed = "531-" + BbFixtures.RUN;
+
+        launched(killed, co, "kill -9 $$", true);
+        assertThat(field("done", killed, "verdict_source")).isEqualTo("missing");
+        assertThat(field("done", killed, "rc")).isEqualTo("137");
+    }
+
+    @Test
+    void launchFields_aRewrittenTicketMarker_refusesTheCopy() throws Exception {
+        var co = checkout("lf-mismatch");
+        var id = "540-" + BbFixtures.RUN;
+        var text = launched(id, co, "echo other > .bb/ticket; printf 'verdict_source=java\\n' > .bb/fields.$BB_TICKET; exit 0", true);
+
+        assertThat(text).doesNotContain("verdict_source=java");
+        assertThat(field("done", id, "fields_rejected")).isEqualTo("ticket_mismatch");
+        assertThat(field("done", id, "verdict_source")).isEqualTo("missing");
+        assertThat(field("done", id, "rc")).isEqualTo("18");
+    }
+
+    @Test
+    void launchFields_anotherTicketsFile_aFifo_andAMavenTicketsFile_areRejected() throws Exception {
+        var co = checkout("lf-foreign");
+        var foreign = "550-" + BbFixtures.RUN;
+        var text = launched(foreign, co, "printf 'verdict_source=java\\n' > .bb/fields.OTHER-1; exit 0", true);
+
+        assertThat(text).doesNotContain("verdict_source=java");
+        assertThat(field("done", foreign, "fields_rejected")).isEqualTo("foreign_file");
+        assertThat(co.resolve(".bb/fields.OTHER-1")).doesNotExist();
+        var fifo = "551-" + BbFixtures.RUN;
+
+        launched(fifo, co, "mkfifo .bb/fields.$BB_TICKET; exit 0", true);
+        assertThat(field("done", fifo, "fields_rejected")).isEqualTo("not_regular");
+        assertThat(field("done", fifo, "rc")).isEqualTo("18");
+        var maven = "552-" + BbFixtures.RUN;
+        var mavenText = launched(maven, co, "printf 'verdict_source=java\\n' > .bb/fields.$BB_TICKET; exit 0", false);
+
+        assertThat(mavenText).as("a maven ticket has no verdict_source at all").doesNotContain("verdict_source=");
+        assertThat(field("done", maven, "fields_rejected")).isEqualTo("not_launch");
+        assertThat(field("done", maven, "rc")).isEqualTo("18");
+    }
 }
