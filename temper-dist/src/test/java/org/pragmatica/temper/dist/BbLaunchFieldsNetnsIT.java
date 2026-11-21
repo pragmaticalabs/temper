@@ -58,7 +58,7 @@ class BbLaunchFieldsNetnsIT {
             Files.createDirectories(home.resolve("work/queue").resolve(d));
         }
 
-        co = home.resolve("work/co/lf");
+        co = home.resolve("work/co/lf-co");
         Files.createDirectories(co.resolve("fx/src/main/java/fx"));
         Files.createDirectories(co.resolve("fx/src/test/java/fx"));
         Files.writeString(co.resolve("pom.xml"), BbTestLaunchIT.ROOT_POM);
