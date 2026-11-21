@@ -168,7 +168,11 @@ if [ "${1:-}" = __launch ]; then
   [ "$r" = 0 ] || { source_is guard; exit "$r"; }
   guard launcher_ok
   JAVA=${BB_TEST_JAVA:-${JAVA_HOME:-/usr/lib/jvm/java-25-openjdk-amd64}/bin/java}
-  CP="$CO/$MOD/target/test-classes:$CO/$MOD/target/classes:$(cat "$CO/.bb/cp/${MOD//\//__}.cp")"
+  RD=$(mktemp "$CO/.bb/bb-test-read.XXXXXX"); r=0   # the record is read under the bound too (BOUNDS): a FIFO planted as it must not hang the launch
+  bounded "$READ_T" "$CO" "$RD" cat "$CO/.bb/cp/${MOD//\//__}.cp" || r=$?
+  [ -z "$TIMED_OUT" ] || refuse "timeout: the classpath record read did not finish within BB_CP_READ_TIMEOUT=${READ_T}s; its process group was killed"
+  [ "$r" = 0 ] || refuse "the classpath record cannot be read (exit $r)"
+  CP="$CO/$MOD/target/test-classes:$CO/$MOD/target/classes:$(cat "$RD")"; rm -f "$RD"; RD=
   # vbt7 F2 (fail closed, never hang): java opens every classpath entry, so a FIFO or device entry (or a symlink to one) would block it
   # before the resolved check is ever reached. Such an entry is refused here, before java runs; the check itself is bounded (BOUNDS).
   RD=$(mktemp "$CO/.bb/bb-test-read.XXXXXX"); r=0
@@ -187,8 +191,13 @@ if [ "${1:-}" = __launch ]; then
     r=0
     bounded "$JAVA_T" "$CO/$MOD" "$OUT" "$JAVA" ${JVM[@]+"${JVM[@]}"} -jar "$LAUNCHER_JAR" execute --disable-banner --fail-if-no-tests \
         --class-path "$CP" --reports-dir "$D" "${SELS[@]}" || r=$?
-    echo "bb-test: run $i/$REPEAT java exit $r; requireDocker=$RDK; $("$HERE/bb-testcount" "$D" 2>&1 | tr '\n' ' ')" >> "$OUT"
-    [ -z "$TIMED_OUT" ] || refuse "timeout: java run $i/$REPEAT did not finish within BB_JAVA_TIMEOUT=${JAVA_T}s; its process group was killed"
+    JT=$TIMED_OUT   # bounded() below resets TIMED_OUT
+    : > "$RD"   # the count is bounded too (BOUNDS); fail closed: an expiry prints "count timed out" and REFUSES, never a count, never a pass
+    bounded "$READ_T" "$CO" "$RD" "$HERE/bb-testcount" "$D" || true
+    if [ -n "$TIMED_OUT" ]; then CNT="count timed out after ${READ_T}s (BB_CP_READ_TIMEOUT)"; else CNT=$(tr '\n' ' ' < "$RD"); fi
+    echo "bb-test: run $i/$REPEAT java exit $r; requireDocker=$RDK; $CNT" >> "$OUT"
+    [ -z "$JT" ] || refuse "timeout: java run $i/$REPEAT did not finish within BB_JAVA_TIMEOUT=${JAVA_T}s; its process group was killed"
+    [ -z "$TIMED_OUT" ] || refuse "timeout: the testcount read of run $i/$REPEAT did not finish within BB_CP_READ_TIMEOUT=${READ_T}s; its process group was killed"
     [ "$r" -le "$RC" ] || RC=$r
   done
   : > "$RD"; r=0
@@ -228,7 +237,10 @@ launcher_ok || exit $?
 . "$HERE/bb-queue-lib.sh"
 GROUP=${BB_PORT_GROUP:-}
 if [ -z "$GROUP" ]; then
-  GROUP=$(python3 "$HERE/bb-portgroup.py" "$PGM" "$CO" -pl "$MOD" test 2> /dev/null) || GROUP="1 classifier failed"
+  r=0; t0=$SECONDS   # bounded like every read (BOUNDS): an expiry refuses at enqueue, never falls back to a group
+  GROUP=$(timeout -k 10 "$READ_T" python3 "$HERE/bb-portgroup.py" "$PGM" "$CO" -pl "$MOD" test 2> /dev/null) || r=$?
+  case "$r" in 124|137) [ $((SECONDS - t0)) -lt "$READ_T" ] || { echo "bb-test: REFUSED (rc 15): timeout: the port-group classifier did not finish within BB_CP_READ_TIMEOUT=${READ_T}s; its process group was killed; nothing queued" >&2; exit 15; };; esac
+  [ "$r" = 0 ] || GROUP="1 classifier failed"
   GROUP=${GROUP%% *}; case "$GROUP" in 0|1) ;; *) GROUP=1;; esac
 fi
 BB_LAUNCH=$SELF BB_NO_CP_RECORD=1 BB_DEDUP=0 BB_PORT_GROUP=$GROUP exec "$HERE/bb-build" "$CO" __launch "$MOD" "$REPEAT" "${SELS[@]}"

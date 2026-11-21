@@ -576,6 +576,75 @@ class BbTestLaunchIT {
                              (System.nanoTime() - started) / 1_000_000_000L, List.of(pid));
     }
 
+    /// vbt9: the three remaining calls are bounded too, each with a planted FIFO (a read that blocks forever) and a 3 s bound.
+    /// Probe (per row): replace that call's bound by the bare command -> red: the read blocks on the FIFO, the row's 120 s thread timeout fails it.
+    private void passingCheck() throws Exception {   // the stale-jar check passes, so the launch reaches the call under test
+        var real = tools.resolve("bb-cp-record");
+        var text = Files.readString(real);
+        var nl = text.indexOf('\n');
+
+        BbFixtures.executable(real,
+                              text.substring(0, nl + 1)
+                             + "import os, sys\nif len(sys.argv) > 1 and sys.argv[1] == 'check' and os.environ.get('CHECK_OK'):\n    sys.exit(0)\n"
+                             + text.substring(nl + 1));
+    }
+
+    private void mkfifo(Path path) throws Exception {
+        Files.deleteIfExists(path);
+        assertThat(BbFixtures.run(List.of("mkfifo", path.toString()), Map.of(), null, null).rc()).isZero();
+    }
+
+    @Test
+    @Timeout(value = 120, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
+    void aClasspathRecordThatBlocksOnRead_isRefusedNamingTheTimeout_atLaunch() throws Exception {
+        var log = dir.resolve("ticket-log.tsv").toString();
+
+        assertThat(build(Map.of("BB_TEST_TICKET_LOG", log)).rc()).as(log()).isZero();
+        passingCheck();
+        mkfifo(co.resolve(".bb/cp/fx.cp"));
+        var started = System.nanoTime();
+        var run = bbTest(Map.of("BB_TEST_TICKET_LOG", log, "CHECK_OK", "1", "BB_CP_READ_TIMEOUT", "3"), "fx.CalcTest#passes");
+
+        assertTimeoutRefusal(run, "the classpath record read did not finish within BB_CP_READ_TIMEOUT=3s; its process group was killed",
+                             (System.nanoTime() - started) / 1_000_000_000L, List.of());
+    }
+
+    @Test
+    @Timeout(value = 120, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
+    void aTestCountThatBlocksOnRead_isRefusedNamingTheTimeout_neverAPass() throws Exception {
+        var log = dir.resolve("ticket-log.tsv").toString();
+        var java = BbFixtures.executable(dir.resolve("stub/fifo-java"),
+                                         "#!/usr/bin/env bash\nwhile [ $# -gt 0 ]; do\n  [ \"$1\" != --reports-dir ] || mkfifo \"$2/TEST-fifo.xml\"\n  shift\ndone\nexit 0\n");
+
+        assertThat(build(Map.of("BB_TEST_TICKET_LOG", log)).rc()).as(log()).isZero();
+        var started = System.nanoTime();
+        var run = bbTest(Map.of("BB_TEST_TICKET_LOG", log, "BB_TEST_JAVA", java.toString(), "BB_CP_READ_TIMEOUT", "3"), "fx.CalcTest#passes");
+
+        assertTimeoutRefusal(run, "the testcount read of run 1/1 did not finish within BB_CP_READ_TIMEOUT=3s; its process group was killed",
+                             (System.nanoTime() - started) / 1_000_000_000L, List.of());
+        assertThat(Files.readString(co.resolve("fx/target/bb-test-reports").resolve(run.id() + ".refused").resolve("console.txt")))
+                  .as("the count line says it timed out, java's exit 0 is not a verdict").contains("java exit 0", "count timed out after 3s");
+        assertThat(run.doneText()).doesNotContain("verdict_source=java");
+    }
+
+    @Test
+    @Timeout(value = 120, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
+    void aPortGroupClassifierThatBlocksOnRead_isRefusedNamingTheTimeout_atEnqueue_nothingQueued() throws Exception {
+        green();
+        mkfifo(tools.resolve("bb-portgroup.py"));
+        var all = new HashMap<>(env);
+
+        all.remove("BB_PORT_GROUP");
+        all.put("BB_CP_READ_TIMEOUT", "3");
+        var started = System.nanoTime();
+        var run = BbFixtures.run(List.of(tools.resolve("bb-test").toString(), co.toString(), "fx", "fx.CalcTest#passes"), all, null, null);
+
+        assertThat((System.nanoTime() - started) / 1_000_000_000L).as("cut at the bound + KILL grace, not blocked forever").isLessThan(45);
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isEqualTo(15);
+        assertThat(run.stderr()).contains("REFUSED (rc 15): timeout: the port-group classifier did not finish within BB_CP_READ_TIMEOUT=3s");
+        assertThat(run.stdout()).doesNotContain("queued ticket=");
+    }
+
     /// A bound that is not a positive integer is refused at enqueue (rc 2), never read as "no bound" (timeout 0 would disable it).
     @ParameterizedTest(name = "{0}")
     @ValueSource(strings = {"BB_JAVA_TIMEOUT=0", "BB_JAVA_TIMEOUT=1h", "BB_CP_READ_TIMEOUT=0", "BB_CP_READ_TIMEOUT="})
