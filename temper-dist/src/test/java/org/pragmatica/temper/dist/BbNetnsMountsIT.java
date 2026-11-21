@@ -25,7 +25,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 /// container's own when this IT itself runs inside a netns container, where the checkout is the one path that is the host's).
 ///
 /// Probes (each red, then reverted): re-add `-v "$HOME:$HOME"` -> [#testCodeCannotWriteTheToolsDir], [#testCodeCannotWriteAnotherCheckout],
-/// [#testCodeCannotWriteTheQueue], [#testCodeCannotWriteTheMavenInstall]; make the ~/tools mount rw -> [#testCodeCannotWriteTheToolsDir].
+/// [#testCodeCannotWriteTheQueue], [#testCodeCannotWriteTheMavenInstall]; make the ~/tools mount rw -> [#testCodeCannotWriteTheToolsDir]; seed mount rw -> [#testCodeCannotWriteTheM2Seed]; seed mount dropped -> [#theM2SeedIsReadableAtItsHostPath].
 class BbNetnsMountsIT {
     private static final Path SCRIPT = BbFixtures.OPS_BB.resolve("bb-netns-run");
     private static final String JAVA_HOME = "/usr/lib/jvm/java-25-openjdk-amd64";
@@ -37,6 +37,9 @@ class BbNetnsMountsIT {
         w maven-dir "$HOME/apache-maven-0/bin/new"
         w other-checkout "$HOME/work/co/other/new"
         w queue "$HOME/work/queue/new"
+        w seed-new "$HOME/work/temper-m2-seed/new"
+        w seed-existing "$HOME/work/temper-m2-seed/marker"
+        echo "SEED-READ $(cat "$HOME/work/temper-m2-seed/marker" 2> /dev/null)"
         w own-checkout "$PWD/new"
         mkdir -p "$PWD/.m2-local" 2> /dev/null; w m2-local "$PWD/.m2-local/x"
         w home "$HOME/.testcontainers.properties"
@@ -63,6 +66,8 @@ class BbNetnsMountsIT {
         Files.createDirectories(home.resolve("work/co/other"));
         Files.createDirectories(home.resolve("work/queue"));
         Files.createDirectories(home.resolve("tools"));
+        Files.createDirectories(home.resolve("work/temper-m2-seed"));
+        Files.writeString(home.resolve("work/temper-m2-seed/marker"), "seed\n");
         Files.writeString(home.resolve("tools/marker"), "kept\n");
         // the real layout: ~/tools/maven is a symlink to a maven install that lives outside ~/tools
         BbFixtures.executable(home.resolve("apache-maven-0/bin/mvn"), STAND_IN);
@@ -113,6 +118,20 @@ class BbNetnsMountsIT {
     void testCodeCannotWriteTheQueue() throws Exception {
         assertThat(out()).contains("DENIED queue");
         assertThat(home.resolve("work/queue/new")).doesNotExist();
+    }
+
+    /// The seeded jars BbTestLaunchIT launches (~/work/temper-m2-seed/.../junit-platform-console-standalone): hidden by the narrowed mounts, 63 rows
+    /// skipped in a root build (ticket 1795267306310467157-3559854). They are mounted read-only at the same path.
+    @Test
+    void testCodeCannotWriteTheM2Seed() throws Exception {
+        assertThat(out()).contains("DENIED seed-new").contains("DENIED seed-existing");
+        assertThat(home.resolve("work/temper-m2-seed/new")).doesNotExist();
+        assertThat(Files.readString(home.resolve("work/temper-m2-seed/marker"))).isEqualTo("seed\n");
+    }
+
+    @Test
+    void theM2SeedIsReadableAtItsHostPath() throws Exception {
+        assertThat(run.stdout()).contains("SEED-READ seed");
     }
 
     @Test
