@@ -714,7 +714,7 @@ class BbInstallIT {
     }
 
     /// The md5s every host held on 2026-11-21 (read by ssh md5sum on cloudbb-5 and bigboy-aether) are each accepted: the files that
-    /// equal a NEW are unchanged, the two that differ (bb-build, bb-portgroup.py) are PRESINCE and are replaced.
+    /// equal a NEW are unchanged, the two that differ (bb-build, bb-portgroup.py) are PRESINCE and are replaced; bb-queue-lib.sh and bb-queue are held as their PRETICKET fixtures.
     /// Mutation: drop BB_BUILD_PRESINCE from accepted_of -> the live host is refused, exit 65, red.
     @Test
     void aHostHoldingTheLive20261121Files_isAcceptedForEveryFile() throws Exception {
@@ -730,6 +730,9 @@ class BbInstallIT {
         assertThat(install("builder@h1").rc()).isZero();
         Files.write(tools.resolve("bb-build"), prev("bb-build.presince"));
         Files.write(tools.resolve("bb-portgroup.py"), prev("bb-portgroup.py.presince"));
+        // the files that equalled a NEW on 2026-11-21 and have a newer NEW since (issue #80) are held here as their PRETICKET fixtures
+        Files.write(tools.resolve("bb-queue-lib.sh"), prev("bb-queue-lib.sh.preticket"));
+        Files.write(tools.resolve("bb-queue"), prev("bb-queue.preticket"));
         for (var e : live.entrySet()) {
             assertThat(BbFixtures.md5(Files.readAllBytes(tools.resolve(e.getKey())))).as(e.getKey()).isEqualTo(e.getValue());
         }
