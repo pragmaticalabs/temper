@@ -18,8 +18,12 @@ import java.util.regex.Pattern;
 /// call must be the CAP_PY read (the byte cap). NO HIDDEN READS: a cd/pushd onto a checkout variable (but `$(cd "$X" && pwd)`) and a
 /// relative path word of a command or redirect, outside bounded(), are VIOLATIONs; so is any cd/pushd/popd but `cd /` and the pwd-only
 /// form, and the __launch mode must leave the checkout cwd (`CO=$(pwd); cd /`), since a bare relative word cannot be told from text.
-/// Comments and heredoc bodies are skipped. Not a full shell parser: separators ; && || | & ( ) { } and newlines split commands; $(..) nests; $((..)),
-/// ${..} and quotes are opaque words; single-quoted text expands nothing.
+/// Comments are skipped; a quoted string may span lines. Not a full shell parser: separators ; && || | & ( ) { } and newlines split
+/// commands; $(..) nests; $((..)), ${..} and quotes are opaque words; single-quoted text expands nothing. That is sound only because
+/// the script is first held to a closed GRAMMAR (BbTestGrammar, bto25, CTO ruling on vbt10): bb-test uses only constructs the audit
+/// fully classifies; anything else is a violation. A future miss is answered by NARROWING the grammar, never by adding a detection case.
+/// Its violations, a stale allowlist entry, and a checkout variable named inside $((..)) (arithmetic evaluates a value's a[$(..)]) are
+/// problems here; each allowlisted construct is printed as an ALLOWED call.
 final class BbTestReadAudit {
     record Call(int line, String verdict, String text) {
         @Override
@@ -47,6 +51,7 @@ final class BbTestReadAudit {
         NO_CONTENT.put("exit", "shell builtin; opens nothing");
         NO_CONTENT.put("return", "shell builtin; opens nothing");
         NO_CONTENT.put("local", "shell builtin (assignments); opens nothing");
+        NO_CONTENT.put("case", "matches its word against patterns; opens nothing (a redirect is classified on its own)");
     }
 
     static final String CAPPED_READ = "python3 -I -c \"$CAP_PY\" \"$READ_CAP\" ";
@@ -135,6 +140,18 @@ final class BbTestReadAudit {
                 problems.add(call.toString());
             }
         }
+        var grammar = BbTestGrammar.check(source);
+        grammar.violations().forEach(v -> problems.add(v.toString()));
+        grammar.stale().forEach(name -> problems.add("stale allowlist entry " + name + ": it matches nothing in bb-test (the allowlist is"
+                                                     + " shrink-only: remove the entry and lower the pin)"));
+        for (var a : grammar.arithNames()) {
+            if (vars.contains(a[1])) {
+                problems.add("line " + a[0] + ": VIOLATION (grammar, arith: the checkout variable " + a[1] + " inside $((..)): arithmetic"
+                             + " evaluates its value, and a[$(..)] there runs code)");
+            }
+        }
+        grammar.allowed().forEach(text -> calls.add(new Call(Integer.parseInt(text.substring(5, text.indexOf(':'))), "ALLOWED",
+                                                            text.substring(text.indexOf(": ALLOWED ") + 10))));
         return new Audit(roots, vars, ownTemp, calls, problems);
     }
 
@@ -297,23 +314,16 @@ final class BbTestReadAudit {
     private static List<Seg> segments(String source) {
         var lines = source.split("\n", -1);
         var out = new ArrayList<Seg>();
-        String heredoc = null;
         var logical = new StringBuilder();
         var start = 0;
         for (var n = 0; n < lines.length; n++) {
             var line = lines[n];
-            if (heredoc != null) {
-                if (line.strip().equals(heredoc)) {
-                    heredoc = null;
-                }
-                continue;
-            }
             if (logical.isEmpty()) {
                 start = n + 1;
             }
-            var hd = Pattern.compile("<<-?\\s*'?([A-Za-z_]+)'?").matcher(stripComment(line));
-            if (hd.find()) {
-                heredoc = hd.group(1);
+            if (quoteOpen(logical + line)) {   // a quoted string spanning lines (CAP_PY='...'): one logical line
+                logical.append(line).append('\n');
+                continue;
             }
             if (line.endsWith("\\") && !stripComment(line).isEmpty() && stripComment(line).endsWith("\\")) {
                 logical.append(line, 0, line.length() - 1).append(' ');
@@ -324,6 +334,30 @@ final class BbTestReadAudit {
             logical.setLength(0);
         }
         return out;
+    }
+
+    /// True when text ends inside a '..' or ".." (a comment outside quotes runs to its newline).
+    static boolean quoteOpen(String text) {
+        var q = 0;
+        for (var i = 0; i < text.length(); i++) {
+            var c = text.charAt(i);
+            if (q == 1) {
+                q = c == '\'' ? 0 : 1;
+            } else if (c == '\\') {
+                i++;
+            } else if (q == 2) {
+                q = c == '"' ? 0 : 2;
+            } else if (c == '\'') {
+                q = 1;
+            } else if (c == '"') {
+                q = 2;
+            } else if (c == '#' && (i == 0 || Character.isWhitespace(text.charAt(i - 1)) || text.charAt(i - 1) == ';')) {
+                while (i < text.length() && text.charAt(i) != '\n') {
+                    i++;
+                }
+            }
+        }
+        return q != 0;
     }
 
     /// The line without its comment: a # at a word start, outside quotes and expansions.

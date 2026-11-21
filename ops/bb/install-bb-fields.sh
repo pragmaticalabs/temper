@@ -87,7 +87,7 @@ readonly BB_PORTGROUP_PREV=a93ade2ff7dddcc75cee3d4169a08499   # the 2026-11-09 h
 readonly BB_PORTGROUP_NEW=884caf3cf37b12cf5cf1d97e96f76a4c
 # The bb-test lane helpers: absent on every host before their first install. No trailing comment on a pin line: bb-drift reads it by pattern.
 readonly BB_CPRECORD_NEW=3a75a8750a940c983170a43c6c8611b0
-readonly BB_TEST_NEW=ea96b1c56a8ac58772414257eeff5649
+readonly BB_TEST_NEW=91ace1d9216de08928309ee9606c63a3
 readonly BB_TESTCOUNT_NEW=7ef8a4c3eba2a517146eed6d7ac31511
 readonly BB_MUTATE_OLD=f9bfbd37c5feafe67995f6716e8fecb0   # the host snapshot, identical on all four hosts: batch credit unsound for multi-module specs
 readonly BB_MUTATE_PREVIA=2c341d44d428ba445db7ea03ee90af64   # the batch-sound version (#41): does not export BB_VIA (issue #46)

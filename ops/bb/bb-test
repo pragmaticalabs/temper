@@ -35,10 +35,10 @@
 # group, BOUNDS; bounded() opens its <out> file inside the timeout too). Named exemptions, each with its reason in the selftest: commands
 # that open no file content ([ ], [[ ]], echo/printf without a redirect, mkdir, mktemp, rm, mv, refuse, exit, return, local; cd only as
 # the pwd-only `$(cd "$X" && pwd)` or `cd /`), ENQUEUE (exec bb-build: the queue, which bounds this script's own __launch mode). Anything else fails
-# BbTestGuardIT#everyCheckoutRead_isBounded, which parses this file (comments and heredoc bodies skipped) and prints every command it
+# BbTestGuardIT#everyCheckoutRead_isBounded, which parses this file (comments skipped; a heredoc is outside the GRAMMAR) and prints every command it
 # classified. A .bb/refused write that expires is skipped (10 s fixed bound: BB_CP_READ_TIMEOUT may be the bad value being refused); the
 # ticket's refused= still lands, written first.
-# OWN-TEMP (bounded) (CTO ruling via bto23): RD and OUT, this run's mktemp files under .bb/, have NO exemption. Checkout test code runs as
+# OWN-TEMP (bounded) (CTO ruling via bto23): RD, OUT and PG (the enqueue's port-group output, bto25 G6), this run's mktemp files under .bb/, have NO exemption. Checkout test code runs as
 # this uid while they exist and can name them (java's console file is its stdout: /proc/self/fd/1), so it can swap one for a FIFO, a
 # device or a huge file; a 0700 dir or a regular-file check before the open would be a TOCTOU window, not a bound. The invariant: every
 # open of one runs through bounded(), and every READ of one is CAP_PY under bounded(): at most BB_TEST_READ_CAP bytes (default 1073741824
@@ -53,14 +53,29 @@
 # (`CO=$(pwd); cd /`, the selftest requires that line); every other cd/pushd/popd outside bounded() is a violation (but the pwd-only
 # `$(cd "$X" && pwd)`), and so is a relative path word (./x, x/y) of a command or redirect outside bounded(). An empty or relative PATH
 # entry is refused at the top (rc 2): `timeout` itself would resolve there.
+# GRAMMAR (bto25, CTO ruling on vbt10): bb-test uses only constructs the audit fully classifies; anything else is a violation.
+# A future miss is answered by NARROWING the grammar, never by adding a detection case.
+# The classified subset is a closed list in BbTestReadAudit (statement forms, expansion forms, quoting forms, redirections, command
+# words); outside it, e.g.: eval, trap with a body, heredocs, $(..) nested in ${..} or $((..)), printf -v, ${!..}, declare/typeset/
+# local -n, exec with a redirection, <>, >&<path>, $OLDPWD, $'..' strings, a command substitution anywhere but a whole assignment
+# value, and a glob or unquoted expansion naming a path. Named exceptions sit in the audit's shrink-only allowlist, each with its reason.
+# WALL (bto25 G5): the whole launch (every step below, bounded or not) runs under ONE outer bound, BB_TEST_WALL_TIMEOUT seconds: the
+# __launch mode re-runs itself through bounded() (timeout on the process group) and only waits. Default: REPEAT x (BB_JAVA_TIMEOUT +
+# 3 x BB_CP_READ_TIMEOUT + 40) + 9 x BB_CP_READ_TIMEOUT + 400 (14840 s at the defaults): per run the java run and three bounded reads (the
+# count, its capped read, the console write), plus 9 bounded reads outside the runs, each with its 10 s KILL grace, plus 300 s for
+# the unbounded steps (mktemp, flock, mv, interpreter start-up). It exceeds the sum of every inner bound, so at the defaults an inner bound
+# always fires first and the wall fires only on a step outside every inner bound (a read the audit missed). On expiry: rc 17, a REFUSAL
+# naming BB_TEST_WALL_TIMEOUT on every surface (ticket refused= and verdict_source=guard, .bb/refused, .bb/rc, the ledger, bb-result);
+# the walled run's process group is killed. Must be a positive integer (rc 15). Limit: a bounded() call in flight at expiry leads its own
+# group and ends within its own bound. BB_TEST_WALLED (the walled run's marker) is refused at enqueue (rc 2).
 # checkout-roots: CO MOD
 # A REFUSAL REPLACES THE VERDICT: rc 15 (the ticket's rc=, so .bb/rc), the ticket gets refused=<reason naming the resolved versions> and
 # verdict_source=guard (never verdict_source=java), .bb/refused holds the same reason, the ticket log's state column reads refused, bb-result
 # prints it; the run's console output and per-run count lines are not printed, and its report dir is renamed <ticket>.refused.
 # VERDICT SOURCE (vbt4 L2): the launch writes verdict_source=guard (a launch-time guard refused: rc 12/14/15) or verdict_source=java (java
 # ran and the resolved check passed; rc = its exit status) on the ticket, so a java System.exit(12|14|15) never reads as a guard.
-# Call rc: 0 queued (as bb-build); 2 usage; 12 stale-jar guard; 14 launcher jar absent/not the pin; others from bb-build (3, 4).
-# Ticket rc 15: the run's resolved junit is not the launcher's (refused, above).
+# Call rc: 0 queued (as bb-build); 2 usage or a relative BB_TEST_LAUNCHER_JAR / BB_TEST_QUEUE_ROOT / BB_TEST_JAVA; 12 stale-jar guard; 14 launcher jar absent/not the pin; others from bb-build (3, 4).
+# Ticket rc 15: the run's resolved junit is not the launcher's (refused, above); rc 17: the WALL bound expired (refused, above).
 # REQUIRE DOCKER (CTO ruling 2026-11-19): the launch runs with -Daether.requireDocker=true (bb-build appends it to every ticket's args) unless
 # BB_REQUIRE_DOCKER=0 is given at enqueue: the same explicit override as bb-build (#31), recorded in the ticket as requireDocker=0 (bb-tickets shows it). On condition (CTO): the ticket (requireDockerEffective=true|false) AND each result line
 # (requireDocker=true|false) state it, so a count with Testcontainers skipped never passes for a full one.
@@ -72,10 +87,18 @@ LAUNCHER_VERSION=1.13.4
 LAUNCHER_SHA=${BB_TEST_LAUNCHER_SHA:-3fdfc37e29744a9a67dd5365e81467e26fbde0b7aa204e6f8bbe79eeaa7ae892}
 LAUNCHER_JAR=${BB_TEST_LAUNCHER_JAR:-$HOME/work/temper-m2-seed/org/junit/platform/junit-platform-console-standalone/$LAUNCHER_VERSION/junit-platform-console-standalone-$LAUNCHER_VERSION.jar}
 SEL_RE='^[A-Za-z_$][A-Za-z0-9_.$]*(#[A-Za-z_$][A-Za-z0-9_$]*)?$'
+CRLF=$(printf '\r\n.'); CRLF=${CRLF%.}   # GRAMMAR: no $'...' strings; the refusal reason's line breaks, as a plain variable
+JAVA=${BB_TEST_JAVA:-${JAVA_HOME:-/usr/lib/jvm/java-25-openjdk-amd64}/bin/java}
+# ABSOLUTE PATHS (bto25 G7): the launch runs after `cd /`, where a relative path names another file than the caller meant: refused (rc 2)
+for v in "BB_TEST_LAUNCHER_JAR=$LAUNCHER_JAR" "BB_TEST_QUEUE_ROOT=${BB_TEST_QUEUE_ROOT:-$HOME/work/queue}" "BB_TEST_JAVA=$JAVA"; do
+  case "${v#*=}" in /*) ;; *) echo "bb-test: ${v%%=*} resolves to the relative path ${v#*=}; the launch runs after cd /, where it names another file; refused (rc 2)" >&2; exit 2;; esac
+done
 
 sha256_of() { if command -v sha256sum > /dev/null; then sha256sum "$1"; else shasum -a 256 "$1"; fi | cut -d' ' -f1; }
 launcher_ok() {
-  [ -f "$LAUNCHER_JAR" ] && [ "$(sha256_of "$LAUNCHER_JAR")" = "$LAUNCHER_SHA" ] && return 0
+  local s=
+  [ ! -f "$LAUNCHER_JAR" ] || s=$(sha256_of "$LAUNCHER_JAR")   # GRAMMAR: a command substitution only as a whole assignment value
+  [ "$s" != "$LAUNCHER_SHA" ] || return 0
   echo "bb-test: launcher jar missing or not the pin (rc 14): expected $LAUNCHER_JAR with sha256 $LAUNCHER_SHA (junit-platform-console-standalone $LAUNCHER_VERSION); add it to the host seed, nothing is installed by bb-test" >&2
   return 14
 }
@@ -103,99 +126,96 @@ cap_check() {
 }
 
 # CAP_PY <cap> <file>: the file's bytes on stdout if it holds at most <cap>, else exit 3 with nothing written (OWN-TEMP (bounded)).
-read -r -d '' CAP_PY <<'PY' || true
-# bb-test own-temp read
+CAP_PY='# bb-test own-temp read
 import os, sys
 cap = int(sys.argv[1])
-with open(sys.argv[2], 'rb') as f:
+with open(sys.argv[2], "rb") as f:
     if os.fstat(f.fileno()).st_size > cap:
         sys.exit(3)
     b = f.read(cap + 1)
 if len(b) > cap:
     sys.exit(3)
 sys.stdout.buffer.write(b)
-PY
+'
 
 # ENTRY_PY <classpath>: "b <entry> is a <kind>" for the first entry that exists but is neither a regular file nor a directory, else "ok".
-read -r -d '' ENTRY_PY <<'PY' || true
-# bb-test classpath entry check
+ENTRY_PY='# bb-test classpath entry check
 import os, stat, sys
-for e in sys.argv[1].split(':'):
+for e in sys.argv[1].split(":"):
     if not e or not os.path.exists(e) or os.path.isfile(e) or os.path.isdir(e):
         continue
     m = os.stat(e).st_mode
-    kind = ('fifo' if stat.S_ISFIFO(m) else 'character special file' if stat.S_ISCHR(m) else 'block special file' if stat.S_ISBLK(m)
-            else 'socket' if stat.S_ISSOCK(m) else 'special file')
-    print('b %s is a %s' % (e, kind))
+    kind = ("fifo" if stat.S_ISFIFO(m) else "character special file" if stat.S_ISCHR(m) else "block special file" if stat.S_ISBLK(m)
+            else "socket" if stat.S_ISSOCK(m) else "special file")
+    print("b %s is a %s" % (e, kind))
     sys.exit(0)
-print('ok')
-PY
+print("ok")
+'
 
 # JUNIT_PY <launcher version> <classpath>: "v <jars>" when every junit jar on it is the launcher's version, else "x <why>" (fail closed)
-read -r -d '' JUNIT_PY <<'PY' || true
-# bb-test resolved junit read
+JUNIT_PY='# bb-test resolved junit read
 import os, re, sys, zipfile
 plat = sys.argv[1]
-jup = '5.' + plat.split('.', 1)[1]
+jup = "5." + plat.split(".", 1)[1]
 def no(why):
-    print('x ' + why)
+    print("x " + why)
     sys.exit(0)
 def manifest(z):
     attrs, key = {}, None
-    for ln in z.read('META-INF/MANIFEST.MF').decode('utf-8', 'replace').splitlines():
-        if ln.startswith(' ') and key:
+    for ln in z.read("META-INF/MANIFEST.MF").decode("utf-8", "replace").splitlines():
+        if ln.startswith(" ") and key:
             attrs[key] += ln[1:]
-        elif ':' in ln:
-            key, val = ln.split(':', 1)
+        elif ":" in ln:
+            key, val = ln.split(":", 1)
             attrs[key] = val.strip()
     return attrs
 seen, bad = [], []
-for e in sys.argv[2].split(':'):
+for e in sys.argv[2].split(":"):
     if not e:
         continue
     if os.path.isdir(e):
-        if any(os.path.isdir(os.path.join(e, 'org', 'junit', p)) for p in ('platform', 'jupiter', 'vintage')):
-            no('the classpath directory %s holds junit classes, which no manifest versions' % e)
+        if any(os.path.isdir(os.path.join(e, "org", "junit", p)) for p in ("platform", "jupiter", "vintage")):
+            no("the classpath directory %s holds junit classes, which no manifest versions" % e)
         continue
     if not os.path.isfile(e):
-        if e.endswith('.jar'):
-            no('the classpath jar %s does not exist' % e)
+        if e.endswith(".jar"):
+            no("the classpath jar %s does not exist" % e)
         continue
     try:
         with zipfile.ZipFile(e) as z:
-            if not any(n.startswith(('org/junit/platform/', 'org/junit/jupiter/', 'org/junit/vintage/')) for n in z.namelist()):
+            if not any(n.startswith(("org/junit/platform/", "org/junit/jupiter/", "org/junit/vintage/")) for n in z.namelist()):
                 continue
             m = manifest(z)
     except Exception as ex:
-        no('the classpath entry %s cannot be read as a jar (%s)' % (e, type(ex).__name__))
-    name = m.get('Implementation-Title') or m.get('Bundle-SymbolicName') or ''
-    ver = m.get('Implementation-Version') or m.get('Bundle-Version') or ''
-    want = jup if re.search('jupiter|vintage', name) else plat if 'platform' in name else None
+        no("the classpath entry %s cannot be read as a jar (%s)" % (e, type(ex).__name__))
+    name = m.get("Implementation-Title") or m.get("Bundle-SymbolicName") or ""
+    ver = m.get("Implementation-Version") or m.get("Bundle-Version") or ""
+    want = jup if re.search("jupiter|vintage", name) else plat if "platform" in name else None
     if want is None or not ver:
-        no('the junit jar %s has no junit name or no version in its manifest' % e)
-    seen.append('%s %s' % (name, ver))
+        no("the junit jar %s has no junit name or no version in its manifest" % e)
+    seen.append("%s %s" % (name, ver))
     if ver != want:
-        bad.append('%s %s (launcher wants %s)' % (name, ver, want))
+        bad.append("%s %s (launcher wants %s)" % (name, ver, want))
 if bad:
-    no('resolved ' + ', '.join(bad[:6]) + (' +%d more' % (len(bad) - 6) if len(bad) > 6 else ''))
+    no("resolved " + ", ".join(bad[:6]) + (" +%d more" % (len(bad) - 6) if len(bad) > 6 else ""))
 if not seen:
-    no('no junit-platform, jupiter or vintage jar on the test classpath')
-print('v ' + ', '.join(sorted(set(seen))))
-PY
+    no("no junit-platform, jupiter or vintage jar on the test classpath")
+print("v " + ", ".join(sorted(set(seen))))
+'
 
 if [ "${1:-}" = __launch ]; then
   # ---- the queue ticket's job: runs where maven would, in the checkout. args: <module> <repeat> <selector>... [-D...] ----
   shift
-  CO=$(pwd); cd /; MOD=$1; REPEAT=$2; shift 2   # NO HIDDEN READS: leave the checkout cwd, so a bare relative word never names checkout content
+  CO=$(pwd); cd /; unset OLDPWD; MOD=$1; REPEAT=$2; shift 2   # NO HIDDEN READS: leave the checkout cwd, so a bare relative word never names checkout content
   . "$HERE/bb-queue-lib.sh"
   TICKET=""; N=0
-  for f in "$Q"/running/*; do [ -f "$f" ] && [ "$(field "$f" co)" = "$CO" ] && { TICKET=${f##*/}; N=$((N + 1)); }; done
+  for f in "$Q"/running/*; do [ -f "$f" ] || continue; tco=$(field "$f" co); [ "$tco" != "$CO" ] || { TICKET=${f##*/}; N=$((N + 1)); }; done
   [ "$N" = 1 ] || { echo "bb-test: cannot name this run's ticket ($N running tickets for $CO)" >&2; exit 1; }
   # verdict_source (vbt4 L2): rc 12/14/15 from a guard and the same number from java are told apart on the ticket, not by the number.
   source_is() { ( flock 9; [ ! -f "$Q/running/$TICKET" ] || echo "verdict_source=$1" >> "$Q/running/$TICKET" ) 9> "$Q/.lock"; }
   guard() { "$@" && return 0; local r=$?; source_is guard; exit "$r"; }
   refuse() {   # rc 15: the refusal replaces the verdict on every surface (header: RESOLVED JUNIT CHECK)
-    local why=${1//[$'\n\r']/ }
+    local why=${1//[$CRLF]/ }
     [ -z "${RD:-}" ] || rm -f "$RD"
     ( flock 9; [ ! -f "$Q/running/$TICKET" ] || printf 'refused=%s\nverdict_source=guard\n' "$why" >> "$Q/running/$TICKET" ) 9> "$Q/.lock"
     bounded 10 "$CO" /dev/null sh -c 'printf "%s\n" "$1" > .bb/refused' sh "$why" || true   # READ INVARIANT: a FIFO planted as .bb/refused must not hang a refusal
@@ -213,6 +233,21 @@ if [ "${1:-}" = __launch ]; then
     esac
   done
   OUT=; bounds_ok || refuse "$BOUNDS_BAD"
+  [[ $REPEAT =~ ^[1-9][0-9]?$ ]] || refuse "the repeat count ($REPEAT) is not 1..99"
+  # WALL (bto25 G5): the whole launch runs under ONE outer bound (header: WALL); this level only waits for it and refuses on expiry (rc 17)
+  WALL_DEF=$((REPEAT * (JAVA_T + 3 * READ_T + 40) + 9 * READ_T + 400)); WALL_T=${BB_TEST_WALL_TIMEOUT-$WALL_DEF}
+  [[ $WALL_T =~ ^[1-9][0-9]{0,8}$ ]] || refuse "BB_TEST_WALL_TIMEOUT ($WALL_T) must be a positive integer (seconds)"
+  if [ -z "${BB_TEST_WALLED:-}" ]; then
+    r=0; bounded "$WALL_T" "$CO" - env BB_TEST_WALLED=1 "$SELF" __launch "$MOD" "$REPEAT" "$@" || r=$?
+    [ -n "$TIMED_OUT" ] || exit "$r"
+    why="wall: the launch did not finish within BB_TEST_WALL_TIMEOUT=${WALL_T}s; its process group was killed"
+    ( flock 9; [ ! -f "$Q/running/$TICKET" ] || printf 'refused=%s\nverdict_source=guard\n' "$why" >> "$Q/running/$TICKET" ) 9> "$Q/.lock"
+    bounded 10 "$CO" /dev/null sh -c 'printf "%s\n" "$1" > .bb/refused' sh "$why" || true
+    B=$CO/$MOD/target/bb-test-reports/$TICKET
+    [ ! -d "$B" ] || { rm -rf "$B.refused"; mv "$B" "$B.refused"; }
+    echo "bb-test: REFUSED (rc 17): $why"
+    exit 17
+  fi
   RD=$(mktemp "$CO/.bb/bb-test-read.XXXXXX"); r=0
   bounded "$READ_T" "$CO" "$RD" "$HERE/bb-cp-record" check "$CO" "$MOD" || r=$?   # the stale-jar check is bounded like every read (BOUNDS)
   [ -z "$TIMED_OUT" ] || refuse "timeout: the stale-jar check did not finish within BB_CP_READ_TIMEOUT=${READ_T}s; its process group was killed"
@@ -220,7 +255,6 @@ if [ "${1:-}" = __launch ]; then
   cap_check "$c" "$t0" "the stale-jar check's output"; rm -f "$RD"; RD=
   [ "$r" = 0 ] || { source_is guard; exit "$r"; }
   guard launcher_ok
-  JAVA=${BB_TEST_JAVA:-${JAVA_HOME:-/usr/lib/jvm/java-25-openjdk-amd64}/bin/java}
   RD=$(mktemp "$CO/.bb/bb-test-read.XXXXXX"); r=0   # the record is read under the bound too (BOUNDS): a FIFO planted as it must not hang the launch
   bounded "$READ_T" "$CO" "$RD" cat "$CO/.bb/cp/${MOD//\//__}.cp" || r=$?
   [ -z "$TIMED_OUT" ] || refuse "timeout: the classpath record read did not finish within BB_CP_READ_TIMEOUT=${READ_T}s; its process group was killed"
@@ -242,7 +276,9 @@ if [ "${1:-}" = __launch ]; then
   for j in ${JVM[@]+"${JVM[@]}"}; do [ "$j" != -Daether.requireDocker=true ] || RDK=true; done
   BASE=$CO/$MOD/target/bb-test-reports/$TICKET; mkdir -p "$BASE"
   OUT=$(mktemp "$CO/.bb/bb-test-out.XXXXXX")   # java's console and the count lines are printed only once the resolved check passed
-  for i in $(seq "$REPEAT"); do
+  i=0
+  while [ "$i" -lt "$REPEAT" ]; do
+    i=$((i + 1))
     D=$BASE; [ "$REPEAT" = 1 ] || D=$D/run$i
     mkdir -p "$D"
     r=0
@@ -280,6 +316,7 @@ if [ "${1:-}" = __launch ]; then
 fi
 
 [ $# -ge 3 ] || { echo "usage: bb-test <checkout> <module> <Class[#method]>... [--repeat N]" >&2; exit 2; }
+[ -z "${BB_TEST_WALLED+x}" ] || { echo "bb-test: BB_TEST_WALLED is the walled launch's own marker; refused (rc 2)" >&2; exit 2; }
 if [ -n "${BB_STALE_OK+x}" ]; then
   echo "bb-test: BB_STALE_OK is refused (rc 12); the only way past a stale-jar refusal is a rebuild (bb-build)" >&2; exit 12
 fi
@@ -304,10 +341,12 @@ launcher_ok || exit $?
 . "$HERE/bb-queue-lib.sh"
 GROUP=${BB_PORT_GROUP:-}
 if [ -z "$GROUP" ]; then
-  PG=$(mktemp); r=0   # bounded like every read (BOUNDS): an expiry refuses at enqueue, never falls back to a group
+  PG=$(mktemp "$CO/.bb/bb-test-pg.XXXXXX"); r=0   # bounded like every read (BOUNDS): an expiry refuses at enqueue, never falls back to a group
   bounded "$READ_T" "$CO" "$PG" python3 "$HERE/bb-portgroup.py" "$PGM" "$CO" -pl "$MOD" test || r=$?
-  GROUP=$(sed -n '/^[01]\( \|$\)/{p;q}' "$PG"); rm -f "$PG"   # the classifier's own line, never a traceback line
-  [ -z "$TIMED_OUT" ] || { echo "bb-test: REFUSED (rc 15): timeout: the port-group classifier did not finish within BB_CP_READ_TIMEOUT=${READ_T}s; its process group was killed; nothing queued" >&2; exit 15; }
+  [ -z "$TIMED_OUT" ] || { rm -f "$PG"; echo "bb-test: REFUSED (rc 15): timeout: the port-group classifier did not finish within BB_CP_READ_TIMEOUT=${READ_T}s; its process group was killed; nothing queued" >&2; exit 15; }
+  c=0; t0=$SECONDS; X=$(bounded "$READ_T" "$CO" - python3 -I -c "$CAP_PY" "$READ_CAP" "$PG") || c=$?; rm -f "$PG"   # OWN-TEMP (bounded), bto25 G6: capped like every own-temp read
+  [ "$c" = 0 ] || { echo "bb-test: REFUSED (rc 15): the port-group classifier's output was not read within BB_TEST_READ_CAP=${READ_CAP} bytes and BB_CP_READ_TIMEOUT=${READ_T}s (exit $c); nothing queued" >&2; exit 15; }
+  GROUP=$(printf '%s\n' "$X" | sed -n '/^[01]\( \|$\)/{p;q}')   # the classifier's own line, never a traceback line
   [ "$r" = 0 ] && [ -n "$GROUP" ] || GROUP="1 classifier failed"
   GROUP=${GROUP%% *}; case "$GROUP" in 0|1) ;; *) GROUP=1;; esac
 fi
