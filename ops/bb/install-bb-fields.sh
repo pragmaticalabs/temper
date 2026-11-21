@@ -14,7 +14,7 @@
 #   with no ssh made.
 # Phase 1, read-only, EVERY target first: installed bb-build is one of BB_BUILD_OLD|MID|PREV|LIVE|PRE31|PRERC|PREVIA|PREMEM|PRECAP|PREJBCT|PREHELP|PRESINCE|PREFIELDS|PRETICKET|NEW, bb-queue-lib.sh one of BB_LIB_OLD|PREV|PRERC|PREMEM|PRECAP|PREOFFQ|PRETICKET|NEW,
 #   bb-queue one of BB_QUEUE_OLD|PREV|LIVE|PRE31|PRERC|PREVIA|PREMEM|PRECAP|PREOFFQ|PRETICKET|NEW, bb-tickets is absent, BB_TICKETS_OLD|PRE31|PREOFFQ|NEW, bb-hold is absent, BB_HOLD_OLD (the 2026-11-09
-#   host snapshot) or BB_HOLD_NEW, bb-wait is absent, BB_WAIT_PRERC or its NEW, bb-await is absent or BB_AWAIT_NEW, bb-netns-run is absent, BB_NETNS_PREV or BB_NETNS_NEW, bb-portgroup.py is absent, BB_PORTGROUP_PREV, BB_PORTGROUP_PRESINCE or BB_PORTGROUP_NEW, bb-modules.py is absent or BB_MODULES_NEW, bb-mutate is absent, BB_MUTATE_OLD, BB_MUTATE_PREVIA or BB_MUTATE_NEW, bb-jbct-bootstrap is absent or BB_JBCTBOOT_NEW, bb-result is absent or BB_RESULT_NEW. Any mismatch prints `refused <target> <file> installed=<md5|absent>
+#   host snapshot) or BB_HOLD_NEW, bb-wait is absent, BB_WAIT_PRERC|PRETICKET or its NEW, bb-await is absent or BB_AWAIT_NEW, bb-netns-run is absent, BB_NETNS_PREV or BB_NETNS_NEW, bb-portgroup.py is absent, BB_PORTGROUP_PREV, BB_PORTGROUP_PRESINCE or BB_PORTGROUP_NEW, bb-modules.py is absent or BB_MODULES_NEW, bb-mutate is absent, BB_MUTATE_OLD, BB_MUTATE_PREVIA or BB_MUTATE_NEW, bb-jbct-bootstrap is absent or BB_JBCTBOOT_NEW, bb-result is absent, BB_RESULT_PRETICKET or its NEW. Any mismatch prints `refused <target> <file> installed=<md5|absent>
 #   expected=<pin>[|<pin>...]` (every accepted pin except `absent`, in the order above) for every mismatch on every target and exits 65 having written nothing anywhere; an unreachable target is 69.
 # Phase 2, per target and per file to change (bb-mutate, bb-tickets, bb-hold, bb-wait, bb-await, bb-netns-run, bb-portgroup.py, bb-modules.py, bb-jbct-bootstrap, bb-result, bb-queue-lib.sh, bb-queue,
 #   then bb-build: the helpers and the lib before the tools that call or source them), one remote `bash -s` script: receive the file as
@@ -65,11 +65,13 @@ readonly BB_BUILD_PREHELP=a942996fc17ef7851bac693f135defc2   # the #64 version: 
 readonly BB_BUILD_PRESINCE=24183c7d359b4030faeef894bbe4ba52   # the #67 version, live on every host from 2026-11-21: no --since (docs/bb-build-once-design.md section 1)
 readonly BB_BUILD_PREFIELDS=399f2414202fb5b9676960ff5b1ffece   # the #63 version: a full session triple overwrote since=/modules= (issue #75)
 readonly BB_BUILD_PRETICKET=2810f93c875ad9a106c2cda284babb81   # the pre-#80 version: dedup identifies a run by its start second (issue #80)
-readonly BB_BUILD_NEW=e93589fb526d175fc2df79477f3a30e8
+readonly BB_BUILD_NEW=f26638c49ed812636fa7c4a57f60c7ed
 # bb-jbct-bootstrap: absent on every host before its first install; bb-build calls it, so it is installed first.
 readonly BB_JBCTBOOT_NEW=3e5396ecee48b99949456cf805df1e60
 # bb-result: absent on every host before its first install. No trailing comment on a pin line: bb-drift reads it by pattern.
-readonly BB_RESULT_NEW=2b99dd5c414175c4fd40a9836da76298
+# the pre-#80 bb-result: it identifies the checkout's run by .bb/start (issue #80)
+readonly BB_RESULT_PRETICKET=2b99dd5c414175c4fd40a9836da76298
+readonly BB_RESULT_NEW=adbb01d6efb81e53958e369c6af7a359
 readonly BB_TICKETS_OLD=472cd816644fe0ee0902b8da3d33de8e   # before the per-ticket progressAt (issue #10)
 readonly BB_TICKETS_PRE31=e1aeba98541ba781295001f956b08c8d   # live since 2026-11-12: drops a ticket key with a capital letter
 readonly BB_TICKETS_PREOFFQ=6174119f0cd567c5dc462d1e063c6214   # the #31 version: no `offq` in the trailer (2026-11-20)
@@ -77,7 +79,9 @@ readonly BB_TICKETS_NEW=8d34d9dc9ab2a4f867af863ec21be77e
 readonly BB_HOLD_OLD=0bc2401b6e94fd05b66e1df04387e2ac   # the 2026-11-09 host snapshot
 readonly BB_HOLD_NEW=3561bb8e22fc2f7f3e98dc795f31eecb
 readonly BB_WAIT_PRERC=da248f0b4f9248f2bfed64330b3ca66e   # live on all four hosts from 2026-11-12: the ticket rc= is read from .bb/rc (replaced by the exit-status record)
-readonly BB_WAIT_NEW=d5b0ff8d43994a78cd188b4a41fcd995
+# the pre-#80 bb-wait: the RC-MISMATCH check compares .bb/start with the ticket's started= (issue #80)
+readonly BB_WAIT_PRETICKET=d5b0ff8d43994a78cd188b4a41fcd995
+readonly BB_WAIT_NEW=93233e1e18703fc3ab612ba6c9b0c621
 # bb-await (issue #48): absent on every host before its first install. No trailing comment on a pin line: bb-drift reads it by pattern.
 readonly BB_AWAIT_NEW=56523085fccf5678eb7c208e7352c11b
 readonly BB_NETNS_PREV=9661165d4ef938ea43eec5b8d2d619d9   # 2026-11-11: no docker socket in the container; live on c3/c4/d1
@@ -127,7 +131,8 @@ accepted_of() {  # the md5s a host may hold besides absent, in the order the ref
     bb-tickets) echo "$BB_TICKETS_OLD $BB_TICKETS_PRE31 $BB_TICKETS_PREOFFQ $BB_TICKETS_NEW" ;;
     bb-portgroup.py) echo "$BB_PORTGROUP_PREV $BB_PORTGROUP_PRESINCE $BB_PORTGROUP_NEW" ;;
     bb-netns-run) echo "$BB_NETNS_PREV $BB_NETNS_NEW" ;;
-    bb-wait) echo "$BB_WAIT_PRERC $BB_WAIT_NEW" ;;
+    bb-wait) echo "$BB_WAIT_PRERC $BB_WAIT_PRETICKET $BB_WAIT_NEW" ;;
+    bb-result) echo "$BB_RESULT_PRETICKET $BB_RESULT_NEW" ;;
     bb-await) echo "$BB_AWAIT_NEW" ;;
     bb-mutate) echo "$BB_MUTATE_OLD $BB_MUTATE_PREVIA $BB_MUTATE_NEW" ;;
     *) new_of "$1" ;;

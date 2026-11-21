@@ -25,7 +25,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 ///
 /// Probes (each: break bb-result, the named test goes red, restore):
 /// drop the `mtime >= started` filter -> [#aReportOlderThanStarted_isNotCounted]; drop `src` from PRUNE and the target-entry rule ->
-/// [#fixtureReportsUnderSrcOrNestedTargets_areNeverCounted]; drop the `.bb/start` comparison -> [#aLaterBuildInTheCheckout_givesUnavailable_neverAnotherBuildsCounts];
+/// [#fixtureReportsUnderSrcOrNestedTargets_areNeverCounted]; drop the `.bb/ticket` comparison -> [#aLaterBuildInTheCheckout_givesUnavailable_neverAnotherBuildsCounts];
 /// accept a bare `[ERROR]` as the first error -> [#aCompileFailure_hasNoReports_andTheFirstErrorComesFromTheLog]; drop the 300-char cut ->
 /// [#aLineOverThreeHundredChars_isCut]; exit 0 for a running ticket -> [#waitingAndRunning_exit3_unknown4_malformedId2]; keep only the first failing test in
 /// --json -> [#json_carriesEveryFailingTest_andTheFullDetail]; read the whole log at once -> [#aHugeLog_isReadInBoundedChunks].
@@ -75,7 +75,10 @@ class BbResultIT {
     }
 
     /// done/<id>: finished, created 100 s before started, ended 60 s after.
+    private String lastId;
+
     private void done(String id, String state, String rc) throws IOException {
+        lastId = id;
         Files.writeString(queue.resolve("done").resolve(id),
                           "id=" + id + "\nowner=t\nco=" + co + "\ncreated=" + ((STARTED - 100) * 1_000_000_000L)
                          + "\ngroup=0\nargs=-B test \nstarted=" + STARTED + "\nwaited=3\nstate=" + state + "\nrc=" + rc
@@ -86,6 +89,7 @@ class BbResultIT {
         var bb = Files.createDirectories(co.resolve(".bb"));
 
         Files.writeString(bb.resolve("start"), start + "\n");
+        Files.writeString(bb.resolve("ticket"), lastId + "\n");   // #80: the run that owns .bb is the last done() ticket
         Files.writeString(bb.resolve("build.log"), log);
     }
 
@@ -234,6 +238,7 @@ class BbResultIT {
     void aLaterBuildInTheCheckout_givesUnavailable_neverAnotherBuildsCounts() throws Exception {
         done("1-17", "finished", "1");
         bbFiles(STARTED + 5000, "[ERROR] the later build's failure\n");
+        Files.writeString(co.resolve(".bb/ticket"), "9-9\n");
         report("a/target/surefire-reports/TEST-a.xml", suite(42, 3, 0, 0, failed("a.A", "x", "failure", "later")), STARTED + 5010);
         var run = result("1-17");
 
@@ -244,11 +249,11 @@ class BbResultIT {
     }
 
     @Test
-    void aCheckoutWithoutBbStart_isUnavailableToo() throws Exception {
+    void aCheckoutWithoutBbTicket_isUnavailableToo() throws Exception {
         done("1-18", "finished", "0");
         report("a/target/surefire-reports/TEST-a.xml", suite(5, 0, 0, 0, ""));
 
-        assertThat(lines(result("1-18"))).contains("tests: unavailable (the checkout's .bb/start is gone)");
+        assertThat(lines(result("1-18"))).contains("tests: unavailable (the checkout's .bb/ticket is gone)");
     }
 
     @Test
