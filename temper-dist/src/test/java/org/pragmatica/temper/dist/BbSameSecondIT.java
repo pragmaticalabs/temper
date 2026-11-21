@@ -7,6 +7,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Pattern;
 
 import org.junit.jupiter.api.AfterEach;
@@ -412,26 +413,51 @@ class BbSameSecondIT {
     }
 
     // ---- THE GREP ROW (CTO ruling, #80, positive form after vdd81): one copy of "is this the checkout's current run?", in bb-queue-lib.sh
-    // (run_current / run_ticket). Outside the lib, every code line (comments are not code) that mentions a run-identity file, `/start` or `/ticket`
-    // as a path part or a quoted `'start'` / `'ticket'`, may do so ONLY in a form of the allowlist below: the writes bb-build makes, an rm, an
-    // existence test, and a few named uses that are not identity (display of a wall time, bb-mutate's own timing bound, XML event names, a JSON key,
-    // message text). Anything left after the allowed forms are removed is a finding, reported as file:line.
+    // (run_current / run_ticket). Outside the lib, every code line (comments are not code) is checked twice:
+    //  (1) MENTION: a run-identity file named as a path part (`/start`, `/ticket`) or a quoted `'start'` / `'ticket'`;
+    //  (2) BARE WORD: a line that touches `.bb` (`.bb/`, `.bb"`, `/.bb`) or `$B/` and also holds the bare word start or ticket, which catches a
+    //      name built in a variable or a loop (`F=ticket; cat "$co/.bb/$F"`, `cd "$co/.bb" && cat ticket`, `for n in start; do cat "$B/$n"`).
+    // A line passes only if it is, whole, one of EXACT_LINES (trimmed, comment stripped, equality: never a substring blank-out, so an appended
+    // compare turns the line back into a finding), or after the ANYWHERE forms (complete writes, rms and existence tests of the run files: nothing in
+    // them reads a value) are blanked, neither check fires. Findings are reported as file:line.
+    // LIMIT, stated on purpose: grep cannot see string-built paths (`'tic'+'ket'`, `"$B"/st*`, `cat "$co/.bb/"tick"et"`); this row stops the literal
+    // forms, and run_current is the only reader by review.
     private static final Pattern MENTION = Pattern.compile("/(start|ticket)\\b|['\"](start|ticket)['\"]");
+    private static final Pattern TOUCHES_RUN_DIR = Pattern.compile("\\.bb/|\\.bb\"|/\\.bb|\\$B/");
+    private static final Pattern BARE_WORD = Pattern.compile("\\b(start|ticket)\\b");
     private static final List<Pattern> ANYWHERE = List.of(
             Pattern.compile("echo \"\\$[A-Za-z]+\" > \"\\$B/(start|ticket)\""),
             Pattern.compile("rm -f( \"\\$B/[a-z.]+\")+"),
             Pattern.compile("\\[ (! )?-f \"\\$B/start\" \\]"));
-    private static final Map<String, List<Pattern>> PER_FILE = Map.of(
-            "bb-build", List.of(Pattern.compile("\\(\\.bb/start without \\.bb/rc\\)")),
-            "bb-temper", List.of(Pattern.compile("cat \\.bb/start 2>/dev/null"),
-                                 Pattern.compile("/ticket \\\\1/p")),
-            "bb-mutate", List.of(Pattern.compile("\\(\\.bb/start"),
-                                 Pattern.compile("\\.bb/end - \\.bb/start"),
-                                 Pattern.compile("os\\.path\\.join\\(B, \"start\"\\)")),
-            "bb-result", List.of(Pattern.compile("events=\\('start', 'end'\\)"),
-                                 Pattern.compile("ev == 'start'"),
-                                 Pattern.compile("'ticket': tid"),
-                                 Pattern.compile("the checkout's \\.bb/ticket is gone")));
+    // Whole lines that mention start/ticket without reading the run identity: message text, a displayed wall time, bb-mutate's own timing bound,
+    // XML event names, a JSON key. Editing one of these lines means re-reading it here.
+    private static final Map<String, Set<String>> EXACT_LINES = Map.of(
+            "bb-build", Set.of(
+                    "[ -z \"$FIN\" ] || { echo \"refusing: .bb/rc in $CO was deleted by hand after ticket $FIN finished; never rm it (its verdict is the ticket record: bb-wait $FIN); rerun bb-build in a fresh checkout (a rerun in a checkout whose .bb/rc is intact clears it itself)\" >&2; exit 3; }",
+                    "echo \"refusing: a build appears to be running in $CO (.bb/start without .bb/rc)\" >&2; exit 3",
+                    "echo \"bb-build: queued ticket $ID at $(date -Is); maven has not started (bb-queue shows position)\" > \"$B/build.log\"",
+                    "waiter_alive \"$ID\" || { rm -f \"$T\" \"$B/queued\"; echo \"error: waiter for $ID did not start\" >&2; exit 1; }",
+                    "echo \"queued ticket=$ID position=$POS priority=$(prio \"$BB_OWNER\" \"$SHA\") reactors=$(reactors) cap=$CAP port-group=${GROUP%% *} (${GROUP#* }) port-group-holders=[$(group_holder)] slots=$(pg_slots) log=$B/build.log args: $*\""),
+            "bb-mutate", Set.of(
+                    "PER-MUTANT BOUND (T17): every mutant build gets a wall-clock bound measured from ITS OWN Maven start (.bb/start",
+                    ".bb/end - .bb/start), floor 10 s (start/end have 1 s resolution). Override per spec with an absolute value: \"build\": {\"mutantTimeoutSecs\": 120}.",
+                    "stp = os.path.join(B, \"start\")"),
+            "bb-queue", Set.of(
+                    "mkdir -p \"$B\"; echo \"bb-build: ticket $ID cancelled while running by $BB_OWNER (killed: ${killed:-nothing}; notours=${notours:-none}, not ours, not signalled)\" >> \"$B/build.log\""),
+            "bb-result", Set.of(
+                    "for ev, el in ET.iterparse(path, events=('start', 'end')):",
+                    "if ev == 'start':",
+                    "print(json.dumps({'v': 1, 'ticket': tid, 'state': where, 'finished': False}))",
+                    "cur, \"the checkout's .bb/ticket is gone\")",
+                    "out = {'v': 1, 'ticket': tid, 'state': state, 'finished': True, 'rc': int(rc) if is_num(rc) else None,"),
+            "bb-temper", Set.of(
+                    "onto=$(sed -n 's/^dedup: identical build is .*: ticket=\\([^ ]*\\).*/ticket \\1/p' \"$err\" | head -1)",
+                    "[ \"$(pv tk_state)\" != finished ] || [ \"$(pv file_rc)\" = \"$rc\" ] || { echo \"RC-MISMATCH ticket=$rc file=$(pv file_rc): the ticket record is the verdict; re-run the build in a fresh checkout; never edit or restore .bb/rc\" >&2; exit 71; }",
+                    "echo rc=$rcv wall=$(( $(cat .bb/end 2>/dev/null || date +%s) - $(cat .bb/start 2>/dev/null || date +%s) ))s",
+                    "if [ -n \"$tk_id\" ] && [ \"$fin\" = 1 ] && [ \"$tk_state\" = finished ] && [ -n \"$tk_rc\" ] && [ \"$file_rc\" != \"$tk_rc\" ]; then echo \"RC-MISMATCH ticket=$tk_rc file=$file_rc: the ticket record is the verdict; re-run the build in a fresh checkout; never edit or restore .bb/rc\" >&2; exit 71; fi"),
+            "bb-wait", Set.of(
+                    "[ \"$fr\" = \"$rc\" ] || { echo \"RC-MISMATCH ticket=$rc file=$fr: the ticket record is the verdict; re-run the build in a fresh checkout; never edit or restore .bb/rc\" >&2; exit 71; }")
+);
 
     static List<String> runIdentityMentions(Path dir) throws Exception {
         var found = new ArrayList<String>();
@@ -442,18 +468,19 @@ class BbSameSecondIT {
                 if (name.equals("bb-queue-lib.sh")) {
                     continue;
                 }
-                var allowed = new ArrayList<>(ANYWHERE);
-
-                allowed.addAll(PER_FILE.getOrDefault(name, List.of()));
+                var exact = EXACT_LINES.getOrDefault(name, Set.of());
                 var n = 0;
                 for (var line : Files.readAllLines(f)) {
                     n++;
-                    var code = line.replaceFirst("(^|\\s)#.*$", "");
+                    var code = line.replaceFirst("(^|\\s)#.*$", "").strip();
 
-                    for (var p : allowed) {
+                    if (exact.contains(code)) {
+                        continue;
+                    }
+                    for (var p : ANYWHERE) {
                         code = p.matcher(code).replaceAll(" ");
                     }
-                    if (MENTION.matcher(code).find()) {
+                    if (MENTION.matcher(code).find() || (TOUCHES_RUN_DIR.matcher(code).find() && BARE_WORD.matcher(code).find())) {
                         found.add(name + ":" + n + ": " + line.strip());
                     }
                 }
@@ -489,7 +516,32 @@ class BbSameSecondIT {
             new String[] {"bb-queue", "[ \"$(cat \"$B/start\")\" = x ]"},
             new String[] {"bb-result", "    with open(os.path.join(co, '.bb', 'start')) as f: s = f.read()"},
             new String[] {"bb-result", "    with open(os.path.join(co, '.bb', 'ticket')) as f: t = f.read()"},
-            new String[] {"bb-result", "    s = open(co + '/.bb/start').read()"});
+            new String[] {"bb-result", "    s = open(co + '/.bb/start').read()"},
+            // the whole-line anchor: the allowed forms of vdd81b finding 3, now with a compare around or after them
+            new String[] {"bb-temper", "[ \"$(cat .bb/start 2>/dev/null)\" = \"$sv\" ]"},
+            new String[] {"bb-temper", null, "echo rc=$rcv wall=", "; [ \"$(cat .bb/start 2>/dev/null)\" = \"$sv\" ]"},
+            new String[] {"bb-mutate", "(.bb/start 2>/dev/null) = \"$sv\" ]"},
+            new String[] {"bb-mutate", null, "(.bb/start", " ; [ \"$(cat .bb/start 2>/dev/null)\" = \"$sv\" ]"},
+            new String[] {"bb-result", "ev == 'start' and open(co + '/.bb/start').read() == sv"},
+            new String[] {"bb-result", null, "if ev == 'start':", " and open(co + '/.bb/start').read() == sv"},
+            // the bare-word check: a name held in a variable, a cd, a loop variable (a literal `/start` never appears)
+            new String[] {"bb-wait", "F=ticket; cat \"$co/.bb/$F\""},
+            new String[] {"bb-wait", "cd \"$co/.bb\" && cat ticket"},
+            new String[] {"bb-build", "for n in start; do cat \"$B/$n\"; done"},
+            new String[] {"bb-queue", "for n in start; do cat \"$B/$n\"; done"});
+
+    /// The first line holding `anchor` gets `suffix` appended: an allowed line with an inline compare on it. Fails if no line holds the anchor.
+    private static String appendedOnto(String script, String anchor, String suffix) {
+        var lines = new ArrayList<>(List.of(script.split("\n", -1)));
+
+        for (var i = 0; i < lines.size(); i++) {
+            if (lines.get(i).contains(anchor)) {
+                lines.set(i, lines.get(i) + suffix);
+                return String.join("\n", lines);
+            }
+        }
+        throw new AssertionError("no line holds " + anchor);
+    }
 
     @Test
     void theGrepRow_flagsEachKnownFormOfAnInlineCompare_inTheCallerItWasAddedTo(@TempDir Path root) throws Exception {
@@ -500,7 +552,7 @@ class BbSameSecondIT {
             var file = copy.resolve(mutant[0]);
             var original = Files.readString(file);
 
-            Files.writeString(file, original + "\n" + mutant[1] + "\n");
+            Files.writeString(file, mutant[1] != null ? original + "\n" + mutant[1] + "\n" : appendedOnto(original, mutant[2], mutant[3]));
             assertThat(runIdentityMentions(copy)).as(mutant[1]).anyMatch(l -> l.startsWith(mutant[0] + ":"));
             Files.writeString(file, original);
         }
