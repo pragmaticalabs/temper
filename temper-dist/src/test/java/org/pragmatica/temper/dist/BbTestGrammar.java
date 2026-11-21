@@ -25,7 +25,7 @@ import java.util.regex.Pattern;
 ///   and must not hold an unquoted parameter expansion (its value would be split and globbed), but $? $# $$ $! ${#..} $((..)) and the
 ///   ${NAME[@]+"${NAME[@]}"} form.
 /// - REDIRECTIONS: [n]> [n]>> [n]< onto a word, and the dups [n]>&m [n]<&m [n]>&- (m a number). Not: << <<- <<< <> >| &> &>> |&, a
-///   >& or <& onto a word, any redirection of exec.
+///   >& or <& onto a word, any redirection of exec, a redirection with no command word ($(< f), > f) but on a ( .. ) subshell.
 /// - STATEMENTS: simple commands (assignment prefix, a command word from COMMANDS or a function this file defines, arguments), pipes
 ///   | , lists ; && || newline, ( .. ) subshells, { .. } groups, if/then/elif/else/fi, while/until/do/done, for NAME in words, case
 ///   WORD in pattern|pattern) .. ;; esac, [[ .. ]] (no arithmetic comparison: -eq -ne -lt -le -gt -ge evaluate their operands as
@@ -35,7 +35,7 @@ import java.util.regex.Pattern;
 ///   inside bounded() and the RUNNERS, and exec (no redirection) or a RUNNER before any of those. bounded()'s own body is checked
 ///   lexically only: the audit's definition rule classifies what it runs.
 /// The ALLOWLIST holds the named exceptions; it is shrink-only: an entry that matches nothing is reported stale, and its size is pinned
-/// in BbTestGrammarIT.
+/// in BbTestGrammarIT (ALLOWLIST_PIN).
 final class BbTestGrammar {
     record Violation(int line, String kind, String reason, String text) {
         @Override
@@ -313,6 +313,7 @@ final class BbTestGrammar {
         var args = new ArrayList<Word>();
         var redirs = new ArrayList<String>();
         Word cw = null;
+        var compound = false;   // a ( .. ) subshell: its redirections apply to it, a command the grammar classified
         while (true) {
             skipBlank();
             var c = at(i);
@@ -334,6 +335,7 @@ final class BbTestGrammar {
                     }
                     i++;
                     list(true, false);
+                    compound = true;
                     continue;
                 }
                 v(i, "syntax", "an unexpected (");
@@ -386,7 +388,7 @@ final class BbTestGrammar {
             }
             args.add(w);
         }
-        simple(assigns, cw, args, redirs);
+        simple(start, compound, assigns, cw, args, redirs);
     }
 
     private void keyword(String raw) {
@@ -408,12 +410,15 @@ final class BbTestGrammar {
         return fn.isEmpty() ? "" : (String) fn.peek()[0];
     }
 
-    private void simple(List<Word> assigns, Word cw, List<Word> args, List<String> redirs) {
+    private void simple(int start, boolean compound, List<Word> assigns, Word cw, List<Word> args, List<String> redirs) {
         for (var a : assigns) {
             assignment(a, cw != null);
         }
         var inBounded = currentFn().equals("bounded");
         if (cw == null) {
+            if (!compound && !redirs.isEmpty()) {   // $(< f), > f: a redirection with no command word opens a file no classified command names
+                v(start, "redirect", "a redirection with no command word (" + String.join(" ", redirs) + ") opens a file outside every classified command");
+            }
             return;
         }
         var k = -1;   // index into args of the effective command word; -1 = cw itself

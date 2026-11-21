@@ -485,6 +485,52 @@ class BbTestLaunchIT {
                   .as("java's own exit is recorded, never read as the verdict").contains("java exit 137");
     }
 
+    /// WALL (bto26 G5, CTO ruling on vbt10): one outer bound, BB_TEST_WALL_TIMEOUT, on the whole launch. The fixture bb-test reads a FIFO
+    /// bare in the walled launch, a read hidden from the audit that no inner bound covers; a 5 s wall refuses it with rc 17 on every
+    /// surface and kills its group. Probe: the walled re-run dropped (the launch runs unwalled) -> red: the read blocks, the row times out.
+    @Test
+    @Timeout(value = 120, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
+    void aReadHiddenFromTheAudit_isCutByTheWallBound_refusedWithRc17_onEverySurface() throws Exception {
+        var fifo = dir.resolve("wall.fifo");
+        var pid = dir.resolve("wall.pid");
+        var anchor = "  guard launcher_ok\n";
+        var source = Files.readString(BbFixtures.OPS_BB.resolve("bb-test"));
+
+        assertThat(source).contains(anchor);
+        assertThat(BbFixtures.run(List.of("mkfifo", fifo.toString()), Map.of(), null, null).rc()).isZero();
+        BbFixtures.executable(tools.resolve("bb-test"),
+                              source.replace(anchor, anchor + "  echo $$ > '" + pid + "'; read -r _ < '" + fifo + "'\n"));
+        var log = dir.resolve("ticket-log.tsv").toString();
+
+        assertThat(build(Map.of("BB_TEST_TICKET_LOG", log)).rc()).as(log()).isZero();
+        var started = System.nanoTime();
+        var run = bbTest(Map.of("BB_TEST_TICKET_LOG", log, "BB_TEST_WALL_TIMEOUT", "5"), "fx.CalcTest#passes");
+        var seconds = (System.nanoTime() - started) / 1_000_000_000L;
+        var why = "wall: the launch did not finish within BB_TEST_WALL_TIMEOUT=5s; its process group was killed";
+
+        assertThat(seconds).as("cut at the wall (5 s) + the 10 s KILL grace, never by the blocked read").isLessThan(45);
+        assertThat(run.rc()).as(run.doneText()).isEqualTo(17);
+        assertThat(Files.readString(co.resolve(".bb/rc")).strip()).isEqualTo("17");
+        assertThat(run.doneText()).contains("\nrefused=" + why, "\nverdict_source=guard\n").doesNotContain("verdict_source=java");
+        assertThat(Files.readString(co.resolve(".bb/refused"))).contains(why);
+        var row = Files.readAllLines(dir.resolve("ticket-log.tsv")).stream().filter(l -> l.contains("\t" + run.id() + "\t")).toList();
+
+        assertThat(row).hasSize(1);
+        assertThat(row.get(0).split("\t")[12]).as("the ledger's state column").isEqualTo("refused");
+        var text = bbResult(run.id()).stdout();
+
+        assertThat(text.lines().findFirst().orElseThrow()).contains("rc=17 verdict=REFUSED");
+        assertThat(text).contains("refused: " + why);
+        assertThat(pid).as("the hidden read was reached").exists();
+        var walled = Long.parseLong(Files.readString(pid).strip());
+
+        stalled.add(walled);
+        for (var i = 0; i < 50 && ProcessHandle.of(walled).isPresent(); i++) {
+            Thread.sleep(100);
+        }
+        assertThat(ProcessHandle.of(walled)).as("the walled launch's group was killed").isEmpty();
+    }
+
     /// The two classpath reads are bounded the same way (a python3 on PATH that stalls on one read's code, passing every other call through).
     /// Probe: as above -> red (both rows).
     @ParameterizedTest(name = "{0}")

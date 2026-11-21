@@ -194,6 +194,22 @@ class BbTestGuardIT {
         assertThat(run.stderr()).contains("PATH has an empty or relative entry", "refused (rc 2)").doesNotContain("stale");
     }
 
+    /// ABSOLUTE PATHS (bto26 G7, CTO ruling on vbt10): the launch runs after `cd /`, so a relative BB_* path would name another file than
+    /// the caller meant: each is refused with rc 2 before anything is queued. Probe: drop the case on `${v#*=}` -> red (each row).
+    @ParameterizedTest
+    @ValueSource(strings = {"BB_TEST_LAUNCHER_JAR", "BB_TEST_QUEUE_ROOT", "BB_TEST_JAVA"})
+    void bbTest_withARelativeBbPath_isRefusedWithRc2_namingIt(String name) throws Exception {
+        var run = BbFixtures.run(List.of(BbFixtures.OPS_BB.resolve("bb-test").toString(),
+                                         co.toString(),
+                                         "app",
+                                         "SomeTest"),
+                                 Map.of(name, "rel/x"),
+                                 null,
+                                 null);
+
+        assertThat(run.rc()).as(run.stderr()).isEqualTo(2);
+        assertThat(run.stderr()).contains(name + " resolves to the relative path rel/x", "refused (rc 2)").doesNotContain("queued");
+    }
     @Test
     void bbTest_withTheLauncherJarAbsent_failsLoudlyNamingPathAndSha() throws Exception {
         recorded();
