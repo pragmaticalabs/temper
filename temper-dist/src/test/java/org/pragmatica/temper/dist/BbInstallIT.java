@@ -204,8 +204,9 @@ class BbInstallIT {
         assertThat(pin("BB_QUEUE_PRELEDGER")).isEqualTo(BbFixtures.md5(prev("bb-queue.preledger")));
         assertThat(pin("BB_HOLD_PRELEDGER")).isEqualTo(BbFixtures.md5(prev("bb-hold.preledger")));
         assertThat(pin("BB_BUILD_PRESINCE")).isEqualTo(BbFixtures.md5(prev("bb-build.presince")));
+        assertThat(pin("BB_BUILD_PREFIELDS")).isEqualTo(BbFixtures.md5(prev("bb-build.prefields")));
         assertThat(pin("BB_PORTGROUP_PRESINCE")).isEqualTo(BbFixtures.md5(prev("bb-portgroup.py.presince")));
-        assertThat(pin("BB_BUILD_PRETEST")).isEqualTo(BbFixtures.md5(prev("bb-build.pretest")));
+        assertThat(pin("BB_BUILD_PRESESSION")).isEqualTo(BbFixtures.md5(prev("bb-build.presession")));
         assertThat(pin("BB_LIB_PRECAP")).isEqualTo(BbFixtures.md5(prev("bb-queue-lib.sh.precap")));
         assertThat(pin("BB_QUEUE_PRECAP")).isEqualTo(BbFixtures.md5(prev("bb-queue.precap")));
         assertThat(pin("BB_LIB_PREOFFQ")).isEqualTo(BbFixtures.md5(prev("bb-queue-lib.sh.preoffq")));
@@ -604,21 +605,21 @@ class BbInstallIT {
         assertThat(tools.resolve("bb-portgroup.py.bak-" + pin("BB_PORTGROUP_PRESINCE"))).hasBinaryContent(prev("bb-portgroup.py.presince"));
     }
 
-    /// The bb-build of #63 (BB_BUILD_PRETEST: --since, no bb-cp-record hook, no BB_LAUNCH, no launch ledger) is an accepted source and is
-    /// replaced, backed up under its md5. Mutation: drop BB_BUILD_PRETEST from accepted_of -> refused bb-build, exit 65, red.
+    /// The bb-build of #63 (BB_BUILD_PREFIELDS: --since, no bb-cp-record hook, no BB_LAUNCH, no launch ledger) is an accepted source and is
+    /// replaced, backed up under its md5. Mutation: drop BB_BUILD_PREFIELDS from accepted_of -> refused bb-build, exit 65, red.
     @Test
     void aHostRunningTheSinceBuild_isUpdatedToTheOneWithTheClasspathRecord() throws Exception {
         var tools = host("h1");
 
         assertThat(install("builder@h1").rc()).isZero();
-        Files.write(tools.resolve("bb-build"), prev("bb-build.pretest"));
+        Files.write(tools.resolve("bb-build"), prev("bb-build.prefields"));
         var run = install("builder@h1");
 
         assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
-        assertThat(run.stdout()).contains("installed builder@h1 bb-build before=" + pin("BB_BUILD_PRETEST")
+        assertThat(run.stdout()).contains("installed builder@h1 bb-build before=" + pin("BB_BUILD_PREFIELDS")
                                          + " after=" + pin("BB_BUILD_NEW"));
         assertThat(tools.resolve("bb-build")).hasBinaryContent(Files.readAllBytes(OPS_BB.resolve("bb-build")));
-        assertThat(tools.resolve("bb-build.bak-" + pin("BB_BUILD_PRETEST"))).hasBinaryContent(prev("bb-build.pretest"));
+        assertThat(tools.resolve("bb-build.bak-" + pin("BB_BUILD_PREFIELDS"))).hasBinaryContent(prev("bb-build.prefields"));
     }
 
     /// The bb-queue-lib.sh, bb-queue and bb-tickets before the off-queue reactor list (BB_*_PREOFFQ, 2026-11-20) are accepted sources and are
@@ -712,7 +713,7 @@ class BbInstallIT {
     /// Mutation: drop BB_BUILD_PREHELP from accepted_of -> the PREHELP row is refused, exit 65, red.
     @Test
     void bothBbBuildsThatPrecedeTheHelpOne_areAcceptedAndReplaced_andBbResultIsInstalled() throws Exception {
-        for (var old : List.of("prejbct", "prehelp", "presince", "pretest")) {
+        for (var old : List.of("prejbct", "prehelp", "presince", "prefields")) {
             var tools = host("h-" + old);
 
             Files.write(tools.resolve("bb-build"), prev("bb-build." + old));
@@ -761,7 +762,7 @@ class BbInstallIT {
 
     /// The class behind vbt7 P1: a pin set that refuses what the hosts run today blocks every install. `bb/live-md5s` holds the ~/tools md5s
     /// read from cloudbb-5 on 2026-11-21, one line per FILES entry; `bb/live-md5s.since` is that set after the owner installs #63 (bb-build
-    /// BB_BUILD_PRETEST, bb-portgroup.py BB_PORTGROUP_NEW, bb-modules.py BB_MODULES_NEW). Each host state is one row. A host is built holding exactly that set (each md5 resolved to the repo
+    /// BB_BUILD_PREFIELDS, bb-portgroup.py BB_PORTGROUP_NEW, bb-modules.py BB_MODULES_NEW). Each host state is one row. A host is built holding exactly that set (each md5 resolved to the repo
     /// file or a vendored `.prev`), and the install must accept it: exit 0, every live file either unchanged or replaced and backed up.
     /// Mutation: drop the bb-result case from accepted_of (bb-result then accepts only BB_RESULT_NEW) -> refused bb-result, exit 65, red.
     @Test
@@ -769,10 +770,16 @@ class BbInstallIT {
         installOntoTheLiveSet("live-md5s");
     }
 
-    /// Mutation: drop BB_BUILD_PRETEST from accepted_of -> refused bb-build, exit 65, red.
+    /// Mutation: drop BB_BUILD_PREFIELDS from accepted_of -> refused bb-build, exit 65, red.
     @Test
     void aHostAtTheLiveSetWithSinceInstalled_isAcceptedForEveryFile_andUpgraded() throws Exception {
         installOntoTheLiveSet("live-md5s.since");
+    }
+
+    /// Mutation: drop BB_BUILD_PRESESSION from accepted_of -> refused bb-build (the #79 build the owner installs), exit 65, red.
+    @Test
+    void aHostAtTheLiveSetWithTheSessionFieldsFixInstalled_isAcceptedForEveryFile_andUpgraded() throws Exception {
+        installOntoTheLiveSet("live-md5s.since79");
     }
 
     private void installOntoTheLiveSet(String resource) throws Exception {
@@ -888,6 +895,47 @@ class BbInstallIT {
         assertThat(listing(tools)).isEqualTo(before);
     }
 
+    /// The md5s every host held on 2026-11-21 (read by ssh md5sum on cloudbb-5 and bigboy-aether) are each accepted: the files that
+    /// equal a NEW are unchanged, the two that differ (bb-build, bb-portgroup.py) are PRESINCE and are replaced.
+    /// Mutation: drop BB_BUILD_PRESINCE from accepted_of -> the live host is refused, exit 65, red.
+    @Test
+    void aHostHoldingTheLive20261121Files_isAcceptedForEveryFile() throws Exception {
+        var live = java.util.Map.of("bb-build", "24183c7d359b4030faeef894bbe4ba52",
+                                    "bb-queue-lib.sh", "2569b8af2cf8acc063024e553be66a93",
+                                    "bb-queue", "9cb677b671867eecdf90c9514bbd0732",
+                                    "bb-tickets", "8d34d9dc9ab2a4f867af863ec21be77e",
+                                    "bb-jbct-bootstrap", "3e5396ecee48b99949456cf805df1e60",
+                                    "bb-result", "2b99dd5c414175c4fd40a9836da76298",
+                                    "bb-portgroup.py", "884caf3cf37b12cf5cf1d97e96f76a4c");
+        var tools = host("h1");
+
+        assertThat(install("builder@h1").rc()).isZero();
+        Files.write(tools.resolve("bb-build"), prev("bb-build.presince"));
+        Files.write(tools.resolve("bb-portgroup.py"), prev("bb-portgroup.py.presince"));
+        for (var e : live.entrySet()) {
+            assertThat(BbFixtures.md5(Files.readAllBytes(tools.resolve(e.getKey())))).as(e.getKey()).isEqualTo(e.getValue());
+        }
+        var run = install("builder@h1");
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        assertThat(run.stdout()).doesNotContain("refused");
+    }
+
+    /// The bb-build of 2026-11-21 05:18 (#63, BB_BUILD_PREFIELDS, before the session-fields fix #75) is an accepted source and is replaced, backed up under its md5.
+    /// Mutation: drop BB_BUILD_PREFIELDS from accepted_of -> the host is refused, exit 65, red.
+    @Test
+    void aHostRunningThePreFieldsBuild_isUpdated() throws Exception {
+        var tools = host("h1");
+
+        assertThat(install("builder@h1").rc()).isZero();
+        Files.write(tools.resolve("bb-build"), prev("bb-build.prefields"));
+        var run = install("builder@h1");
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        assertThat(run.stdout()).contains("installed builder@h1 bb-build before=" + pin("BB_BUILD_PREFIELDS") + " after=" + pin("BB_BUILD_NEW"));
+        assertThat(tools.resolve("bb-build.bak-" + pin("BB_BUILD_PREFIELDS"))).hasBinaryContent(prev("bb-build.prefields"));
+    }
+
     @Test
     void anExistingBakOfThatName_isKept() throws Exception {
         var tools = host("h1");
@@ -922,7 +970,8 @@ class BbInstallIT {
                                                                  + "|" + pin("BB_BUILD_PREJBCT")
                                                                  + "|" + pin("BB_BUILD_PREHELP")
                                                                  + "|" + pin("BB_BUILD_PRESINCE")
-                                                                 + "|" + pin("BB_BUILD_PRETEST")
+                                                                 + "|" + pin("BB_BUILD_PREFIELDS")
+                                                                 + "|" + pin("BB_BUILD_PRESESSION")
                                                                  + "|" + pin("BB_BUILD_NEW"));
         assertThat(listing(good)).isEqualTo(goodBefore);
         assertThat(listing(diverged)).isEqualTo(divergedBefore);

@@ -12,7 +12,7 @@
 #   everything before <target>, and then no config is read.
 # Phase 0, local: the sixteen files of ops/bb (next to this script) named below must be the pinned reviewed files, else exit 65
 #   with no ssh made.
-# Phase 1, read-only, EVERY target first: installed bb-build is one of BB_BUILD_OLD|MID|PREV|LIVE|PRE31|PRERC|PREVIA|PREMEM|PRECAP|PREJBCT|PREHELP|PRESINCE|PRETEST|NEW, bb-queue-lib.sh one of BB_LIB_OLD|PREV|PRERC|PREMEM|PRECAP|PREOFFQ|PRELEDGER|NEW,
+# Phase 1, read-only, EVERY target first: installed bb-build is one of BB_BUILD_OLD|MID|PREV|LIVE|PRE31|PRERC|PREVIA|PREMEM|PRECAP|PREJBCT|PREHELP|PRESINCE|PREFIELDS|PRESESSION|NEW, bb-queue-lib.sh one of BB_LIB_OLD|PREV|PRERC|PREMEM|PRECAP|PREOFFQ|PRELEDGER|NEW,
 #   bb-queue one of BB_QUEUE_OLD|PREV|LIVE|PRE31|PRERC|PREVIA|PREMEM|PRECAP|PREOFFQ|PRELEDGER|NEW, bb-tickets is absent, BB_TICKETS_OLD|PRE31|PREOFFQ|NEW, bb-hold is absent, BB_HOLD_OLD (the 2026-11-09
 #   host snapshot), BB_HOLD_PRELEDGER or BB_HOLD_NEW, bb-wait is absent, BB_WAIT_PRERC or its NEW, bb-await is absent or BB_AWAIT_NEW, bb-netns-run is absent, BB_NETNS_PREV or BB_NETNS_NEW, bb-portgroup.py is absent, BB_PORTGROUP_PREV, BB_PORTGROUP_PRESINCE or BB_PORTGROUP_NEW, bb-modules.py is absent or BB_MODULES_NEW, bb-mutate is absent, BB_MUTATE_OLD, BB_MUTATE_PREVIA or BB_MUTATE_NEW, bb-jbct-bootstrap is absent or BB_JBCTBOOT_NEW, bb-result is absent, BB_RESULT_PRECP or BB_RESULT_NEW, and bb-cp-record, bb-test and bb-testcount (the bb-test lane) are absent or their NEW pin. Any mismatch prints `refused <target> <file> installed=<md5|absent>
 #   expected=<pin>[|<pin>...]` (every accepted pin except `absent`, in the order above) for every mismatch on every target and exits 65 having written nothing anywhere; an unreachable target is 69.
@@ -63,8 +63,9 @@ readonly BB_BUILD_PRECAP=8478b2174ce3ff6de293b55a283e3ce7   # the #53 version: c
 readonly BB_BUILD_PREJBCT=12c68a554862caa672f7211456dfc84c   # the #56 version: no jbct plugin bootstrap hook, no bb-cp-record hook, no BB_LAUNCH
 readonly BB_BUILD_PREHELP=a942996fc17ef7851bac693f135defc2   # the #64/#66 version: no --help, no bb-cp-record hook, no BB_LAUNCH, no launch ledger (bb-test lane)
 readonly BB_BUILD_PRESINCE=24183c7d359b4030faeef894bbe4ba52   # the #67 version, live on every host from 2026-11-21: --help and bb-result, no --since (docs/bb-build-once-design.md section 1), no bb-cp-record hook, no launch ledger
-readonly BB_BUILD_PRETEST=399f2414202fb5b9676960ff5b1ffece   # the #63 version: --since, no bb-cp-record hook, no BB_LAUNCH, no launch ledger (bb-test lane)
-readonly BB_BUILD_NEW=b94d4e5a1e2f50637ecb183d3568cdc9
+readonly BB_BUILD_PREFIELDS=399f2414202fb5b9676960ff5b1ffece   # the #63 version: a full session triple overwrote since=/modules= (issue #75); no bb-cp-record hook, no BB_LAUNCH, no launch ledger
+readonly BB_BUILD_PRESESSION=2810f93c875ad9a106c2cda284babb81   # the #79 version: session fields fixed with +=, no bb-cp-record hook, no BB_LAUNCH, no launch ledger (bb-test lane)
+readonly BB_BUILD_NEW=dafd74a3ea2fec81b1a3d39067422f6a
 # bb-jbct-bootstrap: absent on every host before its first install; bb-build calls it, so it is installed first.
 readonly BB_JBCTBOOT_NEW=3e5396ecee48b99949456cf805df1e60
 # bb-result: absent on every host before its first install. No trailing comment on a pin line: bb-drift reads it by pattern.
@@ -128,7 +129,7 @@ new_of() {
 }
 accepted_of() {  # the md5s a host may hold besides absent, in the order the refusal names them
   case $1 in
-    bb-build) echo "$BB_BUILD_OLD $BB_BUILD_MID $BB_BUILD_PREV $BB_BUILD_LIVE $BB_BUILD_PRE31 $BB_BUILD_PRERC $BB_BUILD_PREVIA $BB_BUILD_PREMEM $BB_BUILD_PRECAP $BB_BUILD_PREJBCT $BB_BUILD_PREHELP $BB_BUILD_PRESINCE $BB_BUILD_PRETEST $BB_BUILD_NEW" ;;
+    bb-build) echo "$BB_BUILD_OLD $BB_BUILD_MID $BB_BUILD_PREV $BB_BUILD_LIVE $BB_BUILD_PRE31 $BB_BUILD_PRERC $BB_BUILD_PREVIA $BB_BUILD_PREMEM $BB_BUILD_PRECAP $BB_BUILD_PREJBCT $BB_BUILD_PREHELP $BB_BUILD_PRESINCE $BB_BUILD_PREFIELDS $BB_BUILD_PRESESSION $BB_BUILD_NEW" ;;
     bb-queue-lib.sh) echo "$BB_LIB_OLD $BB_LIB_PREV $BB_LIB_PRERC $BB_LIB_PREMEM $BB_LIB_PRECAP $BB_LIB_PREOFFQ $BB_LIB_PRELEDGER $BB_LIB_NEW" ;;
     bb-queue) echo "$BB_QUEUE_OLD $BB_QUEUE_PREV $BB_QUEUE_LIVE $BB_QUEUE_PRE31 $BB_QUEUE_PRERC $BB_QUEUE_PREVIA $BB_QUEUE_PREMEM $BB_QUEUE_PRECAP $BB_QUEUE_PREOFFQ $BB_QUEUE_PRELEDGER $BB_QUEUE_NEW" ;;
     bb-hold) echo "$BB_HOLD_OLD $BB_HOLD_PRELEDGER $BB_HOLD_NEW" ;;
