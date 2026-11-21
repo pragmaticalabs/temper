@@ -205,6 +205,9 @@ class BbInstallIT {
         assertThat(pin("BB_LIB_PREOFFQ")).isEqualTo(BbFixtures.md5(prev("bb-queue-lib.sh.preoffq")));
         assertThat(pin("BB_QUEUE_PREOFFQ")).isEqualTo(BbFixtures.md5(prev("bb-queue.preoffq")));
         assertThat(pin("BB_TICKETS_PREOFFQ")).isEqualTo(BbFixtures.md5(prev("bb-tickets.preoffq")));
+        assertThat(pin("BB_BUILD_PRETICKET")).isEqualTo(BbFixtures.md5(prev("bb-build.preticket")));
+        assertThat(pin("BB_LIB_PRETICKET")).isEqualTo(BbFixtures.md5(prev("bb-queue-lib.sh.preticket")));
+        assertThat(pin("BB_QUEUE_PRETICKET")).isEqualTo(BbFixtures.md5(prev("bb-queue.preticket")));
         assertThat(pin("BB_HOLD_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-hold")));
         assertThat(pin("BB_WAIT_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-wait")));
         assertThat(pin("BB_AWAIT_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-await")));
@@ -751,6 +754,34 @@ class BbInstallIT {
         assertThat(tools.resolve("bb-build.bak-" + pin("BB_BUILD_PREFIELDS"))).hasBinaryContent(prev("bb-build.prefields"));
     }
 
+    /// The bb-build, bb-queue and bb-queue-lib.sh of #79/#103 (BB_*_PRETICKET, before the ticket-id identity of issue #80) are accepted sources and are
+    /// replaced, backed up under their md5. Mutation: leave a PRETICKET out of its accepted list -> the install is refused (65), red.
+    @Test
+    void aHostRunningThePreTicketTools_isUpdated() throws Exception {
+        var tools = host("h1");
+
+        assertThat(install("builder@h1").rc()).isZero();
+        var names = List.of("bb-build", "bb-queue-lib.sh", "bb-queue");
+
+        for (var name : names) {
+            Files.write(tools.resolve(name), prev(name + ".preticket"));
+        }
+
+        var run = install("builder@h1");
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        for (var name : names) {
+            var key = switch (name) {
+                case "bb-build" -> "BB_BUILD_";
+                case "bb-queue-lib.sh" -> "BB_LIB_";
+                default -> "BB_QUEUE_";
+            };
+
+            assertThat(run.stdout()).contains("installed builder@h1 " + name + " before=" + pin(key + "PRETICKET") + " after=" + pin(key + "NEW"));
+            assertThat(tools.resolve(name + ".bak-" + pin(key + "PRETICKET"))).hasBinaryContent(prev(name + ".preticket"));
+        }
+    }
+
     @Test
     void anExistingBakOfThatName_isKept() throws Exception {
         var tools = host("h1");
@@ -786,6 +817,7 @@ class BbInstallIT {
                                                                  + "|" + pin("BB_BUILD_PREHELP")
                                                                  + "|" + pin("BB_BUILD_PRESINCE")
                                                                  + "|" + pin("BB_BUILD_PREFIELDS")
+                                                                 + "|" + pin("BB_BUILD_PRETICKET")
                                                                  + "|" + pin("BB_BUILD_NEW"));
         assertThat(listing(good)).isEqualTo(goodBefore);
         assertThat(listing(diverged)).isEqualTo(divergedBefore);
@@ -824,6 +856,7 @@ class BbInstallIT {
                            + "|" + pin("BB_LIB_PREMEM")
                            + "|" + pin("BB_LIB_PRECAP")
                            + "|" + pin("BB_LIB_PREOFFQ")
+                           + "|" + pin("BB_LIB_PRETICKET")
                            + "|" + pin("BB_LIB_NEW"))
                   .contains("bb-queue installed=" + BbFixtures.md5("unrelated tool\n".getBytes())
                            + " expected=" + BbFixtures.BB_QUEUE_OLD
@@ -834,6 +867,7 @@ class BbInstallIT {
                            + "|" + pin("BB_QUEUE_PREMEM")
                            + "|" + pin("BB_QUEUE_PRECAP")
                            + "|" + pin("BB_QUEUE_PREOFFQ")
+                           + "|" + pin("BB_QUEUE_PRETICKET")
                            + "|" + pin("BB_QUEUE_NEW"));
     }
 

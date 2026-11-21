@@ -205,7 +205,7 @@ write_rc() {
 # and bb-report counts nothing (run.marker is touched, so no older XML is "newer than marker").
 never_started() {
   local B=$1/.bb now; now=$(date +%s)
-  mkdir -p "$B"; touch "$B/run.marker"; echo "$now" > "$B/start"; echo "$now" > "$B/end"
+  mkdir -p "$B"; touch "$B/run.marker"; echo "$now" > "$B/start"; echo "$now" > "$B/end"; rm -f "$B/ticket"   # no run owns this rc (#80)
   echo "bb-build: maven never started: $3" > "$B/build.log"; rm -f "$B/queued"; write_rc "$B" "$2"
 }
 

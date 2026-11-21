@@ -3,12 +3,14 @@
 # QUEUED since 2026-09-28: after the guards below, the build is DEDUPED against identical builds, then ENQUEUED and
 # this command returns at once; a detached waiter launches maven when its ticket is granted (priority order from
 # ~/work/priorities, FIFO among equals, under the reactor cap). Poll for .bb/rc exactly as before.
-# Writes in <checkout>/.bb/: queued (ticket id, while waiting), run.marker (at launch), build.log, start/end
+# Writes in <checkout>/.bb/: queued (ticket id, while waiting), run.marker (at launch), ticket (the granted run's ticket id, written with start), build.log, start/end
 # epochs, rc (a 444 convenience copy of maven's exit code, written INSIDE the job; 5 = queue wait expired, 9 = cancelled/abandoned
 # before maven started). Call rc: 0 queued; 2 usage; 3 already running/queued here; 4 owner; 6 #1553 guard;
 # 7 identical build running/queued elsewhere; 8 identical build already finished (paths printed); 10 -Dtest without
 # -Dit.test on forge-tests (failsafe ignores -Dtest). BB_DEDUP=0
-# skips dedup. BB_QUEUE=0 runs the pre-queue script (bb-build-direct) unchanged -- it also bypasses the port group.
+# skips dedup. DEDUP IDENTITY (#80, 2026-11-21): a finished identical build is still the checkout's result only while .bb/ticket names ITS ticket (not while
+# .bb/start equals its started=: two runs granted in one second shared a start, and dedup answered with the newer run's result). A checkout with no
+# .bb/ticket (run before this change) is not current: no dedup, the safe direction. BB_QUEUE=0 runs the pre-queue script (bb-build-direct) unchanged -- it also bypasses the port group.
 # PORT GROUP (2026-09-29): a run that will execute tests of a fixed-port module (~/work/port-group-modules; decided by
 # bb-portgroup.py from the checkout's own poms and the args) is granted only while no other port-group run is running.
 # BB_PORT_GROUP=1 forces membership, BB_PORT_GROUP=0 forces exclusion.
@@ -99,7 +101,7 @@ if [ "${1:-}" = __run ]; then
   done
   # granted (lock held): launch, and keep the lock until the reactor is visible so the next grant counts it
   NOW=$(date +%s)
-  rm -f "$B/queued" "$B/rc" "$B/end"; touch "$B/run.marker"; echo "$NOW" > "$B/start"; printf '%q ' "$@" > "$B/args"   # for bb-report's EMPTY RUN check
+  rm -f "$B/queued" "$B/rc" "$B/end"; touch "$B/run.marker"; echo "$NOW" > "$B/start"; echo "$ID" > "$B/ticket"; printf '%q ' "$@" > "$B/args"   # for bb-report's EMPTY RUN check
   RDF=(-Daether.requireDocker=true); [ "$(field "$T" requireDocker)" != 0 ] || RDF=()   # #31: the ticket's own record decides
   SLOT=""; [ "$(field "$T" iso)" = 1 ] && SLOT=$(pg_free_slot)
   printf 'started=%s\nwaited=%s\n' "$NOW" "$WAITED" >> "$T"; [ -z "$SLOT" ] || printf 'group_slot=%s\n' "$SLOT" >> "$T"; mv "$T" "$Q/running/$ID"; T=$Q/running/$ID
@@ -244,7 +246,7 @@ if [ -n "$KEY" ] && [ "${BB_DEDUP:-1}" != 0 ]; then
     f=$Q/done/$f
     [ "$(field "$f" key)" = "$KEY" ] && [ "$(field "$f" state)" = finished ] || continue
     o=$(field "$f" co)
-    [ -f "$o/.bb/rc" ] && [ "$(cat "$o/.bb/start" 2>/dev/null)" = "$(field "$f" started)" ] || continue   # since rebuilt/removed
+    [ -f "$o/.bb/rc" ] && [ "$(cat "$o/.bb/ticket" 2>/dev/null)" = "${f##*/}" ] || continue   # since rebuilt/removed: .bb/ticket names the run that owns .bb now (#80; no .bb/ticket = a pre-#80 run = not current)
     echo "dedup: identical build already finished: rc=$(field "$f" rc) ended=$(date -d @"$(field "$f" ended)" -Is) owner=$(field "$f" owner)" >&2
     echo "dedup: read its result at $o/.bb (bb-report $o); BB_DEDUP=0 to run anyway" >&2; exit 8
   done
@@ -279,7 +281,7 @@ OWNER_FIELDS+="output=$B/build.log"$'\n'
 
 ID=$(date +%s%N)-$$
 T=$Q/waiting/$ID
-rm -f "$B/rc" "$B/end" "$B/start"
+rm -f "$B/rc" "$B/end" "$B/start" "$B/ticket"
 echo "bb-build: queued ticket $ID at $(date -Is); maven has not started (bb-queue shows position)" > "$B/build.log"
 echo "$ID" > "$B/queued"
 { printf 'id=%s\nowner=%s\nco=%s\nsha=%s\nkey=%s\ncap=%s\nlimit=%s\ncreated=%s\n' \
