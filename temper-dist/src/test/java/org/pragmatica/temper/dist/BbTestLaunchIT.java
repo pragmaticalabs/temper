@@ -660,13 +660,13 @@ class BbTestLaunchIT {
         assertThat(bbTest(Map.of(), "fx.CalcTest#passes").rc()).as(log()).isZero();
     }
 
-    /// D4: every vbt11 escape form E1-E9 (vbt11-report.md, vbt11a), inserted into a fixture copy of bb-test so that it reads a FIFO under the
+    /// D4: every vbt11 escape form E1-E8 (E9 read a FIFO through `$tco`, the queue-scan loop variable; the launch no longer scans the queue (#76), so its carrier is gone) (vbt11-report.md, vbt11a), inserted into a fixture copy of bb-test so that it reads a FIFO under the
     /// fixture checkout (E8: under /tmp, where the form moved it). The forms escaped the deleted static audits; here each must END within
-    /// the 5 s overall bound with an rc 17 refusal, never hang. E1-E4 and E7-E9 sit after `guard launcher_ok` in the walled launch (the
+    /// the 5 s overall bound with an rc 17 refusal, never hang. E1-E4 and E7-E8 sit after `guard launcher_ok` in the walled launch (the
     /// report's harness point); E5 before the walled launch's `cd /` (its cwd is the checkout there); E6's `$1` carrier is re-created with
     /// `set --`, since its own place (enqueue, before `CO=$1`) is outside W: W bounds the launch, not the enqueue. Probe p4: this run.
     @ParameterizedTest(name = "{0}")
-    @ValueSource(strings = {"E1", "E2", "E3", "E4", "E5", "E6", "E7", "E8", "E9"})
+    @ValueSource(strings = {"E1", "E2", "E3", "E4", "E5", "E6", "E7", "E8"})
     @Timeout(value = 120, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
     void everyVbt11EscapeForm_readingAFifo_endsWithinW_withRc17(String id) throws Exception {
         var fifo = "[ -p \"$CO/f\" ] || mkfifo \"$CO/f\"; ";
@@ -678,7 +678,6 @@ class BbTestLaunchIT {
             case "E6" -> "set -- \"$CO\"; sed -n 1p \"$1/f\"";
             case "E7" -> "for g in \"$CO\"/[f]; do sed -n 1p \"$g\"; done";
             case "E8" -> "R=$(mktemp); echo \"$R\" > '" + dir.resolve("e8.path") + "'; mv \"$CO/f\" \"$R\"; sed -n 1p \"$R\"";
-            case "E9" -> "sed -n 1p \"$tco/f\"";
             default -> null;
         };
         if (form == null) {
