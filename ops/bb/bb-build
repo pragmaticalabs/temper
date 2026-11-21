@@ -162,7 +162,7 @@ if [ "${1:-}" = __run ]; then
   wait "$C"; BRC=$?   # the build's exit status: the verdict. Never re-read from $B/rc, which a lane can delete or rewrite
   LF="" REJ=""   # LAUNCH FIELDS (header): read before the lock, so a slow or hostile file never holds the queue; set -e: every read is || true
   rej() { case ",$REJ," in *",$1,"*) ;; *) REJ=${REJ:+$REJ,}$1;; esac; echo "bb-build: launch fields: rejected $1${2:+: $2}" >> "$B/build.log"; }
-  HT=$(run_ticket "$CO" 2> /dev/null | head -c 128 | head -n 1) || true   # the lib's reader (#80); bounded: head ends the pipe (SIGPIPE) after 128 bytes; an absent run ticket reads as "" = mismatch
+  HT=$(run_ticket "$CO" 2> /dev/null | head -c 128 | head -n 1) || true   # the lib's reader (#80); bounded: head ends the pipe (SIGPIPE) after 128 bytes; an absent run ticket reads as "" = mismatch. run_ticket's [ -f ] follows a symlink but refuses a FIFO or device, so a planted FIFO cannot hang the read, and head bounds a huge file
   for f in "$B"/fields.*; do
     [ -e "$f" ] || [ -L "$f" ] || continue
     n=${f##*/fields.}
