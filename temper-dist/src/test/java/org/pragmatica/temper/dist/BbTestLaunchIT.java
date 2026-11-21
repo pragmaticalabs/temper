@@ -757,6 +757,35 @@ class BbTestLaunchIT {
         assertThat(run.stdout()).doesNotContain("queued ticket=");
     }
 
+    /// bb-test classifies with the repo bb-portgroup.py (the #63 refactor moved its pom walk into load_reactor, shared with bb-modules.py)
+    /// through the CLI `<modules-file> <checkout> -pl <module> test`: a port-group module file naming fx puts the ticket in the group, one
+    /// naming another module keeps it out. The reactor here is namespaced with fx as a module, so the classifier resolves `-pl fx`.
+    /// Probe: bb-test passing the checkout and the modules file swapped -> the classifier fails, group=1 on the second ticket, red.
+    @Test
+    void theRealPortGroupClassifier_decidesTheBbTestTicketsGroup_fromTheModuleFile() throws Exception {
+        var ns = "<project xmlns=\"http://maven.apache.org/POM/4.0.0\"><modelVersion>4.0.0</modelVersion><groupId>g</groupId>";
+
+        Files.writeString(co.resolve("pom.xml"),
+                          ns + "<artifactId>root</artifactId><version>1</version><packaging>pom</packaging>"
+                         + "<properties><junit.version>5.13.4</junit.version></properties><modules><module>fx</module></modules></project>");
+        Files.writeString(co.resolve("fx/pom.xml"), ns + "<artifactId>fx</artifactId><version>1</version></project>");
+        assertThat(BbFixtures.run(List.of("git", "-C", co.toString(), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "ns"),
+                                  Map.of(), null, null).rc()).isZero();
+        green();
+        Files.writeString(dir.resolve("pg-fx"), "fx\n");
+        Files.writeString(dir.resolve("pg-other"), "other/mod\n");
+
+        var in = bbTest(Map.of("BB_PORT_GROUP", "", "BB_PG_ISOLATE", "0", "BB_TEST_PORT_MODULES", dir.resolve("pg-fx").toString()),
+                        "fx.CalcTest#passes");
+        var out = bbTest(Map.of("BB_PORT_GROUP", "", "BB_PG_ISOLATE", "0", "BB_TEST_PORT_MODULES", dir.resolve("pg-other").toString()),
+                         "fx.CalcTest#passes");
+
+        assertThat(in.doneText()).as(in.doneText()).contains("\ngroup=1\n");
+        assertThat(in.rc()).as(in.doneText()).isZero();
+        assertThat(out.doneText()).as(out.doneText()).contains("\ngroup=0\n");
+        assertThat(out.rc()).as(out.doneText()).isZero();
+    }
+
     /// vbt9 READ INVARIANT: the refusal's own .bb/refused write is bounded too (10 s fixed). A FIFO planted as .bb/refused (an open that
     /// blocks forever) must not hang a refusal: the ticket's refused= (written first) and rc 15 land, the FIFO is left unwritten.
     /// Probe: replace that bounded write by the bare printf redirect -> red: the refusal blocks on the FIFO, the 120 s thread timeout fails it.
