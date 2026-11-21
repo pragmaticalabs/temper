@@ -609,6 +609,31 @@ class BbTestLaunchIT {
         }
     }
 
+    /// vbt12 F1: the DEFAULT bounds are the ruled numbers, read where they take effect: a recording `timeout` first on PATH (bounded()
+    /// execs `timeout` by name) logs every bound a default --repeat 5 launch passes. 62100 = 5 x REPEAT 11800 + OVERHEAD 3100 (the overall
+    /// bound), 11800 per REPEAT, 10800 java (BB_JAVA_TIMEOUT), 300 per read (BB_CP_READ_TIMEOUT).
+    /// Probe: bb-test's REPEAT default 11800 -> 1180 left every other row green (vbt12, ticket 1795255239626116370-2588732); here it is red.
+    @Test
+    @Timeout(value = 120, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
+    void theDefaultBounds_areTheRuledW_62100AtTheCap_11800PerRepeat_10800Java_300PerRead() throws Exception {
+        var real = Stream.of(System.getenv("PATH").split(":"))
+                         .map(p -> Path.of(p, "timeout"))
+                         .filter(Files::isExecutable)
+                         .findFirst()
+                         .orElseThrow();
+        var rec = dir.resolve("timeout-bounds.txt");
+        var stub = BbFixtures.executable(dir.resolve("stub-timeout/timeout"),
+                                         "#!/usr/bin/env bash\n[ \"$1\" = -k ] && printf '%s\\n' \"$3\" >> '" + rec + "'\nexec '" + real
+                                         + "' \"$@\"\n");
+
+        green();
+        var run = bbTest(Map.of("PATH", stub.getParent() + ":" + System.getenv("PATH")), "fx.CalcTest#passes", "--repeat", "5");
+
+        assertThat(run.rc()).as(run.doneText() + log()).isZero();
+        assertThat(Files.readAllLines(rec)).as("the bounds bounded() passed to timeout")
+                                           .contains("62100", "11800", "10800", "300");
+    }
+
     /// N5 (D3): the module selector must not start with "-" (a later command would read it as an option, e.g. bb-portgroup.py's -pl).
     /// Refused at enqueue (rc 2), nothing queued. Probe p3: the leading-dash check dropped -> red (none of them names the refusal).
     @ParameterizedTest(name = "module {0}")
