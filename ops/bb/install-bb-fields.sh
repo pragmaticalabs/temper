@@ -12,9 +12,9 @@
 #   everything before <target>, and then no config is read.
 # Phase 0, local: the sixteen files of ops/bb (next to this script) named below must be the pinned reviewed files, else exit 65
 #   with no ssh made.
-# Phase 1, read-only, EVERY target first: installed bb-build is one of BB_BUILD_OLD|MID|PREV|LIVE|PRE31|PRERC|PREVIA|PREMEM|PRECAP|PREJBCT|PREHELP|PRESINCE|PREFIELDS|PRESESSION|NEW, bb-queue-lib.sh one of BB_LIB_OLD|PREV|PRERC|PREMEM|PRECAP|PREOFFQ|PRELEDGER|NEW,
-#   bb-queue one of BB_QUEUE_OLD|PREV|LIVE|PRE31|PRERC|PREVIA|PREMEM|PRECAP|PREOFFQ|PRELEDGER|NEW, bb-tickets is absent, BB_TICKETS_OLD|PRE31|PREOFFQ|NEW, bb-hold is absent, BB_HOLD_OLD (the 2026-11-09
-#   host snapshot), BB_HOLD_PRELEDGER or BB_HOLD_NEW, bb-wait is absent, BB_WAIT_PRERC or its NEW, bb-await is absent or BB_AWAIT_NEW, bb-netns-run is absent, BB_NETNS_PREV or BB_NETNS_NEW, bb-portgroup.py is absent, BB_PORTGROUP_PREV, BB_PORTGROUP_PRESINCE or BB_PORTGROUP_NEW, bb-modules.py is absent or BB_MODULES_NEW, bb-mutate is absent, BB_MUTATE_OLD, BB_MUTATE_PREVIA or BB_MUTATE_NEW, bb-jbct-bootstrap is absent or BB_JBCTBOOT_NEW, bb-result is absent, BB_RESULT_PRECP or BB_RESULT_NEW, and bb-cp-record, bb-test and bb-testcount (the bb-test lane) are absent or their NEW pin. Any mismatch prints `refused <target> <file> installed=<md5|absent>
+# Phase 1, read-only, EVERY target first: installed bb-build is one of BB_BUILD_OLD|MID|PREV|LIVE|PRE31|PRERC|PREVIA|PREMEM|PRECAP|PREJBCT|PREHELP|PRESINCE|PREFIELDS|PRESESSION|PRE80|NEW, bb-queue-lib.sh one of BB_LIB_OLD|PREV|PRERC|PREMEM|PRECAP|PREOFFQ|PRELEDGER|PRE80|NEW,
+#   bb-queue one of BB_QUEUE_OLD|PREV|LIVE|PRE31|PRERC|PREVIA|PREMEM|PRECAP|PREOFFQ|PRELEDGER|PRE80|NEW, bb-tickets is absent, BB_TICKETS_OLD|PRE31|PREOFFQ|NEW, bb-hold is absent, BB_HOLD_OLD (the 2026-11-09
+#   host snapshot), BB_HOLD_PRELEDGER or BB_HOLD_NEW, bb-wait is absent, BB_WAIT_PRERC, BB_WAIT_PREREFUSED, BB_WAIT_PRE80 or its NEW, bb-await is absent or BB_AWAIT_NEW, bb-netns-run is absent, BB_NETNS_PREV or BB_NETNS_NEW, bb-portgroup.py is absent, BB_PORTGROUP_PREV, BB_PORTGROUP_PRESINCE or BB_PORTGROUP_NEW, bb-modules.py is absent or BB_MODULES_NEW, bb-mutate is absent, BB_MUTATE_OLD, BB_MUTATE_PREVIA or BB_MUTATE_NEW, bb-jbct-bootstrap is absent or BB_JBCTBOOT_NEW, bb-result is absent, BB_RESULT_PRECP, BB_RESULT_PRE80 or BB_RESULT_NEW, and bb-cp-record, bb-test and bb-testcount (the bb-test lane) are absent or their NEW pin. Any mismatch prints `refused <target> <file> installed=<md5|absent>
 #   expected=<pin>[|<pin>...]` (every accepted pin except `absent`, in the order above) for every mismatch on every target and exits 65 having written nothing anywhere; an unreachable target is 69.
 # Phase 2, per target and per file to change (bb-cp-record, bb-test, bb-testcount, bb-mutate, bb-tickets, bb-hold, bb-wait, bb-await, bb-netns-run, bb-portgroup.py, bb-modules.py, bb-jbct-bootstrap, bb-result, bb-queue-lib.sh, bb-queue,
 #   then bb-build: the helpers and the lib before the tools that call or source them; bb-build calls bb-cp-record), one remote `bash -s` script: receive the file as
@@ -40,7 +40,8 @@ readonly BB_LIB_PREMEM=a8fb757b12597e167b9804f7d14327e0   # the #42 version: no 
 readonly BB_LIB_PRECAP=cca5e8cd6942f988bb932f37f4de93e1   # the #53 version: no host reactor cap, no off-queue JVM headroom (issue #56)
 readonly BB_LIB_PREOFFQ=e1b318e7bef1d4acff934b041d5ecc1a   # the #56/#64 version: no off-queue reactor list (2026-11-20); the cap counts reactors by process pattern
 readonly BB_LIB_PRELEDGER=2569b8af2cf8acc063024e553be66a93   # the #66 version: the cap counts reactors by process pattern (replaced by the launch ledger)
-readonly BB_LIB_NEW=e607b50fda23b34c7468cd89d0e9f247
+readonly BB_LIB_PRE80=e607b50fda23b34c7468cd89d0e9f247   # the #70 version: no run_ticket/run_current (issue #80)
+readonly BB_LIB_NEW=f5bd1cc5ac79506f341a414b79558852
 readonly BB_QUEUE_OLD=7efbfbecb9739fed35223cdc97eb185d
 readonly BB_QUEUE_PREV=a04b7be02f840d4f1e2bd19c54c52b3f
 readonly BB_QUEUE_LIVE=af86457ae18f4ca331e47137cd088bc7   # what the 2026-11-11 hosts run: its header says `group tickets running:`, which the worker cannot parse
@@ -51,7 +52,8 @@ readonly BB_QUEUE_PREMEM=de6c69845c05e97f1234b4b4977f1b52   # the #46 version: n
 readonly BB_QUEUE_PRECAP=841403902eeb4af490300f8f56011c8e   # the #53 version: no HOST CAP line (issue #56)
 readonly BB_QUEUE_PREOFFQ=fcbdc6cf8130550b57f83ebb00ef859b   # the #56/#64 version: no `offq` subcommand, the "+ N reactor(s)" count is reactors minus tickets (2026-11-20)
 readonly BB_QUEUE_PRELEDGER=9cb677b671867eecdf90c9514bbd0732   # the #66 version: no queue-launches count in the RUNNING line
-readonly BB_QUEUE_NEW=6d96fab85663b88fa2d0b9b0214d4b59
+readonly BB_QUEUE_PRE80=6d96fab85663b88fa2d0b9b0214d4b59   # the #70 version: too_late compares inline (issue #80)
+readonly BB_QUEUE_NEW=b0dc5f1a6b36301d003fa1804bebeb14
 readonly BB_BUILD_MID=a1100c916b866ad3716bc4095ddb1991   # the T3 fields version, before the waiter's first-writer-wins guard
 readonly BB_BUILD_PREV=cae49573d06f632d3081f7d5be1e9b66
 readonly BB_BUILD_LIVE=015b2a2261a6789c5af215b3745a2b84   # what c3/c4/d1 run since 2026-11-11: no requireDocker flag
@@ -65,12 +67,15 @@ readonly BB_BUILD_PREHELP=a942996fc17ef7851bac693f135defc2   # the #64/#66 versi
 readonly BB_BUILD_PRESINCE=24183c7d359b4030faeef894bbe4ba52   # the #67 version, live on every host from 2026-11-21: --help and bb-result, no --since (docs/bb-build-once-design.md section 1), no bb-cp-record hook, no launch ledger
 readonly BB_BUILD_PREFIELDS=399f2414202fb5b9676960ff5b1ffece   # the #63 version: a full session triple overwrote since=/modules= (issue #75); no bb-cp-record hook, no BB_LAUNCH, no launch ledger
 readonly BB_BUILD_PRESESSION=2810f93c875ad9a106c2cda284babb81   # the #79 version: session fields fixed with +=, no bb-cp-record hook, no BB_LAUNCH, no launch ledger (bb-test lane)
-readonly BB_BUILD_NEW=dafd74a3ea2fec81b1a3d39067422f6a
+readonly BB_BUILD_PRE80=dafd74a3ea2fec81b1a3d39067422f6a   # the #70 version: dedup identifies a run by its start second (issue #80)
+readonly BB_BUILD_NEW=2f349b869a02dcfec552ab0b8b1f972c
 # bb-jbct-bootstrap: absent on every host before its first install; bb-build calls it, so it is installed first.
 readonly BB_JBCTBOOT_NEW=3e5396ecee48b99949456cf805df1e60
 # bb-result: absent on every host before its first install. No trailing comment on a pin line: bb-drift reads it by pattern.
 readonly BB_RESULT_PRECP=2b99dd5c414175c4fd40a9836da76298   # the #67 version, live on every host from 2026-11-20: no refused verdict line
-readonly BB_RESULT_NEW=f4505867d09a1b3946280944678757ba
+# the #70 bb-result: it identifies the checkout's run by .bb/start (issue #80)
+readonly BB_RESULT_PRE80=f4505867d09a1b3946280944678757ba
+readonly BB_RESULT_NEW=72f89894ab1a7ddb3cf9b78a4bd2d4b8
 readonly BB_TICKETS_OLD=472cd816644fe0ee0902b8da3d33de8e   # before the per-ticket progressAt (issue #10)
 readonly BB_TICKETS_PRE31=e1aeba98541ba781295001f956b08c8d   # live since 2026-11-12: drops a ticket key with a capital letter
 readonly BB_TICKETS_PREOFFQ=6174119f0cd567c5dc462d1e063c6214   # the #31 version: no `offq` in the trailer (2026-11-20)
@@ -80,7 +85,9 @@ readonly BB_HOLD_PRELEDGER=3561bb8e22fc2f7f3e98dc795f31eecb   # the #56 version:
 readonly BB_HOLD_NEW=c8c6947d1de945e38c5cf08f8448dae9
 readonly BB_WAIT_PRERC=da248f0b4f9248f2bfed64330b3ca66e   # live on all four hosts from 2026-11-12: the ticket rc= is read from .bb/rc (replaced by the exit-status record)
 readonly BB_WAIT_PREREFUSED=d5b0ff8d43994a78cd188b4a41fcd995
-readonly BB_WAIT_NEW=d742e51de2f05b57a422143d0ef0ab01
+# the #70 bb-wait: the RC-MISMATCH check compares .bb/start with the ticket's started= (issue #80)
+readonly BB_WAIT_PRE80=d742e51de2f05b57a422143d0ef0ab01
+readonly BB_WAIT_NEW=c402db0acb3822afe2b637a130d40298
 # bb-await (issue #48): absent on every host before its first install. No trailing comment on a pin line: bb-drift reads it by pattern.
 readonly BB_AWAIT_PREREFUSED=56523085fccf5678eb7c208e7352c11b
 readonly BB_AWAIT_NEW=c170d09c8d379f16849fc59ea094a72d
@@ -129,17 +136,17 @@ new_of() {
 }
 accepted_of() {  # the md5s a host may hold besides absent, in the order the refusal names them
   case $1 in
-    bb-build) echo "$BB_BUILD_OLD $BB_BUILD_MID $BB_BUILD_PREV $BB_BUILD_LIVE $BB_BUILD_PRE31 $BB_BUILD_PRERC $BB_BUILD_PREVIA $BB_BUILD_PREMEM $BB_BUILD_PRECAP $BB_BUILD_PREJBCT $BB_BUILD_PREHELP $BB_BUILD_PRESINCE $BB_BUILD_PREFIELDS $BB_BUILD_PRESESSION $BB_BUILD_NEW" ;;
-    bb-queue-lib.sh) echo "$BB_LIB_OLD $BB_LIB_PREV $BB_LIB_PRERC $BB_LIB_PREMEM $BB_LIB_PRECAP $BB_LIB_PREOFFQ $BB_LIB_PRELEDGER $BB_LIB_NEW" ;;
-    bb-queue) echo "$BB_QUEUE_OLD $BB_QUEUE_PREV $BB_QUEUE_LIVE $BB_QUEUE_PRE31 $BB_QUEUE_PRERC $BB_QUEUE_PREVIA $BB_QUEUE_PREMEM $BB_QUEUE_PRECAP $BB_QUEUE_PREOFFQ $BB_QUEUE_PRELEDGER $BB_QUEUE_NEW" ;;
+    bb-build) echo "$BB_BUILD_OLD $BB_BUILD_MID $BB_BUILD_PREV $BB_BUILD_LIVE $BB_BUILD_PRE31 $BB_BUILD_PRERC $BB_BUILD_PREVIA $BB_BUILD_PREMEM $BB_BUILD_PRECAP $BB_BUILD_PREJBCT $BB_BUILD_PREHELP $BB_BUILD_PRESINCE $BB_BUILD_PREFIELDS $BB_BUILD_PRESESSION $BB_BUILD_PRE80 $BB_BUILD_NEW" ;;
+    bb-queue-lib.sh) echo "$BB_LIB_OLD $BB_LIB_PREV $BB_LIB_PRERC $BB_LIB_PREMEM $BB_LIB_PRECAP $BB_LIB_PREOFFQ $BB_LIB_PRELEDGER $BB_LIB_PRE80 $BB_LIB_NEW" ;;
+    bb-queue) echo "$BB_QUEUE_OLD $BB_QUEUE_PREV $BB_QUEUE_LIVE $BB_QUEUE_PRE31 $BB_QUEUE_PRERC $BB_QUEUE_PREVIA $BB_QUEUE_PREMEM $BB_QUEUE_PRECAP $BB_QUEUE_PREOFFQ $BB_QUEUE_PRELEDGER $BB_QUEUE_PRE80 $BB_QUEUE_NEW" ;;
     bb-hold) echo "$BB_HOLD_OLD $BB_HOLD_PRELEDGER $BB_HOLD_NEW" ;;
     bb-tickets) echo "$BB_TICKETS_OLD $BB_TICKETS_PRE31 $BB_TICKETS_PREOFFQ $BB_TICKETS_NEW" ;;
     bb-portgroup.py) echo "$BB_PORTGROUP_PREV $BB_PORTGROUP_PRESINCE $BB_PORTGROUP_NEW" ;;
     bb-netns-run) echo "$BB_NETNS_PREV $BB_NETNS_NEW" ;;
-    bb-wait) echo "$BB_WAIT_PRERC $BB_WAIT_PREREFUSED $BB_WAIT_NEW" ;;
+    bb-wait) echo "$BB_WAIT_PRERC $BB_WAIT_PREREFUSED $BB_WAIT_PRE80 $BB_WAIT_NEW" ;;
     bb-await) echo "$BB_AWAIT_PREREFUSED $BB_AWAIT_NEW" ;;
     bb-mutate) echo "$BB_MUTATE_OLD $BB_MUTATE_PREVIA $BB_MUTATE_NEW" ;;
-    bb-result) echo "$BB_RESULT_PRECP $BB_RESULT_NEW" ;;
+    bb-result) echo "$BB_RESULT_PRECP $BB_RESULT_PRE80 $BB_RESULT_NEW" ;;
     *) new_of "$1" ;;
   esac
 }
