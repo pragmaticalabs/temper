@@ -1,7 +1,7 @@
 # bb-queue-lib.sh -- shared by bb-build and bb-queue (2026-09-28). Sourced, not executed.
 # Queue layout under $Q: waiting/<id>, running/<id>, done/<id> (key=value lines; the LAST value of a key wins),
-# .lock (flock; every state change happens under it). A ticket's liveness is its waiter process, found by
-# cmdline ("bb-build __run <id>"), so no pid bookkeeping and no pid-reuse hazard.
+# .lock (flock; every state change happens under it), launches (the LAUNCH LEDGER: what the queue started; the cap's input). A ticket's
+# liveness is its waiter process, found by cmdline ("bb-build __run <id>"), or its live ledger entry.
 # BB_TEST_* variables exist only so the mechanism can be tested in isolation; never set them for a real build.
 Q=${BB_TEST_QUEUE_ROOT:-$HOME/work/queue}
 PRIO=${BB_TEST_PRIORITIES:-$HOME/work/priorities}
@@ -12,7 +12,7 @@ PGS=${BB_TEST_PG_SLOTS_FILE:-$HOME/work/port-group-slots}   # number of concurre
 STARVE=${BB_STARVE_SECS:-1200}
 # LOAD ADMISSION (2026-11-11, CTO ruling): a ticket is granted only while load5/cores < LOAD_MAX (in addition to its cap). Load
 # from processes outside the queue must not block it forever: once the oldest grantable ticket has waited more than LOAD_STARVE
-# seconds AND fewer than LOAD_STARVE_REACTORS reactors run, that ticket is granted regardless of load. Read by each waiter, so the
+# seconds AND fewer than LOAD_STARVE_REACTORS queue launches (LEDGER) run, that ticket is granted regardless of load. Read by each waiter, so the
 # values in force for a ticket are its enqueuer's environment.
 LOAD_MAX=${BB_LOAD_MAX:-1.2}
 LOAD_STARVE=${BB_LOAD_STARVE_SECS:-1200}
@@ -31,12 +31,12 @@ MEMINFO=${BB_TEST_MEMINFO:-/proc/meminfo}   # TEST ONLY: a file in /proc/meminfo
 # ps pass per call. A java without -Xmx is skipped (its default max heap is not on the command line). RSS also counts non-heap memory,
 # so the headroom is an underestimate, never an overestimate: only words before the main class or -jar are read as JVM options, so an application argument such as `-Xmx50g` after them never counts.
 PSLIST=${BB_TEST_PS:-}   # TEST ONLY: a file of "pid ppid rss_kb args..." lines, read instead of ps
-# HOST REACTOR CAP (issue #56, CTO request 2026-11-18): a ticket is granted only while running reactors < min(its own cap, host_cap).
+# HOST REACTOR CAP (issue #56, CTO request 2026-11-18): a ticket is granted only while live queue launches (LEDGER) < min(its own cap, host_cap).
 # host_cap is the first line of 1..999 of the per-host file $MAXREACT (read at every pick), else 3 (the CTO's value for the 30G
 # hosts). There is no environment fallback on purpose: pick runs with the ENQUEUER's environment, so an env value would let a submitter
 # lift the host's bound. No override (load or memory starvation) passes it.
 MAXREACT=${BB_TEST_MAX_REACTORS_FILE:-$HOME/work/max-reactors}
-# TICKET LOG (2026-11-11): one TSV line per ticket when it reaches done/ (see ticket_log).
+# TICKET LOG (2026-11-11): one TSV line per ticket as it moves to done/, written just before the move (see to_done, ticket_log).
 TLOG=${BB_TEST_TICKET_LOG:-$HOME/work/bb-ticket-log.tsv}
 # LIB_READONLY: set by bb-queue itself for `offq` (what bb-tickets calls), a reader that must not create a queue directory.
 [ -n "${LIB_READONLY:-}" ] || mkdir -p "$Q/waiting" "$Q/running" "$Q/done"
@@ -74,6 +74,33 @@ proc_live() { local st; st=$(sed 's/^.*) //; s/ .*//' "/proc/$1/stat" 2>/dev/nul
 pstart() { sed 's/^.*) //' "/proc/$1/stat" 2>/dev/null | cut -d' ' -f20; }
 # pstart_now <pid>: pstart at signal time. BB_TEST_RESTART_PID=<pid> makes that one pid read as "reused" (the test seam for a recycled PID).
 pstart_now() { if [ -n "${BB_TEST_RESTART_PID:-}" ] && [ "$1" = "$BB_TEST_RESTART_PID" ]; then echo reused; else pstart "$1"; fi; }
+# LAUNCH LEDGER (CTO ruling 2026-11-19): the cap counts what the QUEUE launched, never a process pattern. At spawn, under the queue lock,
+# the launcher (bb-build's waiter: its job subshell, for maven, bb-test's java and the netns path alike; bb-hold: its slot) records one
+# line "<ticket> <pid> <start> <weight>" in $LEDGER (start = pstart; the file is rewritten whole under a temp name and renamed). An entry
+# is LIVE while its pid runs (proc_live) with the recorded start time (pstart_now), so a recycled pid is never counted; dead entries are
+# dropped at every write and by reap. weight is 1 for every launch: the field is kept open for design §4 (mates, BB_LOAD weighting),
+# which is not built. reactors() (the $PAT count) is an observation for listings only, never an input to the cap or a grant.
+LEDGER=$Q/launches
+# ledger_live: the live entries, one "<ticket> <pid> <start> <weight>" line each (a malformed weight reads as 1).
+ledger_live() {
+  local id p s w; [ -f "$LEDGER" ] || return 0
+  while read -r id p s w; do
+    case "$p" in ''|*[!0-9]*) continue;; esac; [ -n "$s" ] || continue
+    case "$w" in ''|*[!0-9]*) w=1;; esac
+    proc_live "$p" && [ "$(pstart_now "$p")" = "$s" ] && echo "$id $p $s $w"
+  done < "$LEDGER"; return 0
+}
+# ledger_count: the sum of the live entries' weights (the cap's only input).
+ledger_count() { ledger_live | awk '{ n += $4 } END { print n + 0 }'; }
+# ledger_has <ticket>: the ticket has a live entry.
+ledger_has() { ledger_live | awk -v t="$1" '$1 == t { f = 1 } END { exit !f }'; }
+# ledger_write [<line>]: (under lock) keep the live entries, append <line> if given, replace the file whole.
+ledger_write() {
+  local t=$LEDGER.new.$$
+  { ledger_live; [ $# -eq 0 ] || echo "$1"; } > "$t" && mv -f "$t" "$LEDGER"
+}
+# ledger_add <ticket> <pid>: (under lock, right after the spawn) record the launch.
+ledger_add() { local s; s=$(pstart "$2"); [ -n "$s" ] || return 0; ledger_write "$1 $2 $s 1"; }   # a launch already gone has nothing to count
 # still_ours <pid:start:kind> <co>: the collected process is the same process (start time unchanged) and still qualifies: kind c (found by
 # its cwd) needs the cwd still at or below <co>; kind w (waiter tree) and d (below a cwd process) are the same tree member as collected.
 still_ours() {
@@ -214,6 +241,7 @@ never_started() {
 # its checkout stays running (it still holds its reactor slot and, if group=1, the port group) until maven exits.
 reap() {
   local f id co p
+  ledger_write
   for f in "$Q"/waiting/*; do
     [ -f "$f" ] || continue; id=${f##*/}; co=$(field "$f" co)
     # checkout removed under a live waiter (bb-temper rm, a deleted tree): nothing can ever be built; stop the waiter by PID.
@@ -228,6 +256,7 @@ reap() {
   done
   for f in "$Q"/running/*; do
     [ -f "$f" ] || continue; id=${f##*/}; waiter_alive "$id" && continue
+    ledger_has "$id" && continue   # its launch still runs (the ledger, not a pattern, knows it)
     co=$(field "$f" co); co_reactor_alive "$co" && continue
     # No numeric rc here, ever: the ticket's rc= is the build's exit status taken by its waiter, and this waiter is dead. The checkout's
     # .bb/rc is a copy a lane can rewrite, so it is not a verdict source (2026-11-13, vt42 finding 1); bb-wait exits 70 on orphaned.
@@ -244,7 +273,7 @@ reap() {
 # (first time only); once any skipped ticket has been blocked for STARVE seconds, nothing behind it is granted, so the
 # host drains and it runs.
 pick() {
-  local me=${1-${ID-}} r id f c hc bs now lh mh cand="" oldest="" ocr=0 cr; r=$(reactors); now=$(date +%s)
+  local me=${1-${ID-}} r id f c hc bs now lh mh cand="" oldest="" ocr=0 cr; r=$(ledger_count); now=$(date +%s)   # r: live queue launches (LEDGER)
   hc=$(host_cap)
   for id in $(grantable); do
     f=$Q/waiting/$id; c=$(field "$f" cap); case "$c" in ''|*[!0-9]*) c=3;; esac; [ "$c" -le "$hc" ] || c=$hc
@@ -258,19 +287,19 @@ pick() {
   lh=$(load_held); mh=$(mem_held)
   [ -z "$lh" ] && [ -z "$mh" ] && { echo "$cand"; return 0; }
   # A GATE is held. Starvation bound: the OLDEST grantable ticket goes once it has waited > LOAD_STARVE s and its own cap allows a
-  # start, provided every held gate may be overridden: the LOAD GATE while fewer than LOAD_STARVE_REACTORS reactors run, the MEMORY
+  # start, provided every held gate may be overridden: the LOAD GATE while fewer than LOAD_STARVE_REACTORS launches run, the MEMORY
   # FLOOR only while NO ticket of any kind runs (no reactor, and nothing in running/: a bb-hold's containers hold memory without a
   # launcher; granting into low memory beside either reproduces the OOM; with nothing running, an outside job must not wedge the
   # queue). Each override is recorded on the ticket (load_override=, mem_override=), once, by the oldest ticket's own waiter.
   [ $((now - ocr)) -gt "$LOAD_STARVE" ] || return 0
   [ -z "$lh" ] || [ "$r" -lt "$LOAD_STARVE_REACTORS" ] || return 0
   [ -z "$mh" ] || { [ "$r" -eq 0 ] && [ -z "$(ls "$Q/running" 2>/dev/null)" ]; } || return 0
-  # The HOST CAP needs no check here: a candidate exists only while reactors < min(its cap, host cap), so r < host cap already holds.
+  # The HOST CAP needs no check here: a candidate exists only while launches < min(its cap, host cap), so r < host cap already holds.
   f=$Q/waiting/$oldest; c=$(field "$f" cap); case "$c" in ''|*[!0-9]*) c=3;; esac
   [ "$r" -lt "$c" ] || return 0
   if [ "$me" = "$oldest" ]; then   # record once: only the oldest's own waiter writes it, not every waiter that polls
-    [ -z "$lh" ] || echo "load_override=$now waited=$((now - ocr))s reactors=$r $lh" >> "$f"
-    [ -z "$mh" ] || echo "mem_override=$now waited=$((now - ocr))s reactors=$r $(mem_available_gb) $mh" >> "$f"
+    [ -z "$lh" ] || echo "load_override=$now waited=$((now - ocr))s launches=$r $lh" >> "$f"
+    [ -z "$mh" ] || echo "mem_override=$now waited=$((now - ocr))s launches=$r $(mem_available_gb) $mh" >> "$f"
   fi
   echo "$oldest"
   return 0
@@ -298,10 +327,12 @@ host_cap() {
 # ps_list: "pid ppid rss_kb args..." for every process on the host (all users: an off-queue JVM need not be ours), or $PSLIST.
 ps_list() { if [ -n "$PSLIST" ]; then cat "$PSLIST" 2>/dev/null; else ps -e -ww -o pid= -o ppid= -o rss= -o args= 2>/dev/null; fi; true; }
 # offqueue_jvms: one line "pid headroom_kb xmx_kb rss_kb" per java process (argv[0] is java or ends in /java) that is neither a reactor
-# nor below one (a reactor is $PAT or a real maven launcher, also under a test's own $PAT: no maven reactor or fork is ever off-queue)
+# nor below one (a reactor is $PAT, a real maven launcher, also under a test's own $PAT, or a live LEDGER launch: no queue launch, maven or
+# bb-test's java, and no fork of one is ever off-queue)
 # and carries -Xmx<n>[kmgt] among its JVM options, i.e. before the main class, `-jar <jar>` or `-m <module>` (the last one wins, as in the JVM; a bare byte count is accepted too); headroom = max(0, Xmx - RSS).
 offqueue_jvms() {
-  ps_list | awk -v pat="$PAT" -v mvn='[c]lassworlds[.]launcher[.]Launcher' '
+  ps_list | awk -v pat="$PAT" -v mvn='[c]lassworlds[.]launcher[.]Launcher' -v led="$(ledger_live | awk '{ printf "%s ", $2 }')" '
+    BEGIN { n = split(led, l, " "); for (i = 1; i <= n; i++) re[l[i]] = 1; n = 0 }
     $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ { n++; pid[n] = $1; par[$1] = $2; rss[$1] = $3 + 0; a = $0
       sub(/^[[:space:]]*[0-9]+[[:space:]]+[0-9]+[[:space:]]+[0-9]+[[:space:]]*/, "", a); args[$1] = a; if (a ~ pat || a ~ mvn) re[$1] = 1 }
     END { for (i = 1; i <= n; i++) { p = pid[i]; split(args[p], w, " "); if (w[1] != "java" && w[1] !~ /\/java$/) continue
@@ -368,16 +399,20 @@ mem_held() {
       else printf "held: MemAvailable %.1f GB < floor %d GB\n", $2 / 1048576, fl }; exit }' "$MEMINFO" 2>/dev/null || true
 }
 
-# to_done <ticket file>: move a ticket that has just got its terminal state lines to done/, then log it. Caller holds the queue lock.
-to_done() { local id=${1##*/}; mv "$1" "$Q/done/$id" && ticket_log "$Q/done/$id"; return 0; }
+# to_done <ticket file>: log a ticket that has just got its terminal state lines, then move it to done/. Caller holds the queue lock.
+# Log BEFORE the move (vbt5 M2): done/<id> is what every poller waits for, so nothing of the ticket's may be written after it appears.
+# With the log after the move, a test that returned on done/<id> had its TempDir deleted while the waiter's `>> $TLOG` re-created
+# log.tsv at the root: JUnit "Failed to close extension context", DirectoryNotEmpty on <root> (CI run 44763520377).
+to_done() { local id=${1##*/}; ticket_log "$1"; mv "$1" "$Q/done/$id"; return 0; }
 # utc <epoch>: ISO-8601 UTC, or '-' for an empty/zero value.
 utc() { case "$1" in ''|0|*[!0-9]*) echo -;; *) date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ;; esac; }
-# ticket_log <done file>: append ONE line to $TLOG (append-only, never rewritten): a single printf of < 4000 bytes (below PIPE_BUF) to
+# ticket_log <ticket file>: append ONE line to $TLOG (append-only, never rewritten): a single printf of < 4000 bytes (below PIPE_BUF) to
 # an O_APPEND fd, issued under the queue lock. A header line is written first if the file is empty. Columns, tab separated:
 #   host ticket owner checkout port_group group_id enqueued granted ended wait_s run_s rc state args
 # times ISO-8601 UTC; group_id = isolated slot number, "host" (host-exclusive group ticket) or '-'; wait_s = granted-enqueued (never
 # granted: ended-enqueued); run_s = ended-granted; rc '-' when the ticket has none (abandoned, expired, orphaned); state = the
-# ticket's last state=; args with tabs/newlines folded to spaces and cut so the line fits.
+# ticket's last state=, or refused when the ticket has a refused= field (a bb-test resolved-junit refusal); args with tabs/newlines
+# folded to spaces and cut so the line fits.
 ticket_log() {
   local f=$1 cr st en g gid rc ws=- rs=- line a
   cr=$(created_s "$f"); st=$(field "$f" started); en=$(field "$f" ended); g=$(field "$f" group); rc=$(field "$f" rc)
@@ -387,7 +422,7 @@ ticket_log() {
   if [ -n "$st" ] && [ -n "$en" ]; then rs=$((en - st)); fi
   a=$(field "$f" args | tr '\t\n\r' '   ')
   line=$(printf '%s\t' "$(hostname -s 2>/dev/null || hostname)" "${f##*/}" "$(field "$f" owner)" "$(field "$f" co)" "${g:-0}" "$gid" \
-    "$(utc "$cr")" "$(utc "$st")" "$(utc "$en")" "$ws" "$rs" "${rc:--}" "$(field "$f" state)")
+    "$(utc "$cr")" "$(utc "$st")" "$(utc "$en")" "$ws" "$rs" "${rc:--}" "$( [ -z "$(field "$f" refused)" ] && field "$f" state || echo refused)")
   a=${a:0:$((3990 - ${#line}))}
   [ -s "$TLOG" ] || printf 'host\tticket\towner\tcheckout\tport_group\tgroup_id\tenqueued\tgranted\tended\twait_s\trun_s\trc\tstate\targs\n' >> "$TLOG"
   printf '%s%s\n' "$line" "$a" >> "$TLOG"

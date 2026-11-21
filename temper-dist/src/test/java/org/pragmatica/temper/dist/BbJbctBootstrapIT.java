@@ -67,6 +67,7 @@ class BbJbctBootstrapIT {
                                   Files.readString(BbFixtures.OPS_BB.resolve(script)));
         }
 
+        BbFixtures.executable(tools.resolve("bb-cp-record"), "#!/bin/sh\nexit 0\n");
         Files.copy(BbFixtures.OPS_BB.resolve("bb-queue-lib.sh"), tools.resolve("bb-queue-lib.sh"));
         Files.writeString(dir.resolve("loadavg"), "0.00 0.00 0.00 1/1 1\n");
         BbFixtures.executable(dir.resolve("stubmvn"),

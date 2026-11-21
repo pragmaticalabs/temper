@@ -158,6 +158,18 @@ class BbAwaitIT {
         assertThat(run.stdout()).contains("ticket=" + id + " state=finished rc=0 ");
     }
 
+    /// vbt8 L2 (CTO ruling R3, the refusal replaces the verdict everywhere). Probe: drop the `refused:` echo in bb-await -> red.
+    @Test
+    void aRefusedTicket_isReportedAsRefusedWithItsReason_notAsAPlainRc15() throws Exception {
+        var id = id();
+
+        ticket("done", id, TICKET_DONE + "15\nrefused=timeout: the stale-jar check did not finish within BB_CP_READ_TIMEOUT=3s; its process group was killed\nverdict_source=guard\n");
+        var run = await("--ticket", id);
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isEqualTo(15);
+        assertThat(run.stdout()).contains("ticket=" + id + " state=finished rc=15 ", "\nrefused: timeout: the stale-jar check did not finish within BB_CP_READ_TIMEOUT=3s; its process group was killed");
+    }
+
     @Test
     void aFinishedTicketWithRc1_passesTheRcThrough() throws Exception {
         var id = id();

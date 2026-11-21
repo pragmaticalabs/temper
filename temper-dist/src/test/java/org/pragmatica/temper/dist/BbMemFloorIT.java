@@ -22,7 +22,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 /// /proc/meminfo) is below the floor (per-host file BB_TEST_MEM_FLOOR_FILE, else BB_MEM_FLOOR_GB, else 8 GiB). The load gate's
 /// starvation override must not bypass the floor while a reactor runs, because granting into low memory beside a running reactor
 /// reproduced the 2026-11-13 OOM kills; with no reactor running the oldest ticket goes after LOAD_STARVE and records mem_override=.
-/// A reactor is a stand-in process whose command line matches BB_TEST_REACTOR_PATTERN, so the count is the real pgrep count. The
+/// A reactor is a stand-in process recorded in the LAUNCH LEDGER (the cap's input); its command line also matches BB_TEST_REACTOR_PATTERN, the observation. The
 /// process list is an empty BB_TEST_PS, so the build host's own JVMs add no off-queue headroom (that is BbOffQueueJvmIT's subject).
 ///
 /// Probes: drop mem_held from pick's gate -> [#belowTheFloor_holdsTheGrant_andAboveItGrants] red; let the memory override fire with a
@@ -93,7 +93,7 @@ class BbMemFloorIT {
         var held = bbQueue();
 
         assertThat(held).contains("MEMORY GATE (grant only while MemAvailable >= 8 GB; override: the oldest grantable ticket after 1200s,"
-                                 + " only while 0 reactors run): held: MemAvailable 5.0 GB < floor 8 GB");
+                                 + " only while 0 queue launches run): held: MemAvailable 5.0 GB < floor 8 GB");
         var lines = held.lines().toList();
         var memory = indexStartingWith(lines, "MEMORY GATE (");
 
@@ -102,7 +102,7 @@ class BbMemFloorIT {
         assertThat(lines.get(memory + 2)).startsWith("RUNNING (");
         assertThat(lines.get(memory + 3)).startsWith("TICKET ");
         memAvailableKb(9 * GIB_KB);
-        assertThat(bbQueue()).contains("only while 0 reactors run): open");
+        assertThat(bbQueue()).contains("only while 0 queue launches run): open");
     }
 
     @Test
@@ -112,7 +112,7 @@ class BbMemFloorIT {
 
         memAvailableKb(5 * GIB_KB);
         assertThat(pick(old)).isEqualTo(old);
-        assertThat(field(old, "mem_override")).matches("[0-9]+ waited=(19|20)[0-9]{2}s reactors=0 MemAvailable=5\\.0GB"
+        assertThat(field(old, "mem_override")).matches("[0-9]+ waited=(19|20)[0-9]{2}s launches=0 MemAvailable=5\\.0GB"
                                                       + " held: MemAvailable 5\\.0 GB < floor 8 GB");
         assertThat(field(old, "load_override")).as("load was fine, so no load override").isEmpty();
         assertThat(field(young, "mem_override")).isEmpty();
@@ -192,8 +192,8 @@ class BbMemFloorIT {
         memAvailableKb(5 * GIB_KB);
         loadIs("999.00");
         assertThat(pick(id)).isEqualTo(id);
-        assertThat(field(id, "load_override")).contains("reactors=0 held: load");
-        assertThat(field(id, "mem_override")).contains("reactors=0 MemAvailable=5.0GB");
+        assertThat(field(id, "load_override")).contains("launches=0 held: load");
+        assertThat(field(id, "mem_override")).contains("launches=0 MemAvailable=5.0GB");
     }
 
     @Test
@@ -253,7 +253,7 @@ class BbMemFloorIT {
         var old = ticket("old", 2000);
 
         assertThat(pick(old)).as("load held, starved, 0 reactors < 2").isEqualTo(old);
-        assertThat(field(old, "load_override")).matches("[0-9]+ waited=(19|20)[0-9]{2}s reactors=0 held: load .*");
+        assertThat(field(old, "load_override")).matches("[0-9]+ waited=(19|20)[0-9]{2}s launches=0 held: load .*");
         assertThat(field(old, "mem_override")).isEmpty();
         assertThat(field(fresh, "load_override")).isEmpty();
         reactor();
@@ -351,9 +351,13 @@ class BbMemFloorIT {
                 Files.writeString(dir.resolve("loadavg"), load5 + " " + load5 + " " + load5 + " 1/100 1\n").toString());
     }
 
-    /// A stand-in reactor: a shell whose command line holds the marker, so `pgrep -fc $PAT` counts exactly it.
+    /// A stand-in launch: a shell whose command line holds the marker (so the `reactors` observation counts it) and that is recorded
+    /// in the LAUNCH LEDGER, the cap's only input.
     private void reactor() throws Exception {
-        reactors.add(BbFixtures.process("bash", "-c", "sleep 600; : " + marker).start());
+        var launch = BbFixtures.process("bash", "-c", "sleep 600; : " + marker).start();
+
+        reactors.add(launch);
+        BbFixtures.recordLaunch(dir.resolve("q"), "standin-" + reactors.size(), launch.pid());
         var deadline = System.currentTimeMillis() + 10_000;
 
         while (!count().equals(Integer.toString(reactors.size())) && System.currentTimeMillis() < deadline) {

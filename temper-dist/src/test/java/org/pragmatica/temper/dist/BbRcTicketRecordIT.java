@@ -241,6 +241,21 @@ class BbRcTicketRecordIT {
         assertThat(wait.stdout()).as("the one summary line still carries the ticket's rc").contains("rc=3");
     }
 
+    /// vbt8 L2 (CTO ruling R3: the refusal replaces the verdict everywhere). Probe: drop the `refused:` echo in bb-wait -> red.
+    @Test
+    void bbWait_ofARefusedTicket_printsRefusedAndItsReason_notAPlainRc15() throws Exception {
+        var co = checkout("rct-r");
+        var id = "150-" + BbFixtures.RUN;
+
+        Files.writeString(ticket("done", id, co, 5, 0),
+                          "state=finished\nstarted=100\nended=105\nrc=15\nrefused=timeout: the stale-jar check did not finish within BB_CP_READ_TIMEOUT=3s; its process group was killed\nverdict_source=guard\n",
+                          java.nio.file.StandardOpenOption.APPEND);
+        var wait = tool("bb-wait", Map.of(), id);
+
+        assertThat(wait.rc()).as(wait.stdout() + wait.stderr()).isEqualTo(15);
+        assertThat(wait.stdout()).contains("ticket=" + id + " state=finished rc=15 ", "\nrefused: timeout: the stale-jar check did not finish within BB_CP_READ_TIMEOUT=3s; its process group was killed");
+    }
+
     @Test
     void theConvenienceCopy_isReadOnly_andAnUntamperedRunWaitsCleanly() throws Exception {
         var co = checkout("rct-c");
@@ -622,6 +637,20 @@ class BbRcTicketRecordIT {
         assertThat(disagree.err()).contains(ADVICE);
         assertThat(absent.rc()).isEqualTo(71);
         assertThat(absent.err()).contains("RC-MISMATCH ticket=3 file=absent");
+    }
+
+    /// vbt8 L2: bb-temper wait and report on a refused ticket carry `refused: <reason>`. Probe: drop either echo in bb-temper -> that half red.
+    @Test
+    void waitAndReport_ofARefusedTicket_printRefusedAndItsReason() throws Exception {
+        temperSandbox();
+        tq("done", "1000000000000000002-1", "state=finished\nrc=15\nended=130\nrefused=timeout: the stale-jar check did not finish within BB_CP_READ_TIMEOUT=3s; its process group was killed\nverdict_source=guard\n");
+        fileRc("15");
+        var wait = temper("wait");
+        var report = temper("report");
+
+        assertThat(wait.rc()).as(wait.err()).isEqualTo(15);
+        assertThat(wait.out()).contains("rc=15", "refused: timeout: the stale-jar check did not finish within BB_CP_READ_TIMEOUT=3s; its process group was killed");
+        assertThat(report.out()).contains("rc=15", "refused: timeout: the stale-jar check did not finish within BB_CP_READ_TIMEOUT=3s; its process group was killed");
     }
 
     @Test

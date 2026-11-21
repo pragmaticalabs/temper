@@ -217,4 +217,22 @@ final class BbFixtures {
             }
         }));
     }
+
+    /// The start time of a process (clock ticks since boot): /proc/<pid>/stat field 22, read after the LAST ")" as the lib's pstart() does.
+    static String pstart(long pid) throws IOException {
+        var stat = Files.readString(Path.of("/proc", Long.toString(pid), "stat"));
+
+        return stat.substring(stat.lastIndexOf(") ") + 2)
+                   .split(" ") [19];
+    }
+
+    /// Records a stand-in launch in the queue's LAUNCH LEDGER (<queue>/launches, "<ticket> <pid> <start> <weight>"), as the lib's
+    /// ledger_add does at spawn: the cap counts ledger entries, never a process pattern. A test has no concurrent writer, so it appends.
+    static void recordLaunch(Path queueRoot, String ticket, long pid) throws IOException {
+        Files.createDirectories(queueRoot);
+        Files.writeString(queueRoot.resolve("launches"),
+                          ticket + " " + pid + " " + pstart(pid) + " 1\n",
+                          java.nio.file.StandardOpenOption.CREATE,
+                          java.nio.file.StandardOpenOption.APPEND);
+    }
 }

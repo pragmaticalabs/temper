@@ -1,0 +1,387 @@
+#!/usr/bin/env python3
+# bb-cp-record record <checkout> [mvn selection args...]   (bb-test lane, design §2/§3)
+# bb-cp-record check  <checkout> <module>
+#
+# record: called by bb-build on a GREEN build (never changes that build's verdict). Re-runs maven OFFLINE as
+#   `test-compile dependency:build-classpath` with every option of the build (FORWARDED OPTIONS below), so that reactor modules
+#   resolve to target/classes, and writes, replacing the previous record whole:
+#     <co>/.bb/cp/<module>.cp   the module's test classpath ('/' in the module path becomes '__')
+#     <co>/.bb/cp/manifest      head <sha> | reactor <groupId>:<artifactId> | tree <module> <digest> | entry <module> <path> <digest>
+#   Digest = sha256 over the sorted lines "<relative path>\t<sha256(file)>" (a module's working tree: tracked + untracked,
+#   not ignored, .bb left out; a classes dir: every file under it; a jar: the file's own sha256). A failed record deletes
+#   .bb/cp, so a stale record can never be read.
+# check: the stale-jar guard. Exit 0 = the recorded state is still the state on disk. Exit 12 = refused; stderr names the module and
+#   which guard fired: (a) HEAD differs from the manifest, (b) a module on the classpath has a different working-tree digest,
+#   (c) a recorded jar or classes-dir digest differs (or an in-checkout classpath entry was never recorded), (d) the classpath
+#   holds a reactor artifact resolved from a repository layout (an .m2-local or ~/.m2 SNAPSHOT jar, in or out of the checkout). No record at all is refused too. No override exists.
+#   A symlink whose target leaves its module (the checkout, for the reactor root), or a directory symlink inside a classes dir, is refused
+#   too (rc 12): its content is not under any digest. record writes <co>/.bb/cp-record.pgid ("<pgid> <start>") while its maven runs, so
+#   bb-build can kill that process group (identity-checked) when a SIGKILL of record leaves maven behind.
+import hashlib, json, os, re, signal, stat, subprocess, sys, xml.etree.ElementTree as ET
+
+REFUSED = 12
+SKIP_DIRS = {'.git', '.m2-local', '.bb', 'node_modules'}
+
+
+def sha_file(path, bound):
+    """a symlink hashes its link string, and is refused (Unsafe, rc 12) when its resolved target leaves <bound> (the module, or the
+    checkout for the reactor root): content outside the module would change without changing any digest (vbt4 L3)."""
+    h = hashlib.sha256()
+    if os.path.islink(path):
+        if not inside(bound, os.path.realpath(path)):
+            raise Unsafe('symlink %s resolves outside %s' % (path, bound))
+        h.update(os.readlink(path).encode())
+        return h.hexdigest()
+    if not stat.S_ISREG(os.stat(path).st_mode):   # vbt7 F2: opening a FIFO blocks forever; a device never ends
+        raise Unsafe('%s is not a regular file (a FIFO or device: opening it would block)' % path)
+    with open(path, 'rb') as f:
+        for block in iter(lambda: f.read(1 << 20), b''):
+            h.update(block)
+    return h.hexdigest()
+
+
+def mode_of(path):
+    """'l' symlink, 'x' any exec bit, '-' otherwise, 'm' missing: a chmod +x changes behaviour without changing content."""
+    if os.path.islink(path):
+        return 'l'
+    try:
+        return 'x' if os.stat(path).st_mode & 0o111 else '-'
+    except OSError:
+        return 'm'
+
+
+def digest_lines(triples):
+    """one JSON array [path, mode, sha] per line, sorted: a tab or newline inside a name cannot make two different trees one byte stream."""
+    h = hashlib.sha256()
+    for line in sorted(json.dumps(list(t)) for t in triples):
+        h.update((line + '\n').encode())
+    return h.hexdigest()
+
+
+def path_digest(path, bound):
+    """a classes dir: its files; a jar: the file; anything else: 'absent'. <bound>: the owning module (or the checkout). A directory
+    symlink inside a classes dir is refused (os.walk would skip its contents unhashed), and so is any symlink leaving <bound>."""
+    if os.path.islink(path) and not inside(bound, os.path.realpath(path)):
+        raise Unsafe('classpath entry %s is a symlink that resolves outside %s' % (path, bound))
+    if os.path.isdir(path):
+        pairs = []
+        for root, dirs, files in os.walk(path):
+            for name in dirs:
+                if os.path.islink(os.path.join(root, name)):
+                    raise Unsafe('directory symlink %s inside a classes dir' % os.path.join(root, name))
+            for name in files:
+                full = os.path.join(root, name)
+                pairs.append((os.path.relpath(full, path), mode_of(full), sha_file(full, bound)))
+        return digest_lines(pairs)
+    if os.path.isfile(path):
+        return sha_file(path, bound)
+    return 'absent'
+
+
+class BadName(Exception):
+    pass
+
+
+class Unsafe(BadName):
+    """a symlink the digests cannot vouch for (rc 12)."""
+
+
+def tracked(co, pathspec):
+    """tracked + untracked non-ignored files under pathspec, as str; a name that is not valid UTF-8 raises BadName (rc 12, never a traceback)."""
+    out = subprocess.run(['git', '-C', co, 'ls-files', '-z', '--cached', '--others', '--exclude-standard', '--'] + pathspec,
+                         stdout=subprocess.PIPE, check=True).stdout
+    names = []
+    for raw in set(out.split(b'\0')):
+        if not raw:
+            continue
+        try:
+            rel = raw.decode('utf-8')
+        except UnicodeDecodeError:
+            raise BadName('a file name is not valid UTF-8: %r' % raw)
+        if rel != '.bb' and not rel.startswith('.bb/'):
+            names.append(rel)
+    return names
+
+
+def file_triples(co, names, bound):
+    triples = []
+    for rel in names:
+        full = os.path.join(co, rel)
+        present = os.path.isfile(full) or os.path.islink(full)
+        triples.append((rel, mode_of(full), sha_file(full, bound) if present else 'MISSING'))
+    return triples
+
+
+def tree_digest(co, module):
+    return digest_lines(file_triples(co, tracked(co, [module]), os.path.join(co, module)))
+
+
+def module_dirs(co):
+    return sorted(os.path.relpath(d, co) for d in poms(co) if d != co)
+
+
+def root_digest(co):
+    """the reactor root: every file outside every module directory (root pom, .mvn/, ...), plus every pom.xml anywhere (parent poms)."""
+    mods = module_dirs(co)
+    names = [n for n in tracked(co, []) if owner(mods, n) is None or n.endswith('/pom.xml')]
+    return digest_lines(file_triples(co, names, co))
+
+
+def head(co):
+    return subprocess.run(['git', '-C', co, 'rev-parse', 'HEAD'], stdout=subprocess.PIPE, check=True).stdout.decode().strip()
+
+
+def cp_name(module):
+    return module.strip('/').replace('/', '__')
+
+
+def poms(co):
+    for root, dirs, files in os.walk(co):
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS and d != 'target']
+        if 'pom.xml' in files:
+            yield root
+
+
+def local(tag):
+    return tag.rsplit('}', 1)[-1]
+
+
+def coordinates(co):
+    """groupId:artifactId of every pom in the checkout (the reactor), from the poms themselves (own groupId, else the parent's)."""
+    found = []
+    for d in poms(co):
+        try:
+            root = ET.parse(os.path.join(d, 'pom.xml')).getroot()
+        except ET.ParseError:
+            continue
+        kids = {local(c.tag): (c.text or '').strip() for c in root}
+        parent = next((c for c in root if local(c.tag) == 'parent'), None)
+        pgid = ''
+        if parent is not None:
+            pgid = next(((c.text or '').strip() for c in parent if local(c.tag) == 'groupId'), '')
+        gid, aid = kids.get('groupId') or pgid, kids.get('artifactId')
+        if gid and aid and '${' not in gid + aid:
+            found.append('%s:%s' % (gid, aid))
+    return sorted(set(found))
+
+
+def read_manifest(co):
+    m = {'head': None, 'reactor': [], 'root': None, 'tree': {}, 'entry': {}}
+    with open(os.path.join(co, '.bb', 'cp', 'manifest'), encoding='utf-8') as f:
+        for line in f:
+            parts = line.rstrip('\n').split(' ')
+            if parts[0] == 'head':
+                m['head'] = parts[1]
+            elif parts[0] == 'reactor':
+                m['reactor'].append(parts[1])
+            elif parts[0] == 'root':
+                m['root'] = parts[1]
+            elif parts[0] == 'tree':
+                m['tree'][parts[1]] = parts[2]
+            elif parts[0] == 'entry':
+                m['entry'].setdefault(parts[1], {})[' '.join(parts[2:-1])] = parts[-1]
+    return m
+
+
+def inside(co, p):
+    return p == co or p.startswith(co + os.sep)
+
+
+def owner(modules, rel):
+    best = None
+    for m in modules:
+        if (rel == m or rel.startswith(m + '/')) and (best is None or len(m) > len(best)):
+            best = m
+    return best
+
+
+def bound_of(co, modules, rel):
+    """the directory a symlink under <rel> must stay in: its owning module, else the checkout."""
+    o = owner(modules, rel)
+    return os.path.join(co, o) if o else co
+
+
+def refuse(module, guard, why):
+    sys.stderr.write('bb-test: REFUSED (rc 12) module %s, guard (%s): %s; the only way past is a rebuild (bb-build)\n' % (module, guard, why))
+    sys.exit(REFUSED)
+
+
+def check(co, module):
+    module = module.strip('/')
+    try:
+        m = read_manifest(co)
+        cp = open(os.path.join(co, '.bb', 'cp', cp_name(module) + '.cp'), encoding='utf-8').read().strip()
+    except OSError:
+        refuse(module, 'no record', 'no .bb/cp manifest or %s.cp (no green bb-build recorded this module)' % cp_name(module))
+    now = head(co)
+    if now != m['head']:
+        refuse(module, 'a', 'HEAD is %s, the recorded build was at %s' % (now[:12], (m['head'] or '?')[:12]))
+    entries = [e for e in cp.split(':') if e]
+    reactor = []
+    for coord in m['reactor']:
+        gid, aid = coord.split(':', 1)
+        reactor.append((gid.replace('.', '/') + '/' + aid + '/', aid))
+    for e in entries:
+        for gpath, aid in reactor:
+            if re.search('/' + re.escape(gpath) + r'[^/]+/' + re.escape(aid) + r'-[^/]*\.jar$', e):
+                refuse(module, 'd', 'classpath holds %s, a reactor artifact resolved from a maven repository, not from this build' % e)
+    own = {module + '/target/classes', module + '/target/test-classes'}
+    in_co = {os.path.relpath(e, co) for e in entries if inside(co, e)}
+    try:
+        if m['root'] is None or root_digest(co) != m['root']:
+            refuse(module, 'b', 'the reactor root (root pom, .mvn/, parent poms, every file outside the modules) has a working-tree digest that differs from the recorded build')
+    except BadName as e:
+        refuse(module, 'b', str(e))
+    owners = {module}
+    for rel in in_co:
+        o = owner(m['tree'], rel)
+        if o:
+            owners.add(o)
+    for o in sorted(owners):
+        if o not in m['tree']:
+            refuse(module, 'b', 'module %s on the classpath has no recorded working-tree digest' % o)
+        try:
+            now_digest = tree_digest(co, o)
+        except BadName as e:
+            refuse(module, 'b', 'module %s: %s' % (o, e))
+        if now_digest != m['tree'][o]:
+            refuse(module, 'b', 'module %s has a working-tree digest that differs from the recorded build' % o)
+    recorded = m['entry'].get(module, {})
+    for rel in sorted(own | in_co):
+        if rel not in recorded:
+            refuse(module, 'c', 'classpath entry %s was never recorded' % rel)
+        try:
+            now_digest = path_digest(os.path.join(co, rel), bound_of(co, m['tree'], rel))
+        except BadName as e:
+            refuse(module, 'c', str(e))
+        if now_digest != recorded[rel]:
+            refuse(module, 'c', 'module %s: %s differs from the recorded digest' % (owner(m['tree'], rel) or module, rel))
+    return 0
+
+
+# FORWARDED OPTIONS (CTO ruling on vbt5/vbt6, temper#72): every OPTION of the build reaches the record, so the recorded classpath is what
+# the build resolved (a -D, --define, -s, -gs, -P, -f, -pl, -am of the build line included); goals and phases are dropped (the record runs
+# its own). A listed option that takes a value takes the next word unless the value is attached; -l/--log-file and its value (separate or attached: -l<f>, --log-file=<f>) are dropped
+# (the record's log would replace the build's). An option this table does not know is forwarded alone: when it takes a separate value,
+# that value is dropped as a goal, so the option takes the record's own goal instead and the record fails (no record; bb-test refuses).
+VALUED = {'-pl', '--projects', '-f', '--file', '-s', '--settings', '-gs', '--global-settings', '-D', '--define', '-P',
+          '--activate-profiles', '-T', '--threads', '-rf', '--resume-from', '-b', '--builder', '-t', '--toolchains', '-gt',
+          '--global-toolchains', '-emp', '--encrypt-master-password', '-ep', '--encrypt-password', '--color'}
+DROPPED = {'-l', '--log-file'}
+
+
+def selection(args):
+    out, i = [], 0
+    while i < len(args):
+        a = args[i]
+        if a in DROPPED:
+            i += 2
+            continue
+        if a.startswith('--log-file=') or (a.startswith('-l') and len(a) > 2 and a != '-llr'):
+            pass   # the attached forms (--log-file=<f>, -l<f>) are dropped too; -llr is maven's --legacy-local-repository, not -l
+        elif a in VALUED and i + 1 < len(args):
+            out += [a, args[i + 1]]
+            i += 1
+        elif a.startswith('-'):
+            out.append(a)
+        i += 1
+    return out
+
+
+def record(co, args):
+    bb = os.path.join(co, '.bb')
+    new, old, cur = os.path.join(bb, 'cp.new'), os.path.join(bb, 'cp.old'), os.path.join(bb, 'cp')
+    subprocess.run(['rm', '-rf', new, old])
+    os.makedirs(new)
+    mvn = os.environ.get('BB_TEST_MVN') or os.path.expanduser('~/tools/maven/bin/mvn')
+    env = {k: v for k, v in os.environ.items() if k != 'HCLOUD_TOKEN'}
+    env.setdefault('JAVA_HOME', '/usr/lib/jvm/java-25-openjdk-amd64')
+    marker = os.path.join(new, '.marker')
+    open(marker, 'w').close()
+    os.utime(marker, (os.stat(marker).st_atime, os.stat(marker).st_mtime - 2))
+    cmd = [mvn, '-o', '-B', '-q'] + selection(args) + ['test-compile', 'dependency:build-classpath', '-Dmdep.outputFile=target/bb-cp.txt']
+    mvn_proc = subprocess.Popen(cmd, cwd=co, env=env, start_new_session=True)
+    # PGID FILE (vbt4 L4): "<pgid> <start>" of maven's own process group, so that bb-build can take maven down when a SIGKILL of this
+    # process (timeout -k) leaves no handler to run. bb-build checks the start time before it signals; never a pattern kill.
+    pgid_file = os.path.join(bb, 'cp-record.pgid')
+    try:
+        start = open('/proc/%d/stat' % mvn_proc.pid).read().rsplit(') ', 1)[1].split(' ')[19]
+        with open(pgid_file + '.new', 'w') as f:
+            f.write('%d %s\n' % (mvn_proc.pid, start))
+        os.rename(pgid_file + '.new', pgid_file)
+    except OSError:
+        pass  # no /proc (not Linux): nothing for bb-build to verify, so nothing is recorded
+
+    def on_term(signum, frame):  # the hook's timeout: take maven (own process group) down with us, leave no record
+        try:
+            os.killpg(mvn_proc.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        subprocess.run(['rm', '-rf', cur, new, old, pgid_file])
+        sys.stderr.write('bb-cp-record: terminated, record removed\n')
+        os._exit(124)
+
+    signal.signal(signal.SIGTERM, on_term)
+    rc = mvn_proc.wait()
+    subprocess.run(['rm', '-f', pgid_file])
+    if rc != 0:
+        raise RuntimeError('maven exited non-zero: ' + ' '.join(cmd[1:]))
+    modules = []
+    for d in poms(co):
+        out = os.path.join(d, 'target', 'bb-cp.txt')
+        if os.path.isfile(out) and os.stat(out).st_mtime >= os.stat(marker).st_mtime:
+            modules.append(os.path.relpath(d, co))
+    modules = sorted(m for m in modules if m != '.')
+    if not modules:
+        raise RuntimeError('no module wrote target/bb-cp.txt')
+    lines = ['head ' + head(co)] + ['reactor ' + c for c in coordinates(co)] + ['root ' + root_digest(co)]
+    trees, entries = {}, []
+    for mod in modules:
+        out = os.path.join(co, mod, 'target', 'bb-cp.txt')
+        cp = open(out, encoding='utf-8').read().strip()
+        os.remove(out)  # maven's transient output; the record lives only under .bb/cp
+        with open(os.path.join(new, cp_name(mod) + '.cp'), 'w', encoding='utf-8') as f:
+            f.write(cp + '\n')
+        rels = {mod + '/target/classes', mod + '/target/test-classes'}
+        rels |= {os.path.relpath(e, co) for e in cp.split(':') if e and inside(co, e)}
+        for rel in sorted(rels):
+            entries.append('entry %s %s %s' % (mod, rel, path_digest(os.path.join(co, rel), bound_of(co, modules, rel))))
+    for mod in set(modules):
+        trees[mod] = tree_digest(co, mod)
+    for e in entries:
+        for rel in [e.split(' ')[2]]:
+            o = owner(modules, rel)
+            if o and o not in trees:
+                trees[o] = tree_digest(co, o)
+    lines += ['tree %s %s' % (k, v) for k, v in sorted(trees.items())] + entries
+    os.remove(marker)
+    with open(os.path.join(new, 'manifest'), 'w', encoding='utf-8') as f:
+        f.write('\n'.join(lines) + '\n')
+    subprocess.run(['rm', '-rf', old])
+    if os.path.isdir(cur):
+        os.rename(cur, old)
+    os.rename(new, cur)
+    subprocess.run(['rm', '-rf', old])
+    print('bb-cp-record: %d module(s) recorded at %s' % (len(modules), head(co)[:12]))
+
+
+def main(argv):
+    if os.environ.get('BB_NO_CP_RECORD') == '1' and argv[:1] == ['record']:
+        return 0
+    if len(argv) >= 2 and argv[0] == 'record':
+        co = os.path.realpath(argv[1])
+        try:
+            record(co, argv[2:])
+        except Exception as e:  # a record that failed must not leave an older one readable
+            subprocess.run(['rm', '-rf', os.path.join(co, '.bb', 'cp'), os.path.join(co, '.bb', 'cp.new'), os.path.join(co, '.bb', 'cp.old')])
+            sys.stderr.write('bb-cp-record: FAILED, record removed: %s\n' % e)
+            return 1
+        return 0
+    if len(argv) == 3 and argv[0] == 'check':
+        return check(os.path.realpath(argv[1]), argv[2])
+    sys.stderr.write('usage: bb-cp-record record <checkout> [mvn args...] | bb-cp-record check <checkout> <module>\n')
+    return 2
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))

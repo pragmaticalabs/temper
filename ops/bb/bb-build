@@ -22,15 +22,19 @@
 # (~/work/port-group-slots, default 3) group tickets run at once per host, each holding a slot (bb-queue shows it). No change to the
 # tests. BB_PG_ISOLATE=0 at enqueue = the old host-exclusive behaviour for that ticket (ticket has no iso=1).
 # LOAD GATE (2026-11-11): a ticket is also granted only while load5/cores < 1.2 (BB_LOAD_MAX); the oldest grantable ticket goes
-# once it waited > 1200 s (BB_LOAD_STARVE_SECS) while < 2 reactors run (BB_LOAD_STARVE_REACTORS). MEMORY FLOOR (#53): a grant also
+# once it waited > 1200 s (BB_LOAD_STARVE_SECS) while < 2 queue launches run (BB_LOAD_STARVE_REACTORS). MEMORY FLOOR (#53): a grant also
 # needs MemAvailable >= the per-host floor; the oldest ticket overrides it only while no ticket runs at all. pick() in the lib decides.
-# HOST CAP (#56): a grant also needs reactors < min(this ticket's cap, the host's ~/work/max-reactors, default 3); nothing overrides it.
+# HOST CAP (#56): a grant also needs live queue launches (the lib's LAUNCH LEDGER, never a process pattern) < min(this ticket's cap, the host's ~/work/max-reactors, default 3); nothing overrides it.
 # Off-queue JVMs (#56): the memory floor is compared against MemAvailable minus their unclaimed heap, max(0, Xmx - RSS) each.
 # VERDICT SOURCE (2026-11-12, bbrc1; reap and too-late cancel fixed 2026-11-13): the ticket's rc= is the exit status of the build subshell
 # as returned by `wait` in the waiter, never a read of .bb/rc. A ticket whose waiter is gone (reap, or a cancel that finds the build
 # already ended) is finalized as orphaned with NO rc: bb-wait exits 70, and .bb/rc is not read into it. .bb/rc is a read-only (444) copy
 # written before the ticket is finalized, replaced only by rm/rename (write_rc in the lib), never by `>`.
 # GUARANTEE: the verdict comes from mvn's exit status, never from the checkout; any later disagreement in the checkout is detected (RC-MISMATCH, exit 71); deliberate tampering with queue/done by the same uid stays possible.
+# BB-TEST (2026-11, bb-test lane): a GREEN build then runs bb-cp-record (offline test-compile + dependency:build-classpath; writes .bb/cp/<module>.cp and
+# .bb/cp/manifest for bb-test's stale-jar guard); its failure is logged and never changes rc, and it is bounded by BB_CP_RECORD_TIMEOUT seconds
+# (default 300; on timeout: "cp-record skipped: timeout" in the log, any record removed, write_rc delayed by at most the bound + 10 s). BB_LAUNCH=<cmd> makes the waiter run <cmd> instead of maven
+# (bb-test's own __launch mode); such a ticket sets BB_NO_CP_RECORD=1 and BB_DEDUP=0.
 # Every ticket reaching done/ appends one line to ~/work/bb-ticket-log.tsv. `bb-wait <ticket>` blocks until it finishes (exit = rc).
 # TICKET OWNER FIELDS (T3, 2026-11): the ticket gains optional key=value lines after group_reason= and before args= (readers
 # take the LAST line of a key, so every existing reader ignores them): session_pid, session_start (epoch s) and session_label
@@ -77,7 +81,7 @@ if [ "${1:-}" = --detached ]; then
 fi
 if [ "${1:-}" != __run ] && [ "${BB_QUEUE:-1}" = 0 ]; then exec "$(dirname "$SELF")/bb-build-direct" "$@"; fi
 . "$(dirname "$SELF")/bb-queue-lib.sh"
-MVN=${BB_TEST_MVN:-$HOME/tools/maven/bin/mvn}
+MVN=${BB_LAUNCH:-${BB_TEST_MVN:-$HOME/tools/maven/bin/mvn}}   # BB_LAUNCH: bb-test enqueues a ticket whose job is its own __launch mode, not maven
 
 if [ "${1:-}" = __run ]; then
   # ---- waiter: one detached process per ticket; becomes the maven job wrapper when granted ----
@@ -97,13 +101,18 @@ if [ "${1:-}" = __run ]; then
     fi
     flock -u 8; sleep 5; WAITED=$((WAITED + 5))
   done
-  # granted (lock held): launch, and keep the lock until the reactor is visible so the next grant counts it
+  # granted (lock held): launch, record the launch in the LEDGER (the next grant counts it from that line), release the lock at once
   NOW=$(date +%s)
-  rm -f "$B/queued" "$B/rc" "$B/end"; touch "$B/run.marker"; echo "$NOW" > "$B/start"; printf '%q ' "$@" > "$B/args"   # for bb-report's EMPTY RUN check
+  rm -f "$B/queued" "$B/rc" "$B/end" "$B/refused"; touch "$B/run.marker"; echo "$NOW" > "$B/start"; printf '%q ' "$@" > "$B/args"   # for bb-report's EMPTY RUN check
   RDF=(-Daether.requireDocker=true); [ "$(field "$T" requireDocker)" != 0 ] || RDF=()   # #31: the ticket's own record decides
   SLOT=""; [ "$(field "$T" iso)" = 1 ] && SLOT=$(pg_free_slot)
   printf 'started=%s\nwaited=%s\n' "$NOW" "$WAITED" >> "$T"; [ -z "$SLOT" ] || printf 'group_slot=%s\n' "$SLOT" >> "$T"; mv "$T" "$Q/running/$ID"; T=$Q/running/$ID
+  # GRANT + LEDGER ATOMIC (vbt6 B2): the job subshell inherits fd 8 (the same open file description, so the same flock) and writes its
+  # own ledger entry, keyed to its own pid, before it closes fd 8. The waiter closes its fd 8 instead of `flock -u` (which would unlock the
+  # shared description for both), so the lock is released only once BOTH have closed it: a waiter SIGKILLed after the spawn can no longer
+  # let the next grant read a ledger without this launch. A subshell killed before its entry has launched nothing.
   (
+    ledger_add "$ID" "$BASHPID"; exec 8>&-
     cd "$CO"; : > "$B/build.log"
     if wants_jbct "$@"; then   # jbct plugin bootstrap (see bb-jbct-bootstrap); any other ticket never touches the helper, installed or not
       HELPER=$(dirname "$SELF")/bb-jbct-bootstrap
@@ -116,18 +125,23 @@ if [ "${1:-}" = __run ]; then
       env -u HCLOUD_TOKEN JAVA_HOME=/usr/lib/jvm/java-25-openjdk-amd64 "$MVN" "$@" ${RDF[@]+"${RDF[@]}"} >> "$B/build.log" 2>&1
     fi
     rc=$?; date +%s > "$B/end"
+    if [ "$rc" = 0 ]; then   # bb-test lane: classpath + manifest of a GREEN build; bounded, and never changes rc
+      timeout -k 10 "${BB_CP_RECORD_TIMEOUT:-300}" "$(dirname "$SELF")/bb-cp-record" record "$CO" "$@" >> "$B/build.log" 2>&1
+      case $? in
+        124|137) # a SIGKILLed bb-cp-record leaves its maven running: kill that recorded process group, after an identity check (vbt4 L4)
+          { read -r PG PS 2> /dev/null < "$B/cp-record.pgid" && case "$PG" in ''|*[!0-9]*) false;; esac && [ "$(pstart "$PG")" = "$PS" ] \
+              && kill -KILL -- "-$PG" 2> /dev/null && echo "bb-build: cp-record's maven (process group $PG) killed" >> "$B/build.log"; } || true
+          rm -f "$B/cp-record.pgid"
+          echo "bb-build: cp-record skipped: timeout after ${BB_CP_RECORD_TIMEOUT:-300}s (no record is left; bb-test will refuse until a rebuild)" >> "$B/build.log"; rm -rf "$B/cp" "$B/cp.new" "$B/cp.old";;
+      esac
+    fi
     write_rc "$B" "$rc"   # convenience copy for pollers, 444; the ticket's rc= comes from this subshell's exit status below
     exit "$rc"
-  ) 8>&- &
-  C=$!
-  for _ in $(seq 120); do
-    kill -0 "$C" 2>/dev/null || break
-    for p in $(pgrep -u "$USER" -f "$PAT"); do [ "$(readlink "/proc/$p/cwd" 2>/dev/null)" = "$CO" ] && break 3; done
-    sleep 0.5
-  done
-  flock -u 8
+  ) &
+  C=$!   # the job subshell lives as long as maven / bb-test's java / bb-netns-run (and survives a kill -9 of this waiter)
+  exec 8>&-   # the lock covers the slot decision and the ledger write only, never the launch's run time (released when the subshell closes fd 8)
   wait "$C"; BRC=$?   # the build's exit status: the verdict. Never re-read from $B/rc, which a lane can delete or rewrite
-  flock 8
+  exec 8> "$Q/.lock"; flock 8
   [ -f "$T" ] || exit 0   # cancel or reap already finalized this ticket (first writer wins): do not recreate running/<id> or overwrite done/<id>
   printf 'state=finished\nrc=%s\nended=%s\n' "$BRC" "$(cat "$B/end" 2>/dev/null || date +%s)" >> "$T"
   to_done "$T"
@@ -202,7 +216,7 @@ if [ "${BB_IT_UNFILTERED:-0}" != 1 ] && printf '%s' "$A" | grep -Eq -- ' (-pl|--
 fi
 # Concurrency cap (2026-09-27): above 3 concurrent reactors, fixed-port tests collide (BindException)
 # and Testcontainers fails to start, so results are environmental noise. The queue grants a ticket only while
-# fewer than CAP reactors run, and never more than the host cap (~/work/max-reactors, #56). Override the cap only with BB_MAX_REACTORS. BB_CAP_WAIT_SECS > 0 bounds the
+# fewer than CAP queue launches (the LEDGER: what this queue started, maven or bb-test's java alike) run, and never more than the host cap (~/work/max-reactors, #56). Override the cap only with BB_MAX_REACTORS. BB_CAP_WAIT_SECS > 0 bounds the
 # queue wait (then .bb/rc = 5); unset = wait until granted.
 CAP=${BB_MAX_REACTORS:-5}; LIMIT=${BB_CAP_WAIT_SECS:-0}
 case "$CAP$LIMIT" in *[!0-9]*) echo "refusing: BB_MAX_REACTORS / BB_CAP_WAIT_SECS must be non-negative integers" >&2; exit 2;; esac
@@ -275,6 +289,7 @@ PRN=$(ownerval BB_PR '^[1-9][0-9]{0,9}$') && OWNER_FIELDS+="pr=$PRN"$'\n'
 VIA=$(ownerval BB_VIA "$LABEL_RE") && OWNER_FIELDS+="via=$VIA"$'\n'   # who submitted: bb-mutate sets bb-mutate:<spec>:<mutant> (issue #46); additive
 OWNER_FIELDS+="output=$B/build.log"$'\n'
 [ "${BB_REQUIRE_DOCKER:-1}" = 1 ] || OWNER_FIELDS+="requireDocker=0"$'\n'
+[ -z "${BB_LAUNCH:-}" ] || OWNER_FIELDS+="requireDockerEffective=$([ "${BB_REQUIRE_DOCKER:-1}" = 1 ] && echo true || echo false)"$'\n'   # bb-test tickets only (CTO 2026-11-19): a count without Testcontainers must never read as a full one
 [ -z "$DETACHED_READER" ] || OWNER_FIELDS+="detached_reader=$DETACHED_READER"$'\n'
 
 ID=$(date +%s%N)-$$
