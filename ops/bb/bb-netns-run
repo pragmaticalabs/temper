@@ -3,7 +3,7 @@
 # Runs maven for ONE port-group ticket in its own docker network namespace: own loopback (so the tests' fixed ports cannot
 # collide with another ticket's) plus NAT egress on the default bridge. The container is a thin shell over the host:
 #   image bb-hostfs:2 = empty skeleton (usr-merge symlinks, empty /sbin); host /usr and the JDK/Debian config dirs are mounted read-only,
-#   the checkout rw (its .m2-local lives inside via .mvn/maven.config); ~/tools and the maven install read-only; NOTHING else of $HOME (2026-11-21, #76:
+#   the checkout rw (its .m2-local lives inside via .mvn/maven.config); ~/tools, the maven install and ~/work/temper-m2-seed read-only; NOTHING else of $HOME (2026-11-21, #76:
 #   it was `-v $HOME:$HOME` rw, so test code could rewrite ~/tools/bb-*, other checkouts and the queue). $HOME in the container is a private tmpfs
 #   (owned by the caller, mode 0700, 1 GiB, exec: JNA maps a native library it extracts to ~/.cache, docker defaults tmpfs to noexec): it exists and is writable (Testcontainers writes ~/.testcontainers.properties, java userPrefs, ~/.cache)
 #   but is throwaway, and the bind mounts above nest under it at their host paths. Chosen over an empty bind of a host dir because nothing then has to be
@@ -37,6 +37,9 @@ ARGS=(--rm --init --name "bb-$ID" --label "bb.ticket=$ID" --user "$(id -u):$(id 
 REAL=$(readlink -f "$MVN") || REAL=$MVN
 case $REAL in */bin/mvn) MH=${REAL%/bin/mvn} ;; *) MH=$REAL ;; esac
 case "$MH/" in "$HOME/tools/"*) ;; *) [ -e "$MH" ] && ARGS+=(-v "$MH:$MH:ro") ;; esac
+# the m2 seed (~/work/temper-m2-seed: BbTestLaunchIT launches its junit console jar, 63 rows skipped without it): read-only at its host path; absent = no mount
+SEED="$HOME/work/temper-m2-seed"
+[ -d "$SEED" ] && ARGS+=(-v "$(readlink -f "$SEED"):$SEED:ro")
 for d in alternatives java-25-openjdk java-openjdk ssl ca-certificates; do [ -e "/etc/$d" ] && ARGS+=(-v "/etc/$d:/etc/$d:ro"); done
 for v in LANG LC_ALL TZ MAVEN_OPTS; do [ -n "${!v:-}" ] && ARGS+=(-e "$v=${!v}"); done
 SOCK=${BB_DOCKER_SOCK:-/var/run/docker.sock}; NET=${BB_NETNS_NETWORK:-bridge}
