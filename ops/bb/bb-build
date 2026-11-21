@@ -3,12 +3,14 @@
 # QUEUED since 2026-09-28: after the guards below, the build is DEDUPED against identical builds, then ENQUEUED and
 # this command returns at once; a detached waiter launches maven when its ticket is granted (priority order from
 # ~/work/priorities, FIFO among equals, under the reactor cap). Poll for .bb/rc exactly as before.
-# Writes in <checkout>/.bb/: queued (ticket id, while waiting), run.marker (at launch), build.log, start/end
+# Writes in <checkout>/.bb/: queued (ticket id, while waiting), run.marker (at launch), ticket (the granted run's ticket id, written with start), build.log, start/end
 # epochs, rc (a 444 convenience copy of maven's exit code, written INSIDE the job; 5 = queue wait expired, 9 = cancelled/abandoned
 # before maven started). Call rc: 0 queued; 2 usage; 3 already running/queued here; 4 owner; 6 #1553 guard;
 # 7 identical build running/queued elsewhere; 8 identical build already finished (paths printed); 10 -Dtest without
 # -Dit.test on forge-tests (failsafe ignores -Dtest). BB_DEDUP=0
-# skips dedup. BB_QUEUE=0 runs the pre-queue script (bb-build-direct) unchanged -- it also bypasses the port group.
+# skips dedup. DEDUP IDENTITY (#80, 2026-11-21): a finished identical build is still the checkout's result only while .bb/ticket names ITS ticket (not while
+# .bb/start equals its started=: two runs granted in one second shared a start, and dedup answered with the newer run's result). A checkout with no
+# .bb/ticket (run before this change) is not current: no dedup, the safe direction. BB_QUEUE=0 runs the pre-queue script (bb-build-direct) unchanged -- it also bypasses the port group.
 # PORT GROUP (2026-09-29): a run that will execute tests of a fixed-port module (~/work/port-group-modules; decided by
 # bb-portgroup.py from the checkout's own poms and the args) is granted only while no other port-group run is running.
 # BB_PORT_GROUP=1 forces membership, BB_PORT_GROUP=0 forces exclusion.
@@ -103,7 +105,7 @@ if [ "${1:-}" = __run ]; then
   done
   # granted (lock held): launch, record the launch in the LEDGER (the next grant counts it from that line), release the lock at once
   NOW=$(date +%s)
-  rm -f "$B/queued" "$B/rc" "$B/end" "$B/refused"; touch "$B/run.marker"; echo "$NOW" > "$B/start"; printf '%q ' "$@" > "$B/args"   # for bb-report's EMPTY RUN check
+  rm -f "$B/queued" "$B/rc" "$B/end" "$B/refused"; touch "$B/run.marker"; echo "$NOW" > "$B/start"; echo "$ID" > "$B/ticket"; printf '%q ' "$@" > "$B/args"   # for bb-report's EMPTY RUN check
   RDF=(-Daether.requireDocker=true); [ "$(field "$T" requireDocker)" != 0 ] || RDF=()   # #31: the ticket's own record decides
   SLOT=""; [ "$(field "$T" iso)" = 1 ] && SLOT=$(pg_free_slot)
   printf 'started=%s\nwaited=%s\n' "$NOW" "$WAITED" >> "$T"; [ -z "$SLOT" ] || printf 'group_slot=%s\n' "$SLOT" >> "$T"; mv "$T" "$Q/running/$ID"; T=$Q/running/$ID
@@ -179,16 +181,15 @@ case "${BB_REQUIRE_DOCKER:-1}" in 0|1) ;; *) echo "refusing: BB_REQUIRE_DOCKER m
 B=$CO/.bb; mkdir -p "$B"
 if [ ! -f "$B/rc" ] && [ -f "$B/start" ]; then
   # .bb/start without .bb/rc: a build still running, or a finished build whose .bb/rc a lane deleted (CTO 2026-11-13: three verifier
-  # lanes rm'd it to "reset" a checkout). Name the second case: no waiting/running ticket for this checkout and a done/ ticket whose
-  # started= is this .bb/start, state=finished and a numeric rc= (its build wrote .bb/rc; an orphaned or cancelled run may never have).
-  # Anything else (e.g. a BB_QUEUE=0 build, which has no ticket) keeps the running message. done/ holds tens of thousands of tickets,
-  # so one grep finds the few with this started= instead of a field() fork per file (v50a: ~2 min on bigboy).
-  S=$(cat "$B/start"); LIVE=""; FIN=""
+  # lanes rm'd it to "reset" a checkout). Name the second case: no waiting/running ticket for this checkout and the done/ ticket named by .bb/ticket (#80; was: whose started= is this .bb/start), state=finished and a numeric rc= (its build wrote .bb/rc; an orphaned or cancelled run may never have).
+  # Anything else (e.g. a BB_QUEUE=0 build, which has no ticket) keeps the running message. One direct done/<ticket> lookup: done/ holds tens
+  # of thousands of tickets, so no scan (v50a: a field() fork per file took ~2 min on bigboy).
+  TK=$(run_ticket "$CO" || true)   # unknown (no .bb/ticket) leaves TK empty: the plain message below
+  LIVE=""; FIN=""
   for f in "$Q"/waiting/* "$Q"/running/*; do [ -f "$f" ] && [ "$(field "$f" co)" = "$CO" ] && LIVE=${f##*/}; done
-  if [ -z "$LIVE" ] && [ -n "$S" ] && [ -d "$Q/done" ]; then
-    for f in $(grep -rlxF -e "started=$S" "$Q/done" 2>/dev/null || true); do
-      [ "$(field "$f" co)" = "$CO" ] && [ "$(field "$f" state)" = finished ] && [[ $(field "$f" rc) =~ ^[0-9]+$ ]] && { FIN=${f##*/}; break; }
-    done
+  if [ -z "$LIVE" ] && [ -n "$TK" ] && [ -f "$Q/done/$TK" ]; then   # #80: .bb/ticket names the run that owns .bb; none (pre-#80 run) = no guess
+    f=$Q/done/$TK
+    [ "$(field "$f" co)" = "$CO" ] && [ "$(field "$f" state)" = finished ] && [[ $(field "$f" rc) =~ ^[0-9]+$ ]] && FIN=$TK
   fi
   [ -z "$FIN" ] || { echo "refusing: .bb/rc in $CO was deleted by hand after ticket $FIN finished; never rm it (its verdict is the ticket record: bb-wait $FIN); rerun bb-build in a fresh checkout (a rerun in a checkout whose .bb/rc is intact clears it itself)" >&2; exit 3; }
   echo "refusing: a build appears to be running in $CO (.bb/start without .bb/rc)" >&2; exit 3
@@ -258,7 +259,7 @@ if [ -n "$KEY" ] && [ "${BB_DEDUP:-1}" != 0 ]; then
     f=$Q/done/$f
     [ "$(field "$f" key)" = "$KEY" ] && [ "$(field "$f" state)" = finished ] || continue
     o=$(field "$f" co)
-    [ -f "$o/.bb/rc" ] && [ "$(cat "$o/.bb/start" 2>/dev/null)" = "$(field "$f" started)" ] || continue   # since rebuilt/removed
+    [ -f "$o/.bb/rc" ] && run_current "$o" "${f##*/}" || continue   # since rebuilt/removed: not current, and unknown (no .bb/ticket, a pre-#80 run) counts as not current (#80)
     echo "dedup: identical build already finished: rc=$(field "$f" rc) ended=$(date -d @"$(field "$f" ended)" -Is) owner=$(field "$f" owner)" >&2
     echo "dedup: read its result at $o/.bb (bb-report $o); BB_DEDUP=0 to run anyway" >&2; exit 8
   done
@@ -294,7 +295,7 @@ OWNER_FIELDS+="output=$B/build.log"$'\n'
 
 ID=$(date +%s%N)-$$
 T=$Q/waiting/$ID
-rm -f "$B/rc" "$B/end" "$B/start"
+rm -f "$B/rc" "$B/end" "$B/start" "$B/ticket"
 echo "bb-build: queued ticket $ID at $(date -Is); maven has not started (bb-queue shows position)" > "$B/build.log"
 echo "$ID" > "$B/queued"
 { printf 'id=%s\nowner=%s\nco=%s\nsha=%s\nkey=%s\ncap=%s\nlimit=%s\ncreated=%s\n' \

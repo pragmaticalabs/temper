@@ -28,14 +28,16 @@
 #   src/test/resources are never counted), a target directory is entered only for its two report directories, depth at most 8 below
 #   the checkout, 20 s. Counts are the sum of the testsuite attributes tests/failures/errors/skipped per file; an unparseable file is
 #   counted in `bad report files` and never stops the summary.
-# GUARANTEE and LIMITS: the counts come only from this build's reports, or the line says why not. When the checkout's .bb/start no longer
-#   equals the ticket's started= a later build owns the checkout and overwrote the reports and the log: counts and first error are then
+# RUN IDENTITY: "is this the checkout's run" is run_current in bb-queue-lib.sh, the same copy bb-build, bb-queue and bb-wait use; this script asks it through bash
+#   (the lib must sit next to this file, as the installer puts them). current counts; not-current and unknown (no .bb/ticket) are `unavailable`.
+# GUARANTEE and LIMITS: the counts come only from this build's reports, or the line says why not. When the checkout's .bb/ticket no longer
+#   names this ticket (#80: not .bb/start, which two runs granted in one second share) a later build owns the checkout and overwrote the reports and the log: counts and first error are then
 #   `unavailable`, never another build's numbers. Not guaranteed: a report written by a forked JVM after the waiter recorded `ended` is
-#   still counted when newer than started; a checkout whose .bb/start was deleted is `unavailable` (the overwrite check cannot
-#   be made); the verdict is the ticket's rc, not the XML (a build can be rc 0 with zero
+#   still counted when newer than started; a checkout with no .bb/ticket (deleted, or a run from before #80) is `unavailable` (the overwrite check cannot
+#   be made; counts of an unidentifiable run are worse than none); the verdict is the ticket's rc, not the XML (a build can be rc 0 with zero
 #   reports, or rc != 0 with none, as in a compile failure). "first failing" is the first by report path, then document order.
 #   The log is scanned in bounded chunks: its first 64 MB, then its last 16 MB; a first [ERROR] line elsewhere is reported as not found.
-#   A mvn run by hand in the checkout AFTER the ticket, outside bb-build, does not touch .bb/start: the ticket then still looks like the
+#   A mvn run by hand in the checkout AFTER the ticket, outside bb-build, does not touch .bb/ticket: the ticket then still looks like the
 #   checkout's latest build, and that run's newer reports are counted as the ticket's. Only bb-build runs are told apart.
 #   Only regular files are read (a FIFO or device named TEST-*.xml is skipped). Every character that is not printable (ESC, NUL, DEL, C1,
 #   a byte that is not UTF-8) is printed as `?` in text and --json alike, so a log or a test message cannot drive the terminal.
@@ -43,6 +45,7 @@ import json
 import os
 import re
 import stat
+import subprocess
 import sys
 import time
 import xml.etree.ElementTree as ET
@@ -89,6 +92,18 @@ def read_ticket(path):
         if m:
             fields[m.group(1)] = m.group(2)
     return fields
+
+
+def run_current(co, tid):
+    """'current' / 'not-current' / 'unknown': the ONE answer is run_current in bb-queue-lib.sh (#80), asked through bash (no python twin).
+    Anything but return code 0 or 1 (no .bb/ticket, or the lib cannot be asked) is 'unknown'."""
+    lib = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'bb-queue-lib.sh')
+    try:
+        r = subprocess.run(['bash', '-c', 'LIB_READONLY=1; . "$1" && run_current "$2" "$3"', 'bb-result', lib, co, tid],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return 'unknown'
+    return {0: 'current', 1: 'not-current'}.get(r.returncode, 'unknown')
 
 
 def is_num(s):
@@ -253,15 +268,11 @@ def main(argv):
     elif not os.path.isabs(co) or not is_num(started):
         tests = {'status': 'none', 'reason': 'the ticket has no started build or no checkout'}
     else:
-        try:
-            with open(os.path.join(co, '.bb', 'start')) as f:
-                cur = f.read().strip()
-        except OSError:
-            cur = None
-        if cur != started:
+        cur = run_current(co, tid)
+        if cur != 'current':
             owned = False
-            reason = ('a later build in this checkout replaced the reports' if cur is not None
-                      else "the checkout's .bb/start is gone")
+            reason = ('a later build in this checkout replaced the reports' if cur == 'not-current'
+                      else "the checkout's .bb/ticket is gone")   # unknown: the counts of an unidentifiable run are worse than none
             tests = {'status': 'unavailable', 'reason': reason}
         else:
             paths, dirs, incomplete = find_reports(co, int(started))
