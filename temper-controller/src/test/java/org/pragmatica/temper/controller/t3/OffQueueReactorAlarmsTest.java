@@ -1,0 +1,210 @@
+package org.pragmatica.temper.controller.t3;
+
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
+
+import org.pragmatica.lang.Option;
+import org.pragmatica.temper.protocol.api.FleetAlarmsView.Alarm;
+import org.pragmatica.temper.protocol.json.TemperJson;
+import org.pragmatica.temper.store.api.BbAlarm;
+import org.pragmatica.temper.store.api.BbOffQueue;
+import org.pragmatica.temper.store.api.BbSnapshot;
+import org.pragmatica.temper.store.api.BbStore.Listing;
+import org.pragmatica.temper.store.api.NewFleetEvent;
+
+import org.junit.jupiter.api.Test;
+
+import static org.pragmatica.lang.Option.none;
+import static org.pragmatica.lang.Option.some;
+import static org.assertj.core.api.Assertions.assertThat;
+
+
+/// `off-queue-reactor` and `lingering-reactor` (CTO ruling 2026-11-20), pure, over the marks the previous rounds left. The limit is
+/// written here as 1800 s on purpose: the test pins the figure, not the constant.
+///
+/// Probes: change `LINGERING_REACTOR_MIN` -> [#lingering_isSilentOneSecondBeforeThirtyMinutes_andFiresAtThirty] red; stop listing the
+/// two kinds in `FleetAlarms.collected` -> [#fleetAlarms_listsTheReactorsWhileTheSnapshotHoldsThem_withOwnerAndCwd] red; fire without
+/// the mark check -> [#offQueueReactor_firesOncePerLauncher_andNamesItsOwnerAndCwd] red; keep the marks of a launcher that left ->
+/// [#aLauncherThatLeaves_clearsItsMarks_andAReusedPidIsAnotherLauncher] red.
+class OffQueueReactorAlarmsTest {
+    private static final String HOST = "h1";
+    private static final long AT = 1_793_900_000L;
+    private static final String CWD = "/home/aether/v3455d";
+
+    private static final class Rounds {
+        private final List<BbAlarm> rows = new ArrayList<>();
+        private final List<NewFleetEvent> events = new ArrayList<>();
+
+        List<NewFleetEvent> round(long at, BbOffQueue... reactors) {
+            var listing = Listing.listing("present", List.of(), Instant.ofEpochSecond(at), 0, List.of(reactors));
+            var write = TicketAlarms.alarms(HOST,
+                                            Instant.ofEpochSecond(at + 20),
+                                            listing,
+                                            Option.<BbSnapshot> none(),
+                                            List.copyOf(rows),
+                                            TicketAlarms.Limits.DEFAULT);
+
+            write.clear().forEach(gone -> rows.removeIf(gone::sameKey));
+            rows.addAll(write.fire());
+            events.addAll(write.events());
+
+            return write.events();
+        }
+    }
+
+    private static BbOffQueue reactor(long pid, long startS) {
+        return BbOffQueue.bbOffQueue(pid, startS, "unowned", CWD);
+    }
+
+    @Test
+    void offQueueReactor_firesOncePerLauncher_andNamesItsOwnerAndCwd() {
+        var rounds = new Rounds();
+        var first = rounds.round(AT,
+                                 BbOffQueue.bbOffQueue(1465069, AT - 120, "v3436i", "/home/aether/work/co/v3436i-head"));
+
+        assertThat(first).extracting(NewFleetEvent::kind).containsExactly(BbAlarm.OFF_QUEUE_REACTOR);
+        assertThat(first.getFirst().subject()).isEqualTo(HOST + "/1465069:" + (AT - 120));
+        var payload = TemperJson.mapper().readTree(first.getFirst().payload()).unwrap();
+
+        assertThat(payload.path("owner").stringValue()).isEqualTo("v3436i");
+        assertThat(payload.path("cwd").stringValue()).isEqualTo("/home/aether/work/co/v3436i-head");
+        assertThat(payload.path("pid").longValue()).isEqualTo(1465069L);
+        assertThat(payload.path("ageMin").intValue()).isEqualTo(2);
+        assertThat(rounds.round(AT + 30,
+                                BbOffQueue.bbOffQueue(1465069, AT - 120, "v3436i", "/home/aether/work/co/v3436i-head"))).as("once")
+                  .isEmpty();
+    }
+
+    @Test
+    void lingering_isSilentOneSecondBeforeThirtyMinutes_andFiresAtThirty() {
+        var rounds = new Rounds();
+        var launcher = reactor(77, AT - 1800 + 1);
+
+        assertThat(rounds.round(AT, launcher)).extracting(NewFleetEvent::kind)
+                  .as("29 min 59 s: only the off-queue alarm")
+                  .containsExactly(BbAlarm.OFF_QUEUE_REACTOR);
+        var at = rounds.round(AT + 1, launcher);
+
+        assertThat(at).extracting(NewFleetEvent::kind).as("exactly 30 min").containsExactly(BbAlarm.LINGERING_REACTOR);
+        assertThat(TemperJson.mapper().readTree(at.getFirst().payload()).unwrap().path("limitMin").intValue()).isEqualTo(30);
+        assertThat(rounds.round(AT + 600, launcher)).as("once").isEmpty();
+    }
+
+    @Test
+    void aLauncherThatLeaves_clearsItsMarks_andAReusedPidIsAnotherLauncher() {
+        var rounds = new Rounds();
+
+        rounds.round(AT, reactor(77, AT - 3600));
+        assertThat(rounds.rows).extracting(BbAlarm::kind)
+                  .containsExactlyInAnyOrder(BbAlarm.OFF_QUEUE_REACTOR, BbAlarm.LINGERING_REACTOR);
+        assertThat(rounds.round(AT + 30)).isEmpty();
+        assertThat(rounds.rows).as("the launcher left: its marks are gone").isEmpty();
+        assertThat(rounds.round(AT + 60,
+                                reactor(77, AT + 40))).as("same pid, new start: a new launcher")
+                  .extracting(NewFleetEvent::kind)
+                  .containsExactly(BbAlarm.OFF_QUEUE_REACTOR);
+    }
+
+    /// Pid reuse with NO empty round between: round 1 sees pid 77 started at S1, round 2 sees pid 77 started at S2. The marks are
+    /// keyed `pid:startS`, so the second is a new launcher and fires. Mutation: key the marks on pid alone -> red (the S1 mark
+    /// still stands, nothing fires).
+    @Test
+    void aReusedPid_withNoEmptyRoundBetween_isAnotherLauncher_andFiresItsOwnAlarm() {
+        var rounds = new Rounds();
+
+        rounds.round(AT, reactor(77, AT - 3600));
+
+        assertThat(rounds.round(AT + 30,
+                                reactor(77, AT + 10))).as("same pid, new start, no round between")
+                  .extracting(NewFleetEvent::kind)
+                  .containsExactly(BbAlarm.OFF_QUEUE_REACTOR);
+        assertThat(rounds.rows).as("the first launcher's marks left with it; only the new one's stand")
+                  .extracting(BbAlarm::subject)
+                  .containsOnly("77:" + (AT + 10));
+    }
+
+    @Test
+    void fleetAlarms_listsTheReactorsWhileTheSnapshotHoldsThem_withOwnerAndCwd() {
+        var now = Instant.ofEpochSecond(AT + 20);
+        var launcher = BbOffQueue.bbOffQueue(77, AT - 45 * 60, "unowned", CWD);
+        var rows = List.of(BbAlarm.bbAlarm(HOST, BbAlarm.OFF_QUEUE_REACTOR, launcher.key(), "0", now),
+                           BbAlarm.bbAlarm(HOST, BbAlarm.LINGERING_REACTOR, launcher.key(), "30", now),
+                           BbAlarm.bbAlarm(HOST, BbAlarm.OFF_QUEUE_REACTOR, "99:1", "0", now));
+        var expected = List.of(TicketRoutes.Expected.expected(HOST, "hostlink", Option.<Instant> none()));
+        var holding = BbSnapshot.bbSnapshot(HOST,
+                                            now,
+                                            some("present"),
+                                            List.of(),
+                                            some(Instant.ofEpochSecond(AT)),
+                                            some(0),
+                                            List.of(launcher));
+        var listed = FleetAlarms.view(now, expected, List.of(holding), List.of(), rows).hosts().getFirst().alarms();
+
+        assertThat(listed).extracting(Alarm::kind).containsExactly(BbAlarm.OFF_QUEUE_REACTOR, BbAlarm.LINGERING_REACTOR);
+        assertThat(listed).extracting(Alarm::ticket).containsOnly(some("pid=77 owner=unowned cwd=" + CWD));
+        assertThat(listed).extracting(Alarm::ageMin).containsOnly(some(45));
+        assertThat(listed).extracting(Alarm::limitMin).containsExactly(none(), some(30));
+        var left = BbSnapshot.bbSnapshot(HOST,
+                                         now,
+                                         some("present"),
+                                         List.of(),
+                                         some(Instant.ofEpochSecond(AT)),
+                                         some(0),
+                                         List.of());
+
+        assertThat(FleetAlarms.view(now,
+                                    expected,
+                                    List.of(left),
+                                    List.of(),
+                                    rows).hosts().getFirst().alarms()).as("a mark whose launcher is gone from the latest snapshot is not current")
+                  .isEmpty();
+    }
+
+    /// The `GET /fleet/alarms` reply of this controller decodes with the strict decoder (`FAIL_ON_UNKNOWN_PROPERTIES`) of a CLI
+    /// that predates the off-queue kinds: `MainView` is the 7-field `FleetAlarmsView` of ffb423990, frozen here. So the CLI need not
+    /// roll out first. Mutation: add a field to `FleetAlarmsView.Alarm` -> red (unknown property).
+    @Test
+    void theReplyWithReactorAlarms_decodesWithThePreReactorViewShape() {
+        var now = Instant.ofEpochSecond(AT + 20);
+        var launcher = BbOffQueue.bbOffQueue(77, AT - 45 * 60, "unowned", CWD);
+        var rows = List.of(BbAlarm.bbAlarm(HOST, BbAlarm.OFF_QUEUE_REACTOR, launcher.key(), "0", now),
+                           BbAlarm.bbAlarm(HOST, BbAlarm.LINGERING_REACTOR, launcher.key(), "30", now));
+        var snapshot = BbSnapshot.bbSnapshot(HOST,
+                                             now,
+                                             some("present"),
+                                             List.of(),
+                                             some(Instant.ofEpochSecond(AT)),
+                                             some(0),
+                                             List.of(launcher));
+        var view = FleetAlarms.view(now,
+                                    List.of(TicketRoutes.Expected.expected(HOST, "hostlink", Option.<Instant> none())),
+                                    List.of(snapshot),
+                                    List.of(),
+                                    rows);
+        var json = TemperJson.mapper().writeAsString(view).unwrap();
+        var old = TemperJson.mapper().readString(json, MainView.class).unwrap();
+
+        assertThat(old.hosts().getFirst().alarms()).extracting(MainAlarm::kind)
+                  .containsExactly(BbAlarm.OFF_QUEUE_REACTOR, BbAlarm.LINGERING_REACTOR);
+        assertThat(old.hosts().getFirst().alarms().getFirst().ticket()).isEqualTo(some("pid=77 owner=unowned cwd=" + CWD));
+    }
+
+    record MainAlarm(String kind,
+                     Option<String> ticket,
+                     Option<Integer> ageMin,
+                     Option<Integer> limitMin,
+                     Option<Integer> days,
+                     Option<Integer> skewS,
+                     Instant firedAt) {}
+
+    record MainHost(String host,
+                    String status,
+                    Option<Instant> takenAt,
+                    Option<Instant> hostAt,
+                    Option<Integer> skewS,
+                    Option<Instant> retireAt,
+                    List<MainAlarm> alarms) {}
+
+    record MainView(int v, Instant asOf, List<MainHost> hosts) {}
+}

@@ -47,6 +47,8 @@
 # jbct_bootstrap=<ver> after an install. The jbct-run test lives here (wants_jbct) and only here; any other run never execs or even looks for the helper and is unchanged. Not part of the dedup key.
 set -euo pipefail
 SELF=$(readlink -f "$0")
+# --help / -h as the only argument: print this header (the usage and the rules above) to stdout, exit 0, touch nothing
+if [ "$#" -eq 1 ] && { [ "$1" = --help ] || [ "$1" = -h ]; }; then sed -n '2,/^set -/{/^set -/!s/^# \{0,1\}//p;}' "$SELF"; exit 0; fi
 wants_jbct() {  # the ONE copy of the jbct-run test (the helper trusts it): a jbct:* or org.pragmatica-lite:jbct-maven-plugin:* goal, or the jbct profile (-Pjbct, -P a,jbct, --activate-profiles); "!jbct" / "-jbct" do not count
   local a prof=0 p w=1
   for a in "$@"; do

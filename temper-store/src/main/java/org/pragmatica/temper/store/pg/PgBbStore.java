@@ -14,6 +14,7 @@ import org.pragmatica.postgres.PgRow;
 import org.pragmatica.postgres.net.QueryExecutor;
 import org.pragmatica.temper.store.api.BbAlarm;
 import org.pragmatica.temper.store.api.BbCollect;
+import org.pragmatica.temper.store.api.BbOffQueue;
 import org.pragmatica.temper.store.api.BbSnapshot;
 import org.pragmatica.temper.store.api.BbStore;
 import org.pragmatica.temper.store.api.BbStore.Listing;
@@ -33,12 +34,17 @@ import static org.pragmatica.lang.Option.some;
 record PgBbStore(Db db) implements BbStore {
     private static final TypeToken<List<BbTicket>> TICKETS = new TypeToken<>() {};
 
-    private static final String SNAPSHOT_COLUMNS = "host, taken_at, queue, tickets::text AS tickets, host_at, skew_s::text AS skew_s";
+    private static final TypeToken<List<BbOffQueue>> OFFQ = new TypeToken<>() {};
 
-    private static final String UPSERT_SNAPSHOT = "INSERT INTO bb_snapshot (host, taken_at, queue, tickets, host_at, skew_s) "
-                                                + "VALUES ($1, $2::timestamptz, $3, $4::jsonb, $5::timestamptz, $6::integer) "
+    /// The two jsonb documents of one snapshot, written before the transaction opens.
+    private record Encoded(String tickets, String offq) {}
+
+    private static final String SNAPSHOT_COLUMNS = "host, taken_at, queue, tickets::text AS tickets, host_at, skew_s::text AS skew_s, offq::text AS offq";
+
+    private static final String UPSERT_SNAPSHOT = "INSERT INTO bb_snapshot (host, taken_at, queue, tickets, host_at, skew_s, offq) "
+                                                + "VALUES ($1, $2::timestamptz, $3, $4::jsonb, $5::timestamptz, $6::integer, $7::jsonb) "
                                                 + "ON CONFLICT (host) DO UPDATE SET taken_at = EXCLUDED.taken_at, queue = EXCLUDED.queue, "
-                                                + "tickets = EXCLUDED.tickets, host_at = EXCLUDED.host_at, skew_s = EXCLUDED.skew_s";
+                                                + "tickets = EXCLUDED.tickets, host_at = EXCLUDED.host_at, skew_s = EXCLUDED.skew_s, offq = EXCLUDED.offq";
 
     private static final String ALARM_COLUMNS = "SELECT host, kind, subject, threshold, fired_at FROM bb_alarm ";
     private static final String ALARM_ORDER = " ORDER BY host, kind, subject, threshold";
@@ -72,6 +78,7 @@ record PgBbStore(Db db) implements BbStore {
                                                 Listing listing,
                                                 Fn2<RoundWrite, Option<BbSnapshot>, List<BbAlarm>> round) {
         return Json.write(listing.tickets())
+                   .flatMap(tickets -> Json.write(listing.offq()).map(offq -> new Encoded(tickets, offq)))
                    .mapError(Rows.corrupt("bb_snapshot"))
                    .async()
                    .flatMap(json -> db.inTransaction(tx -> collectedIn(tx, host, now, listing, json, round)));
@@ -81,14 +88,39 @@ record PgBbStore(Db db) implements BbStore {
                                                           String host,
                                                           Instant now,
                                                           Listing listing,
-                                                          String json,
+                                                          Encoded json,
                                                           Fn2<RoundWrite, Option<BbSnapshot>, List<BbAlarm>> round) {
         return Sql.query(tx, HOST_LOCK, host)
                   .flatMap(_ -> snapshotIn(tx, host))
                   .flatMap(baseline -> baseline.filter(known -> !known.takenAt()
                                                                       .isBefore(now))
-                                               .fold(() -> applied(tx, host, now, listing, json, round, baseline),
+                                               .fold(() -> withOffq(listing, json, baseline).async()
+                                                                   .flatMap(carried -> applied(tx,
+                                                                                               host,
+                                                                                               now,
+                                                                                               carried.listing(),
+                                                                                               carried.json(),
+                                                                                               round,
+                                                                                               baseline)),
                                                      known -> stale(host, now, known)));
+    }
+
+    private record Carried(Listing listing, Encoded json) {}
+
+    /// A listing whose host did not report `offq` keeps the baseline's list (a failed `bb-queue offq` is not a launcher leaving).
+    private static Result<Carried> withOffq(Listing listing, Encoded json, Option<BbSnapshot> baseline) {
+        return listing.offqRead() || baseline.isEmpty()
+               ? Result.success(new Carried(listing, json))
+               : baseline.fold(() -> Result.success(new Carried(listing, json)),
+                               known -> Json.write(known.offq())
+                                            .mapError(Rows.corrupt("bb_snapshot"))
+                                            .map(offq -> new Carried(Listing.listing(listing.queue(),
+                                                                                     listing.tickets(),
+                                                                                     listing.hostAt(),
+                                                                                     listing.skewS(),
+                                                                                     known.offq()),
+                                                                     new Encoded(json.tickets(),
+                                                                                 offq))));
     }
 
     /// Snapshot, collect state and source first, then the marks, then the events last (order lock).
@@ -96,7 +128,7 @@ record PgBbStore(Db db) implements BbStore {
                                                       String host,
                                                       Instant now,
                                                       Listing listing,
-                                                      String json,
+                                                      Encoded json,
                                                       Fn2<RoundWrite, Option<BbSnapshot>, List<BbAlarm>> round,
                                                       Option<BbSnapshot> baseline) {
         return alarmsIn(tx, "WHERE host = $1", host).flatMap(rows -> written(tx, host, now, listing, json).flatMap(_ -> marked(tx,
@@ -131,7 +163,7 @@ record PgBbStore(Db db) implements BbStore {
                                 .promise();
     }
 
-    private static Promise<Unit> written(QueryExecutor tx, String host, Instant now, Listing listing, String json) {
+    private static Promise<Unit> written(QueryExecutor tx, String host, Instant now, Listing listing, Encoded json) {
         var at = Sql.utc(now);
 
         return Sql.execute(tx,
@@ -139,9 +171,10 @@ record PgBbStore(Db db) implements BbStore {
                            host,
                            at,
                            listing.queue(),
-                           json,
+                           json.tickets(),
                            Sql.utc(listing.hostAt()),
-                           listing.skewS())
+                           listing.skewS(),
+                           json.offq())
                   .flatMap(_ -> Sql.execute(tx, COLLECT_OK, host, at))
                   .flatMap(_ -> PgFleetStore.seenIn(tx,
                                                     List.of(SourceSeen.sourceSeen(BbStore.source(host),
@@ -218,13 +251,16 @@ record PgBbStore(Db db) implements BbStore {
     private static Result<BbSnapshot> snapshotRow(PgRow row) {
         return Json.read(row.getString("tickets"),
                          TICKETS)
-                   .mapError(Rows.corrupt("bb_snapshot"))
-                   .map(tickets -> BbSnapshot.bbSnapshot(row.getString("host"),
-                                                         row.getInstant("taken_at"),
-                                                         Option.option(row.getString("queue")),
-                                                         tickets,
-                                                         option(row.getInstant("host_at")),
-                                                         option(row.getString("skew_s")).map(Integer::parseInt)));
+                   .flatMap(tickets -> Json.read(row.getString("offq"),
+                                                 OFFQ)
+                                           .map(offq -> BbSnapshot.bbSnapshot(row.getString("host"),
+                                                                              row.getInstant("taken_at"),
+                                                                              Option.option(row.getString("queue")),
+                                                                              tickets,
+                                                                              option(row.getInstant("host_at")),
+                                                                              option(row.getString("skew_s")).map(Integer::parseInt),
+                                                                              offq)))
+                   .mapError(Rows.corrupt("bb_snapshot"));
     }
 
     private static BbCollect collectRow(PgRow row) {

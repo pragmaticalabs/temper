@@ -58,7 +58,9 @@ class ShippedMigrationsPinTest {
                                                                   Map.entry("db/migration/V19__portgroup_long.sql",
                                                                             "ee969530a937290ac1e4c3aaf6cb5b8be0f1cc992db9ec9c7d843e5a0b41fa58"),
                                                                   Map.entry("db/migration/V20__lane_registry.sql",
-                                                                            "9ea9f3ccb9281d7fca4e0dfe954a96dc8ddc5bebca345d4316c0e3abfa0e431a"));
+                                                                            "9ea9f3ccb9281d7fca4e0dfe954a96dc8ddc5bebca345d4316c0e3abfa0e431a"),
+                                                                  Map.entry("db/migration/V21__off_queue_reactors.sql",
+                                                                            "0e5afd6e8e6470da6a3c53c8ae913300ed44254ddbf985ae501d6b45ed343008"));
 
     @Test
     void everyShippedMigration_isPinnedAtItsSha() throws IOException, URISyntaxException, NoSuchAlgorithmException {

@@ -55,7 +55,8 @@ sealed interface MigrationRunner {
                                          new Migration(17, "s1_alarms"),
                                          new Migration(18, "i111_grant_fence"),
                                          new Migration(19, "portgroup_long"),
-                                         new Migration(20, "lane_registry"));
+                                         new Migration(20, "lane_registry"),
+                                         new Migration(21, "off_queue_reactors"));
 
     /// sha256 of the PRE-squash bytes of shipped migrations whose comments the public-history squash d3140d89 edited
     /// (the bytes at commit 4edb67d2). A database that applied those bytes carries these shas; an applied row equal to

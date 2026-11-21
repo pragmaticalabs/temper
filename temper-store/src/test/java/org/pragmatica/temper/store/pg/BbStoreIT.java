@@ -520,6 +520,40 @@ class BbStoreIT {
                   .containsExactly("portgroup-long");
     }
 
+    /// V21: the listing's off-queue launchers are stored on the snapshot and read back, and the two reactor kinds pass the
+    /// `bb_alarm` kind CHECK. Mutations: leave `offq` out of the upsert -> the snapshot reads `[]`, red; leave the kinds out
+    /// of V21's CHECK -> the mark insert fails, red.
+    @Test
+    void v21_offq_isStoredOnTheSnapshot_andTheReactorKindsPassTheKindCheck() {
+        var launcher = org.pragmatica.temper.store.api.BbOffQueue.bbOffQueue(77,
+                                                                             1_793_699_000L,
+                                                                             "v3436i",
+                                                                             "/h/work/co/v3436i-head");
+
+        bb.collected("h1",
+                     T0,
+                     BbStore.Listing.listing("present",
+                                             List.of(),
+                                             T0,
+                                             0,
+                                             List.of(launcher)),
+                     (_, _) -> BbStore.RoundWrite.roundWrite(List.of(),
+                                                             List.of(mark("h1",
+                                                                          "off-queue-reactor",
+                                                                          launcher.key(),
+                                                                          "0"),
+                                                                     mark("h1",
+                                                                          "lingering-reactor",
+                                                                          launcher.key(),
+                                                                          "30")),
+                                                             List.of()))
+          .await(PgFixture.WAIT)
+          .unwrap();
+        assertThat(bb.snapshot("h1").await(PgFixture.WAIT).unwrap().unwrap().offq()).containsExactly(launcher);
+        assertThat(bb.alarms().await(PgFixture.WAIT).unwrap()).extracting(BbAlarm::kind)
+                  .contains("off-queue-reactor", "lingering-reactor");
+    }
+
     /// The pre-S1 call shape: the diff only, the trailer `at` equal to `now`, no skew, no alarm marks.
     private static Promise<Option<FleetSeqs>> collected(BbStore bb,
                                                         String host,

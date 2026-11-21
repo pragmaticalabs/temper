@@ -21,6 +21,7 @@ import org.pragmatica.temper.protocol.api.MaintenanceRunDto;
 public sealed interface Conditions {
     /// The age backstop of a running group=1 ticket: listed, but never the reason `host-alarms` fires.
     String PORTGROUP_LONG = "portgroup-long";
+    String OFF_QUEUE_REACTOR = "off-queue-reactor";
     /// The `GET /hosts` state of a link that grants work.
     String UP = "UP";
 
@@ -73,7 +74,8 @@ public sealed interface Conditions {
 
     /// `host-alarms`: any host lists a current alarm. The detail is one line per alarm,
     /// hosts and alarms in reply order, then `route` as a link. Clear only when every host's list is empty, `portgroup-long`
-    /// (the lower-severity age backstop) aside: it alone does not fire, but it is listed with the alarms that do.
+    /// (the lower-severity age backstop) and `off-queue-reactor` (a hand-run maven the moment it is seen; `lingering-reactor` is its
+    /// escalation) aside: they alone do not fire, but they are listed with the alarms that do.
     static Condition hostAlarms(FleetAlarmsView view, String route) {
         var alarms = view.hosts()
                          .stream()
@@ -82,7 +84,7 @@ public sealed interface Conditions {
                                               .map(alarm -> Map.entry(host.host(),
                                                                       alarm)))
                          .toList();
-        var fires = alarms.stream().anyMatch(entry -> !PORTGROUP_LONG.equals(entry.getValue().kind()));
+        var fires = alarms.stream().anyMatch(entry -> opensIssue(entry.getValue().kind()));
         var lines = fires
                     ? alarms.stream().map(entry -> alarmLine(entry.getKey(), entry.getValue())).toList()
                     : List.<String> of();
@@ -90,6 +92,10 @@ public sealed interface Conditions {
         return lines.isEmpty()
                ? Condition.clear(AlarmCode.HOST_ALARMS)
                : Condition.firing(AlarmCode.HOST_ALARMS, String.join("\n", lines) + "\n\n" + route);
+    }
+
+    private static boolean opensIssue(String kind) {
+        return ! PORTGROUP_LONG.equals(kind) && !OFF_QUEUE_REACTOR.equals(kind);
     }
 
     /// `<host> <kind> <ticket|-> age=<n>m limit=<n>m`; `days=<d>` for host-retiring and `skew=<s>s` for clock-skew
