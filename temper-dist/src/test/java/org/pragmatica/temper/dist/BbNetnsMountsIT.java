@@ -40,6 +40,7 @@ class BbNetnsMountsIT {
         w own-checkout "$PWD/new"
         mkdir -p "$PWD/.m2-local" 2> /dev/null; w m2-local "$PWD/.m2-local/x"
         w home "$HOME/.testcontainers.properties"
+        printf '#!/usr/bin/bash\necho EXEC-OK\n' > "$HOME/.cache-exec"; chmod +x "$HOME/.cache-exec"; "$HOME/.cache-exec" 2> /dev/null || echo "EXEC-DENIED home"
         echo "MAVEN RAN $*"
         "$JAVA_HOME/bin/java" -version 2>&1 | head -1
         """;
@@ -125,6 +126,13 @@ class BbNetnsMountsIT {
     void homeIsWritableButThrowaway() throws Exception {
         assertThat(out()).contains("WROTE home");
         assertThat(home.resolve(".testcontainers.properties")).doesNotExist();
+    }
+
+    /// JNA (docker-java under Testcontainers) extracts its native library to ~/.cache/JNA/temp and maps it executable; docker's tmpfs
+    /// defaults to noexec, which failed temper-store's Postgres ITs in the first container run of #76 (UnsatisfiedLinkError: failed to map segment).
+    @Test
+    void homeAllowsExecutableMappings_soJnaCanLoadItsNativeLibrary() throws Exception {
+        assertThat(run.stdout()).contains("EXEC-OK").doesNotContain("EXEC-DENIED");
     }
 
     @Test
