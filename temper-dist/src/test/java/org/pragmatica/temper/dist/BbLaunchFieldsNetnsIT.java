@@ -101,7 +101,7 @@ class BbLaunchFieldsNetnsIT {
     }
 
     @AfterEach
-    void cleanUp() throws IOException {
+    void cleanUp() throws Exception {
         for (var id : tickets) {
             BbFixtures.run(List.of("docker", "rm", "-f", "bb-" + id), new HashMap<>(Map.of("PATH", System.getenv("PATH"))), null, null);
             BbFixtures.kill(waitersOf(id));
