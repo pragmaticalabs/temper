@@ -30,8 +30,15 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 /// RC-MISMATCH comparison (its verdict is the ticket's rc either way, so only the tamper check is lost); bb-result says `unavailable` (counts of an
 /// unidentifiable run are worse than none); bb-build keeps the plain running message (never a hand deletion guessed onto a ticket).
 ///
+/// Run identity after a run that never reached maven (never_started: cancel, queue-wait expiry, abandon) and after a BB_QUEUE=0 handoff:
+/// the checkout's `.bb/ticket` must not keep naming the previous, finished run while `.bb/rc` and `.bb/start` describe something else.
+/// The stale file is SEEDED in the three never_started rows: bb-build refuses a second enqueue while one is queued and clears the file at
+/// enqueue, so no ordered real run leaves it there; never_started owns the contract "`.bb` describes a run that never started" on its own.
+///
 /// Probes (each red, reverted): compare `.bb/start` to the ticket's `started=` again -> [#aSecondBuildInTheSameSecond_doesNotMakeTheFirstOneCurrent];
-/// stop writing `.bb/ticket` -> [#aRepeatWithNothingBetween_isStillDeduped].
+/// stop writing `.bb/ticket` -> [#aRepeatWithNothingBetween_isStillDeduped];
+/// never_started without its rm -> the three never-started rows; enqueue without its rm -> [#enqueue_clearsTheTicketFile_soThePreviousRunIsUnavailableWhileTheNextOneWaits];
+/// the BB_QUEUE=0 pre-handoff rm removed -> [#aQueueZeroHandoff_removesTheTicketFile_soTheOlderQueuedRunIsNotCurrent].
 class BbSameSecondIT {
     private static final Pattern QUEUED = Pattern.compile("queued ticket=(\\S+)");
 
@@ -53,6 +60,7 @@ class BbSameSecondIT {
         Files.copy(BbFixtures.OPS_BB.resolve("bb-wait"), tools.resolve("bb-wait"), StandardCopyOption.REPLACE_EXISTING);
         tools.resolve("bb-wait").toFile().setExecutable(true);
         Files.copy(BbFixtures.OPS_BB.resolve("bb-result"), tools.resolve("bb-result"), StandardCopyOption.REPLACE_EXISTING);
+        BbFixtures.executable(tools.resolve("bb-queue"), Files.readString(BbFixtures.OPS_BB.resolve("bb-queue")));
         Files.copy(BbFixtures.OPS_BB.resolve("bb-portgroup.py"), tools.resolve("bb-portgroup.py"), StandardCopyOption.REPLACE_EXISTING);
         var mvn = BbFixtures.executable(dir.resolve("stub/mvn"), "#!/bin/sh\necho \"HOST $*\"\ncase \"$*\" in *failing*) exit 3;; esac\n");
 
@@ -268,24 +276,185 @@ class BbSameSecondIT {
         assertThat(refused.stderr()).contains("was deleted by hand after ticket " + first.ticket() + " finished");
     }
 
-    /// THE GREP ROW (CTO ruling, #80): one copy of "is this the checkout's current run?", in bb-queue-lib.sh (run_current). Outside the lib no
-    /// code line of ops/bb compares `.bb/start` with a `started=` and none reads `.bb/ticket` to compare it; comments are not code.
-    private static final Pattern STARTS = Pattern.compile("(/start\"?|\\.bb/start).*started|started.*(/start\"?|\\.bb/start)");
-    private static final Pattern TICKET_READS = Pattern.compile("(cat|read)\\b.*[./]ticket\\b|<\\s*\"?[^ ]*/ticket|'\\.bb',\\s*'ticket'");
+    private Build blocked(Map<String, String> more) throws Exception {
+        var e = new HashMap<>(env);
 
-    static List<String> inlineIdentityCompares(Path dir) throws Exception {
+        e.put("BB_MAX_REACTORS", "0");
+        e.putAll(more);
+        var run = BbFixtures.run(List.of(dir.resolve("tools/bb-build").toString(), co.toString(), "-B", "blocked"), e, null, null);
+        var matcher = QUEUED.matcher(run.stdout());
+
+        assertThat(matcher.find()).as(run.stdout() + run.stderr()).isTrue();
+        tickets.add(matcher.group(1));
+
+        return new Build(matcher.group(1), run);
+    }
+
+    private BbFixtures.Outcome queue(String... args) throws Exception {
+        var command = new ArrayList<>(List.of(dir.resolve("tools/bb-queue").toString()));
+
+        command.addAll(List.of(args));
+
+        return BbFixtures.run(command, env, null, null);
+    }
+
+    private enum Never { CANCEL, EXPIRY, ABANDON }
+
+    /// A finished run `old`; then a waiting ticket in the same checkout that never starts (the way `how` says), with `old`'s ticket seeded as the stale file.
+    private Build neverStartedAfterAFinishedRun(Never how) throws Exception {
+        var old = build("-B", "test");
+        var waiting = blocked(how == Never.EXPIRY ? Map.of("BB_CAP_WAIT_SECS", "10") : Map.of());
+
+        Files.writeString(co.resolve(".bb/ticket"), old.ticket() + "\n");
+        switch (how) {
+            case CANCEL -> assertThat(queue("cancel", waiting.ticket()).rc()).isZero();
+            case EXPIRY -> awaitDone(waiting.ticket());
+            case ABANDON -> {
+                BbFixtures.kill(BbFixtures.waiters(waiting.ticket()));
+                for (var i = 0; i < 100 && !BbFixtures.waiters(waiting.ticket()).isEmpty(); i++) {
+                    Thread.sleep(100);
+                }
+                assertThat(queue("reap").stdout()).contains("reaped " + waiting.ticket());
+            }
+        }
+        awaitDone(waiting.ticket());
+
+        return old;
+    }
+
+    private void awaitDone(String ticket) throws Exception {
+        var done = dir.resolve("q/done").resolve(ticket);
+
+        for (var i = 0; i < 400 && !Files.exists(done); i++) {
+            Thread.sleep(100);
+        }
+
+        assertThat(done).as("the waiting ticket reached done/").exists();
+    }
+
+    private void oldRunIsNoLongerCurrent(Build old) throws Exception {
+        assertThat(co.resolve(".bb/ticket")).as("(a) no run owns the rc a never-started ticket wrote").doesNotExist();
+        var waited = wait(old.ticket());
+
+        assertThat(waited.rc()).as("(b) " + waited.stdout() + waited.stderr()).isZero();
+        assertThat(waited.stderr()).doesNotContain("RC-MISMATCH");
+        report();
+        var out = result(old.ticket());
+
+        assertThat(out.stdout()).as("(c) " + out.stdout() + out.stderr()).contains("tests: unavailable").doesNotContain("tests: 4");
+        var again = build("-B", "test");
+
+        assertThat(again.outcome().rc()).as("(d) deduped onto a result .bb no longer holds: " + again.outcome().stderr()).isZero();
+        assertThat(again.ticket()).isNotNull();
+    }
+
+    @Test
+    void aCancelledWaitingTicket_leavesNoTicketFile_soTheFinishedRunBeforeItIsNotCurrent() throws Exception {
+        oldRunIsNoLongerCurrent(neverStartedAfterAFinishedRun(Never.CANCEL));
+    }
+
+    @Test
+    void anExpiredQueueWait_leavesNoTicketFile_soTheFinishedRunBeforeItIsNotCurrent() throws Exception {
+        oldRunIsNoLongerCurrent(neverStartedAfterAFinishedRun(Never.EXPIRY));
+    }
+
+    @Test
+    void anAbandonedWaitingTicket_leavesNoTicketFile_soTheFinishedRunBeforeItIsNotCurrent() throws Exception {
+        oldRunIsNoLongerCurrent(neverStartedAfterAFinishedRun(Never.ABANDON));
+    }
+
+    /// What reads `.bb/ticket` between enqueue and grant: bb-result of the previous run. The enqueue replaces `.bb/build.log` and `.bb/start`, so
+    /// the previous run's log is gone; its reports are still on disk and would be counted as current if the ticket file were left.
+    @Test
+    void enqueue_clearsTheTicketFile_soThePreviousRunIsUnavailableWhileTheNextOneWaits() throws Exception {
+        var old = build("-B", "verify");
+
+        report();
+        blocked(Map.of());
+        var out = result(old.ticket());
+
+        assertThat(co.resolve(".bb/ticket")).doesNotExist();
+        assertThat(out.stdout()).as(out.stdout() + out.stderr()).contains("tests: unavailable").doesNotContain("tests: 4");
+    }
+
+    @Test
+    void aQueueZeroHandoff_removesTheTicketFile_soTheOlderQueuedRunIsNotCurrent() throws Exception {
+        var old = build("-B", "verify");
+
+        BbFixtures.executable(dir.resolve("tools/bb-build-direct"),
+                              "#!/bin/sh\ncd \"$1\" && mkdir -p .bb && echo 1700000001 > .bb/start && echo 7 > .bb/rc\n");
+        var e = new HashMap<>(env);
+
+        e.put("BB_QUEUE", "0");
+        var direct = BbFixtures.run(List.of(dir.resolve("tools/bb-build").toString(), co.toString(), "-B", "direct"), e, null, null);
+
+        assertThat(direct.rc()).as(direct.stdout() + direct.stderr()).isZero();
+        assertThat(Files.readString(co.resolve(".bb/rc")).strip()).as("the premise: the handoff ran").isEqualTo("7");
+        assertThat(co.resolve(".bb/ticket")).doesNotExist();
+        var waited = wait(old.ticket());
+
+        assertThat(waited.rc()).as(waited.stdout() + waited.stderr()).isZero();
+        assertThat(waited.stderr()).doesNotContain("RC-MISMATCH");
+        report();
+        assertThat(result(old.ticket()).stdout()).contains("tests: unavailable");
+    }
+
+    @Test
+    void bbResult_withTheLibMissing_isUnknown_namingTheLib_notALaterBuild() throws Exception {
+        var old = build("-B", "verify");
+
+        report();
+        Files.delete(dir.resolve("tools/bb-queue-lib.sh"));
+        var out = result(old.ticket());
+
+        assertThat(out.stdout()).as(out.stdout() + out.stderr()).contains("tests: unavailable").contains("bb-queue-lib.sh")
+                  .doesNotContain("a later build").doesNotContain("tests: 4");
+    }
+
+    // ---- THE GREP ROW (CTO ruling, #80, positive form after vdd81): one copy of "is this the checkout's current run?", in bb-queue-lib.sh
+    // (run_current / run_ticket). Outside the lib, every code line (comments are not code) that mentions a run-identity file, `/start` or `/ticket`
+    // as a path part or a quoted `'start'` / `'ticket'`, may do so ONLY in a form of the allowlist below: the writes bb-build makes, an rm, an
+    // existence test, and a few named uses that are not identity (display of a wall time, bb-mutate's own timing bound, XML event names, a JSON key,
+    // message text). Anything left after the allowed forms are removed is a finding, reported as file:line.
+    private static final Pattern MENTION = Pattern.compile("/(start|ticket)\\b|['\"](start|ticket)['\"]");
+    private static final List<Pattern> ANYWHERE = List.of(
+            Pattern.compile("echo \"\\$[A-Za-z]+\" > \"\\$B/(start|ticket)\""),
+            Pattern.compile("rm -f( \"\\$B/[a-z.]+\")+"),
+            Pattern.compile("\\[ (! )?-f \"\\$B/start\" \\]"));
+    private static final Map<String, List<Pattern>> PER_FILE = Map.of(
+            "bb-build", List.of(Pattern.compile("\\(\\.bb/start without \\.bb/rc\\)")),
+            "bb-temper", List.of(Pattern.compile("cat \\.bb/start 2>/dev/null"),
+                                 Pattern.compile("/ticket \\\\1/p")),
+            "bb-mutate", List.of(Pattern.compile("\\(\\.bb/start"),
+                                 Pattern.compile("\\.bb/end - \\.bb/start"),
+                                 Pattern.compile("os\\.path\\.join\\(B, \"start\"\\)")),
+            "bb-result", List.of(Pattern.compile("events=\\('start', 'end'\\)"),
+                                 Pattern.compile("ev == 'start'"),
+                                 Pattern.compile("'ticket': tid"),
+                                 Pattern.compile("the checkout's \\.bb/ticket is gone")));
+
+    static List<String> runIdentityMentions(Path dir) throws Exception {
         var found = new ArrayList<String>();
         try (var files = Files.list(dir)) {
             for (var f : files.filter(Files::isRegularFile).sorted().toList()) {
-                if (f.getFileName().toString().equals("bb-queue-lib.sh")) {
+                var name = f.getFileName().toString();
+
+                if (name.equals("bb-queue-lib.sh")) {
                     continue;
                 }
+                var allowed = new ArrayList<>(ANYWHERE);
+
+                allowed.addAll(PER_FILE.getOrDefault(name, List.of()));
                 var n = 0;
                 for (var line : Files.readAllLines(f)) {
                     n++;
                     var code = line.replaceFirst("(^|\\s)#.*$", "");
-                    if (STARTS.matcher(code).find() || TICKET_READS.matcher(code).find()) {
-                        found.add(f.getFileName() + ":" + n + ": " + line.strip());
+
+                    for (var p : allowed) {
+                        code = p.matcher(code).replaceAll(" ");
+                    }
+                    if (MENTION.matcher(code).find()) {
+                        found.add(name + ":" + n + ": " + line.strip());
                     }
                 }
             }
@@ -294,27 +463,64 @@ class BbSameSecondIT {
     }
 
     @Test
-    void noScriptOutsideTheLib_comparesRunIdentityInline() throws Exception {
-        assertThat(inlineIdentityCompares(BbFixtures.OPS_BB)).isEmpty();
+    void noScriptOutsideTheLib_mentionsTheRunIdentityFilesExceptInAnAllowedForm() throws Exception {
+        assertThat(runIdentityMentions(BbFixtures.OPS_BB)).isEmpty();
     }
 
-    @Test
-    void theGrepRow_goesRedForOneInlineCompareReAddedInOneCaller(@TempDir Path copy) throws Exception {
+    private Path scriptsCopy(Path copy) throws Exception {
         try (var files = Files.list(BbFixtures.OPS_BB)) {
             for (var f : files.filter(Files::isRegularFile).toList()) {
                 Files.copy(f, copy.resolve(f.getFileName()));
             }
         }
-        for (var mutant : List.of(
-                "[ \"$(cat \"$co/.bb/start\")\" = \"$(field \"$T\" started)\" ]",
-                "[ \"$(cat \"$co/.bb/ticket\" 2>/dev/null)\" = \"$ID\" ]")) {
-            var wait = copy.resolve("bb-wait");
-            var original = Files.readString(wait);
+        return copy;
+    }
 
-            Files.writeString(wait, original + "\nif " + mutant + "; then :; fi\n");
+    private static final List<String[]> MUTANTS = List.of(
+            new String[] {"bb-wait", "[ \"$(cat \"$co/.bb/start\")\" = \"$(field \"$T\" started)\" ]"},
+            new String[] {"bb-wait", "[ \"$(cat \"$co/.bb/ticket\" 2>/dev/null)\" = \"$ID\" ]"},
+            new String[] {"bb-wait", "S=$(cat \"$co/.bb/start\")"},
+            new String[] {"bb-wait", "S=$(cat \"$co/.bb/start\" 2>/dev/null); [ \"$S\" = \"$sv\" ]"},
+            new String[] {"bb-wait", "read -r S < \"$co/.bb/ticket\""},
+            new String[] {"bb-wait", "head -1 \"$co/.bb/ticket\""},
+            new String[] {"bb-wait", "sed -n 1p \"$co/.bb/ticket\""},
+            new String[] {"bb-wait", "grep -qx \"$ID\" \"$co/.bb/ticket\""},
+            new String[] {"bb-build", "TK=$(head -1 \"$B/ticket\")"},
+            new String[] {"bb-queue", "[ \"$(cat \"$B/start\")\" = x ]"},
+            new String[] {"bb-result", "    with open(os.path.join(co, '.bb', 'start')) as f: s = f.read()"},
+            new String[] {"bb-result", "    with open(os.path.join(co, '.bb', 'ticket')) as f: t = f.read()"},
+            new String[] {"bb-result", "    s = open(co + '/.bb/start').read()"});
 
-            assertThat(inlineIdentityCompares(copy)).as(mutant).anyMatch(l -> l.startsWith("bb-wait:"));
-            Files.writeString(wait, original);
+    @Test
+    void theGrepRow_flagsEachKnownFormOfAnInlineCompare_inTheCallerItWasAddedTo(@TempDir Path root) throws Exception {
+        var copy = scriptsCopy(Files.createDirectory(root.resolve("c")));
+
+        assertThat(runIdentityMentions(copy)).as("the copy starts clean").isEmpty();
+        for (var mutant : MUTANTS) {
+            var file = copy.resolve(mutant[0]);
+            var original = Files.readString(file);
+
+            Files.writeString(file, original + "\n" + mutant[1] + "\n");
+            assertThat(runIdentityMentions(copy)).as(mutant[1]).anyMatch(l -> l.startsWith(mutant[0] + ":"));
+            Files.writeString(file, original);
+        }
+    }
+
+    /// The copies main had before #80 (the `*.pre80.prev` fixtures) must each be flagged: the row catches every original inline compare.
+    @Test
+    void theGrepRow_flagsEveryPre80Copy(@TempDir Path root) throws Exception {
+        var copy = scriptsCopy(Files.createDirectory(root.resolve("c")));
+
+        for (var name : List.of("bb-build", "bb-queue", "bb-wait", "bb-result")) {
+            var file = copy.resolve(name);
+            var current = Files.readString(file);
+
+            try (var in = BbSameSecondIT.class.getResourceAsStream("/bb/" + name + ".pre80.prev")) {
+                assertThat(in).as("test resource bb/" + name + ".pre80.prev").isNotNull();
+                Files.write(file, in.readAllBytes());
+            }
+            assertThat(runIdentityMentions(copy)).as(name + ".pre80.prev").anyMatch(l -> l.startsWith(name + ":"));
+            Files.writeString(file, current);
         }
     }
 }

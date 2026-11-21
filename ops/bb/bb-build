@@ -10,7 +10,7 @@
 # -Dit.test on forge-tests (failsafe ignores -Dtest). BB_DEDUP=0
 # skips dedup. DEDUP IDENTITY (#80, 2026-11-21): a finished identical build is still the checkout's result only while .bb/ticket names ITS ticket (not while
 # .bb/start equals its started=: two runs granted in one second shared a start, and dedup answered with the newer run's result). A checkout with no
-# .bb/ticket (run before this change) is not current: no dedup, the safe direction. BB_QUEUE=0 runs the pre-queue script (bb-build-direct) unchanged -- it also bypasses the port group.
+# .bb/ticket (run before this change) is not current: no dedup, the safe direction. BB_QUEUE=0 runs the pre-queue script (bb-build-direct) -- it also bypasses the port group -- after removing .bb/ticket (that run writes .bb/start only, so an older ticket must not stay current).
 # PORT GROUP (2026-09-29): a run that will execute tests of a fixed-port module (~/work/port-group-modules; decided by
 # bb-portgroup.py from the checkout's own poms and the args) is granted only while no other port-group run is running.
 # BB_PORT_GROUP=1 forces membership, BB_PORT_GROUP=0 forces exclusion.
@@ -81,7 +81,12 @@ if [ "${1:-}" = --detached ]; then
   [[ $3 =~ ^[A-Za-z0-9._:-]{1,64}$ ]] || { echo "refusing: --reader label must match ^[A-Za-z0-9._:-]{1,64}\$" >&2; exit 2; }
   DETACHED_READER=$3; shift 3
 fi
-if [ "${1:-}" != __run ] && [ "${BB_QUEUE:-1}" = 0 ]; then exec "$(dirname "$SELF")/bb-build-direct" "$@"; fi
+if [ "${1:-}" != __run ] && [ "${BB_QUEUE:-1}" = 0 ]; then
+  # the legacy run rewrites .bb/start but never .bb/ticket: drop the ticket first, so an older queued run stops being "current" (#80; none = unknown, the safe direction)
+  B=${1:-}; [ "$B" != --since ] || B=${3:-}; B=${B%/}/.bb
+  [ ! -d "$B" ] || rm -f "$B/ticket"
+  exec "$(dirname "$SELF")/bb-build-direct" "$@"
+fi
 . "$(dirname "$SELF")/bb-queue-lib.sh"
 MVN=${BB_LAUNCH:-${BB_TEST_MVN:-$HOME/tools/maven/bin/mvn}}   # BB_LAUNCH: bb-test enqueues a ticket whose job is its own __launch mode, not maven
 

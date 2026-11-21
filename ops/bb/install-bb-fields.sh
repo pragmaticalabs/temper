@@ -68,14 +68,14 @@ readonly BB_BUILD_PRESINCE=24183c7d359b4030faeef894bbe4ba52   # the #67 version,
 readonly BB_BUILD_PREFIELDS=399f2414202fb5b9676960ff5b1ffece   # the #63 version: a full session triple overwrote since=/modules= (issue #75); no bb-cp-record hook, no BB_LAUNCH, no launch ledger
 readonly BB_BUILD_PRESESSION=2810f93c875ad9a106c2cda284babb81   # the #79 version: session fields fixed with +=, no bb-cp-record hook, no BB_LAUNCH, no launch ledger (bb-test lane)
 readonly BB_BUILD_PRE80=dafd74a3ea2fec81b1a3d39067422f6a   # the #70 version: dedup identifies a run by its start second (issue #80)
-readonly BB_BUILD_NEW=847c25c83146bb080cc66ab263ace239
+readonly BB_BUILD_NEW=2f349b869a02dcfec552ab0b8b1f972c
 # bb-jbct-bootstrap: absent on every host before its first install; bb-build calls it, so it is installed first.
 readonly BB_JBCTBOOT_NEW=3e5396ecee48b99949456cf805df1e60
 # bb-result: absent on every host before its first install. No trailing comment on a pin line: bb-drift reads it by pattern.
 readonly BB_RESULT_PRECP=2b99dd5c414175c4fd40a9836da76298   # the #67 version, live on every host from 2026-11-20: no refused verdict line
 # the #70 bb-result: it identifies the checkout's run by .bb/start (issue #80)
 readonly BB_RESULT_PRE80=f4505867d09a1b3946280944678757ba
-readonly BB_RESULT_NEW=412a40d762122de1856162c70e32ff41
+readonly BB_RESULT_NEW=72f89894ab1a7ddb3cf9b78a4bd2d4b8
 readonly BB_TICKETS_OLD=472cd816644fe0ee0902b8da3d33de8e   # before the per-ticket progressAt (issue #10)
 readonly BB_TICKETS_PRE31=e1aeba98541ba781295001f956b08c8d   # live since 2026-11-12: drops a ticket key with a capital letter
 readonly BB_TICKETS_PREOFFQ=6174119f0cd567c5dc462d1e063c6214   # the #31 version: no `offq` in the trailer (2026-11-20)

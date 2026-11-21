@@ -29,7 +29,7 @@
 #   the checkout, 20 s. Counts are the sum of the testsuite attributes tests/failures/errors/skipped per file; an unparseable file is
 #   counted in `bad report files` and never stops the summary.
 # RUN IDENTITY: "is this the checkout's run" is run_current in bb-queue-lib.sh, the same copy bb-build, bb-queue and bb-wait use; this script asks it through bash
-#   (the lib must sit next to this file, as the installer puts them). current counts; not-current and unknown (no .bb/ticket) are `unavailable`.
+#   (the lib must sit next to this file, as the installer puts them). current counts; not-current and unknown (no .bb/ticket) are `unavailable`, and so is a lib that cannot be asked (missing, unreadable, failing to source), with a reason that names the lib.
 # GUARANTEE and LIMITS: the counts come only from this build's reports, or the line says why not. When the checkout's .bb/ticket no longer
 #   names this ticket (#80: not .bb/start, which two runs granted in one second share) a later build owns the checkout and overwrote the reports and the log: counts and first error are then
 #   `unavailable`, never another build's numbers. Not guaranteed: a report written by a forked JVM after the waiter recorded `ended` is
@@ -95,15 +95,16 @@ def read_ticket(path):
 
 
 def run_current(co, tid):
-    """'current' / 'not-current' / 'unknown': the ONE answer is run_current in bb-queue-lib.sh (#80), asked through bash (no python twin).
-    Anything but return code 0 or 1 (no .bb/ticket, or the lib cannot be asked) is 'unknown'."""
+    """'current' / 'not-current' / 'unknown' / 'lib': the ONE answer is run_current in bb-queue-lib.sh (#80), asked through bash (no python twin).
+    Return code 0 is current, 1 not-current, 2 unknown (the ticket file is absent); anything else, or the lib missing, unreadable, failing
+    to source or lacking the function, or bash missing or timing out, is 'lib': the lib cannot be asked, which says nothing about the run."""
     lib = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'bb-queue-lib.sh')
     try:
-        r = subprocess.run(['bash', '-c', 'LIB_READONLY=1; . "$1" && run_current "$2" "$3"', 'bb-result', lib, co, tid],
+        r = subprocess.run(['bash', '-c', 'LIB_READONLY=1; . "$1" || exit 99; run_current "$2" "$3"', 'bb-result', lib, co, tid],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
     except (OSError, subprocess.SubprocessError):
-        return 'unknown'
-    return {0: 'current', 1: 'not-current'}.get(r.returncode, 'unknown')
+        return 'lib'
+    return {0: 'current', 1: 'not-current', 2: 'unknown'}.get(r.returncode, 'lib')
 
 
 def is_num(s):
@@ -263,6 +264,7 @@ def main(argv):
     tests = {'status': 'none', 'reason': 'no report written by this build'}
     reports, dirs, failing, bad = [], [], [], 0
     owned = True
+    log_why = ''
     if refused:
         tests = {'status': 'refused', 'reason': 'not a verdict: ' + refused}
     elif not os.path.isabs(co) or not is_num(started):
@@ -271,9 +273,11 @@ def main(argv):
         cur = run_current(co, tid)
         if cur != 'current':
             owned = False
-            reason = ('a later build in this checkout replaced the reports' if cur == 'not-current'
-                      else "the checkout's .bb/ticket is gone")   # unknown: the counts of an unidentifiable run are worse than none
+            reason = {'not-current': 'a later build in this checkout replaced the reports',
+                      'lib': 'bb-queue-lib.sh next to bb-result cannot be used, so the run cannot be identified'}.get(
+                cur, "the checkout's .bb/ticket is gone")   # unknown: the counts of an unidentifiable run are worse than none
             tests = {'status': 'unavailable', 'reason': reason}
+            log_why = 'a later build in this checkout replaced the log' if cur == 'not-current' else reason
         else:
             paths, dirs, incomplete = find_reports(co, int(started))
             tot = {'tests': 0, 'failures': 0, 'errors': 0, 'skipped': 0}
@@ -295,7 +299,7 @@ def main(argv):
 
     err, err_why = None, None
     if (rc or '') not in ('', '0') and not failing and not refused:
-        err, err_why = ((None, 'unavailable: a later build in this checkout replaced the log') if not owned
+        err, err_why = ((None, 'unavailable: ' + log_why) if not owned
                         else first_error(log))
 
     if as_json:
