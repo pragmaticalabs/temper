@@ -512,7 +512,7 @@ class BbTestLaunchIT {
 
     /// vbt8 L1: the stale-jar check (`bb-cp-record check`) is bounded by BB_CP_READ_TIMEOUT at BOTH calls: at enqueue (rc 15 on stderr,
     /// nothing queued) and at launch (a refused ticket). The stand-in is the real (python) bb-cp-record with a prefix that hangs a `check`, ignoring TERM,
-    /// from the HANG_CHECK_AFTER-th call on. Probe: drop the `timeout -k 10 "$READ_T"` wrap at the enqueue call (resp. the bounded() wrap at
+    /// from the HANG_CHECK_AFTER-th call on. Probe: drop the bounded() wrap at the enqueue call (resp. at
     /// the launch call) -> red: the stand-in sleeps 600 s, the row's 120 s thread timeout fails it.
     private void hangingCheck(Path pid) throws Exception {
         var real = tools.resolve("bb-cp-record");
@@ -643,6 +643,28 @@ class BbTestLaunchIT {
         assertThat(run.rc()).as(run.stdout() + run.stderr()).isEqualTo(15);
         assertThat(run.stderr()).contains("REFUSED (rc 15): timeout: the port-group classifier did not finish within BB_CP_READ_TIMEOUT=3s");
         assertThat(run.stdout()).doesNotContain("queued ticket=");
+    }
+
+    /// vbt9 READ INVARIANT: the refusal's own .bb/refused write is bounded too (10 s fixed). A FIFO planted as .bb/refused (an open that
+    /// blocks forever) must not hang a refusal: the ticket's refused= (written first) and rc 15 land, the FIFO is left unwritten.
+    /// Probe: replace that bounded write by the bare printf redirect -> red: the refusal blocks on the FIFO, the 120 s thread timeout fails it.
+    @Test
+    @Timeout(value = 120, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
+    void aRefusedFileThatBlocksOnWrite_doesNotHangTheRefusal() throws Exception {
+        var log = dir.resolve("ticket-log.tsv").toString();
+
+        assertThat(build(Map.of("BB_TEST_TICKET_LOG", log)).rc()).as(log()).isZero();
+        passingCheck();
+        mkfifo(co.resolve(".bb/cp/fx.cp"));
+        mkfifo(co.resolve(".bb/refused"));
+        var started = System.nanoTime();
+        var run = bbTest(Map.of("BB_TEST_TICKET_LOG", log, "CHECK_OK", "1", "BB_CP_READ_TIMEOUT", "3"), "fx.CalcTest#passes");
+
+        assertThat((System.nanoTime() - started) / 1_000_000_000L).as("cut at the read bound + the write bound, not blocked forever").isLessThan(60);
+        assertThat(run.rc()).as(run.doneText()).isEqualTo(15);
+        assertThat(Files.readString(co.resolve(".bb/rc")).strip()).isEqualTo("15");
+        assertThat(run.doneText()).contains("\nrefused=timeout: the classpath record read did not finish within BB_CP_READ_TIMEOUT=3s", "\nverdict_source=guard\n");
+        assertThat(Files.isRegularFile(co.resolve(".bb/refused"))).as("the planted FIFO was never opened for the write").isFalse();
     }
 
     /// A bound that is not a positive integer is refused at enqueue (rc 2), never read as "no bound" (timeout 0 would disable it).

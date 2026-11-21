@@ -665,4 +665,46 @@ class BbTestGuardIT {
                         .noneMatch(a -> a.contains("log"))
                         .doesNotContain("-l", "--log-file");
     }
+
+    /// vbt9 READ INVARIANT (CTO ruling): every command in ops/bb/bb-test that opens checkout-controlled content runs through bounded().
+    /// Static, on the script's own source (the authority): BbTestReadAudit applies the header's definition and prints every command it
+    /// classified. The roots are pinned here, so narrowing the definition in the header turns this red too.
+    /// Controls in-row (the instrument can fail): a bare `cat "$CO/.bb/x"` added, the classpath record read unwrapped, bounded() made to
+    /// run its command without the timeout, and the roots line removed, each red. Branch probes: the same added read and unwrap, committed.
+    @Test
+    void everyCheckoutRead_isBounded() throws Exception {
+        var source = Files.readString(BbFixtures.OPS_BB.resolve("bb-test"));
+        var audit = BbTestReadAudit.audit(source);
+
+        audit.calls().forEach(c -> System.out.println("bb-test read audit: " + c));
+        System.out.println("bb-test read audit: checkout variables " + audit.checkoutVars());
+        assertThat(audit.roots()).as("the header's checkout-roots line").containsExactly("CO", "MOD");
+        assertThat(audit.problems()).as("commands opening checkout content outside bounded()").isEmpty();
+        assertThat(audit.checkoutVars()).contains("D", "BASE", "CP", "RD", "OUT");
+        assertThat(audit.calls().stream().filter(c -> c.verdict().equals("BOUNDED")).map(BbTestReadAudit.Call::text))
+                  .as("the bounded reads the invariant names")
+                  .anyMatch(t -> t.contains("\"$HERE/bb-cp-record\" check") && t.contains(" - "))
+                  .anyMatch(t -> t.contains("\"$HERE/bb-cp-record\" check") && t.contains("\"$RD\""))
+                  .anyMatch(t -> t.contains(" cat \"$CO/.bb/cp/"))
+                  .anyMatch(t -> t.contains("$ENTRY_PY"))
+                  .anyMatch(t -> t.contains("\"$JAVA\""))
+                  .anyMatch(t -> t.contains("bb-testcount"))
+                  .anyMatch(t -> t.contains("$JUNIT_PY"))
+                  .anyMatch(t -> t.contains("bb-portgroup.py"))
+                  .anyMatch(t -> t.contains(".bb/refused"));
+
+        var launcher = "  guard launcher_ok\n";
+        var unwrapFrom = "bounded \"$READ_T\" \"$CO\" \"$RD\" cat \"$CO/.bb/cp/${MOD//\\//__}.cp\"";
+        var body = "then (cd \"$d\" && exec timeout -k 10 \"$s\" \"$@\")";
+
+        assertThat(source).contains(launcher, unwrapFrom, body, "\n# checkout-roots: CO MOD\n");
+        assertThat(BbTestReadAudit.audit(source.replace(launcher, launcher + "  cat \"$CO/.bb/x\"\n")).problems())
+                  .as("control: a bare read added").hasSize(1).allMatch(p -> p.contains("VIOLATION") && p.contains("cat \"$CO/.bb/x\""));
+        assertThat(BbTestReadAudit.audit(source.replace(unwrapFrom, "cat \"$CO/.bb/cp/${MOD//\\//__}.cp\" > \"$RD\"")).problems())
+                  .as("control: the record read unwrapped").hasSize(1).allMatch(p -> p.contains("VIOLATION") && p.contains("cat \"$CO/.bb/cp/"));
+        assertThat(BbTestReadAudit.audit(source.replace(body, "then (cd \"$d\" && exec \"$@\")")).problems())
+                  .as("control: bounded() without its timeout").hasSize(1).allMatch(p -> p.contains("bounded() runs its command"));
+        assertThat(BbTestReadAudit.audit(source.replace("\n# checkout-roots: CO MOD\n", "\n")).problems())
+                  .as("control: no definition line").hasSize(1).allMatch(p -> p.contains("checkout-roots"));
+    }
 }

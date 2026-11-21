@@ -28,6 +28,17 @@
 # entry check and the resolved junit read by BB_CP_READ_TIMEOUT seconds (default 300, as BB_CP_RECORD_TIMEOUT). On expiry `timeout`
 # TERMs, and 10 s later KILLs, the process group it leads (java and every child that stayed in it). Both must be positive integers (rc 2).
 # Limit: a pgid kill reaches only what stayed in the group; a `setsid` grandchild that left it survives the kill. The stale-jar check (both calls) is bounded by BB_CP_READ_TIMEOUT too.
+# READ INVARIANT (vbt9, CTO ruling): CHECKOUT-CONTROLLED CONTENT is any file or program input named by a word of a command in this
+# script that expands a checkout variable: the roots below, and every variable assigned (transitively) from a word that expands one
+# (D, BASE, CP, RD, OUT, ...): the checkout's .bb/ records, its target/ trees, the classpath built from them. EVERY command here that
+# opens such content (reads it, runs a program on it, or writes it, a redirect included) runs through bounded() (timeout on the process
+# group, BOUNDS). Named exemptions, each with its reason in the selftest: commands that open no file content ([ ], [[ ]], echo/printf
+# without a redirect, mkdir, mktemp, rm, mv, cd, refuse, exit, return, local), OWN-TEMP (RD and OUT: assigned only from
+# `mktemp "$CO/.bb/..."` or empty, read only after the bounded call that wrote them exited), ENQUEUE (exec bb-build: the queue, which
+# bounds this script's own __launch mode). Anything else fails BbTestGuardIT#everyCheckoutRead_isBounded, which parses this file
+# (comments and heredoc bodies skipped) and prints every command it classified. A .bb/refused write that expires is skipped (10 s
+# fixed bound: BB_CP_READ_TIMEOUT may be the bad value being refused); the ticket's refused= still lands, written first.
+# checkout-roots: CO MOD
 # A REFUSAL REPLACES THE VERDICT: rc 15 (the ticket's rc=, so .bb/rc), the ticket gets refused=<reason naming the resolved versions> and
 # verdict_source=guard (never verdict_source=java), .bb/refused holds the same reason, the ticket log's state column reads refused, bb-result
 # prints it; the run's console output and per-run count lines are not printed, and its report dir is renamed <ticket>.refused.
@@ -54,6 +65,13 @@ launcher_ok() {
 }
 
 JAVA_T=${BB_JAVA_TIMEOUT-10800}; READ_T=${BB_CP_READ_TIMEOUT-300}   # set but empty: refused, never the default
+TIMED_OUT=
+bounded() {  # <secs> <dir> <out|-> <cmd>...: cmd run in <dir> under `timeout` (BOUNDS), output appended to <out> (-: this script's own stdout/stderr); TIMED_OUT=<secs> on expiry
+  local s=$1 d=$2 o=$3 t0=$SECONDS r=0; shift 3
+  if [ "$o" = - ]; then (cd "$d" && exec timeout -k 10 "$s" "$@") || r=$?; else (cd "$d" && exec timeout -k 10 "$s" "$@") >> "$o" 2>&1 || r=$?; fi
+  TIMED_OUT=; case "$r" in 124|137) [ $((SECONDS - t0)) -lt "$s" ] || TIMED_OUT=$s;; esac   # a fast own exit 124/137 is java's, not ours
+  return "$r"
+}
 bounds_ok() { [[ $JAVA_T =~ ^[1-9][0-9]*$ && $READ_T =~ ^[1-9][0-9]*$ ]]; }
 BOUNDS_BAD="BB_JAVA_TIMEOUT ($JAVA_T) and BB_CP_READ_TIMEOUT ($READ_T) must be positive integers (seconds)"
 
@@ -139,18 +157,11 @@ if [ "${1:-}" = __launch ]; then
     local why=${1//[$'\n\r']/ }
     [ -z "${RD:-}" ] || rm -f "$RD"
     ( flock 9; [ ! -f "$Q/running/$TICKET" ] || printf 'refused=%s\nverdict_source=guard\n' "$why" >> "$Q/running/$TICKET" ) 9> "$Q/.lock"
-    printf '%s\n' "$why" > "$CO/.bb/refused"
+    bounded 10 "$CO" /dev/null sh -c 'printf "%s\n" "$1" > .bb/refused' sh "$why" || true   # READ INVARIANT: a FIFO planted as .bb/refused must not hang a refusal
     if [ -z "$OUT" ]; then echo "bb-test: REFUSED (rc 15): $why; java was not run"; exit 15; fi
     rm -rf "$BASE.refused"; mv "$BASE" "$BASE.refused"; mv "$OUT" "$BASE.refused/console.txt"
     echo "bb-test: REFUSED (rc 15): $why; this run's test outcome is not a verdict (kept in $BASE.refused)"
     exit 15
-  }
-  TIMED_OUT=
-  bounded() {  # <secs> <dir> <out> <cmd>...: cmd run in <dir>, output appended to <out>, under `timeout` (BOUNDS); TIMED_OUT=<secs> on expiry
-    local s=$1 d=$2 o=$3 t0=$SECONDS r=0; shift 3
-    (cd "$d" && exec timeout -k 10 "$s" "$@") >> "$o" 2>&1 || r=$?
-    TIMED_OUT=; case "$r" in 124|137) [ $((SECONDS - t0)) -lt "$s" ] || TIMED_OUT=$s;; esac   # a fast own exit 124/137 is java's, not ours
-    return "$r"
   }
   JVM=(); SELS=()
   for a in "$@"; do
@@ -229,18 +240,19 @@ while [ $# -gt 0 ]; do
 done
 [ ${#SELS[@]} -gt 0 ] || { echo "usage: bb-test <checkout> <module> <Class[#method]>... [--repeat N]" >&2; exit 2; }
 bounds_ok || { echo "bb-test: $BOUNDS_BAD" >&2; exit 2; }
-r=0; t0=$SECONDS
-timeout -k 10 "$READ_T" "$HERE/bb-cp-record" check "$CO" "$MOD" || r=$?   # bounded like every read (BOUNDS); an expiry refuses, never passes
-case "$r" in 124|137) [ $((SECONDS - t0)) -lt "$READ_T" ] || { echo "bb-test: REFUSED (rc 15): timeout: the stale-jar check did not finish within BB_CP_READ_TIMEOUT=${READ_T}s; its process group was killed; nothing queued" >&2; exit 15; };; esac
+r=0
+bounded "$READ_T" "$CO" - "$HERE/bb-cp-record" check "$CO" "$MOD" || r=$?   # bounded like every read (BOUNDS); an expiry refuses, never passes
+[ -z "$TIMED_OUT" ] || { echo "bb-test: REFUSED (rc 15): timeout: the stale-jar check did not finish within BB_CP_READ_TIMEOUT=${READ_T}s; its process group was killed; nothing queued" >&2; exit 15; }
 [ "$r" = 0 ] || exit "$r"
 launcher_ok || exit $?
 . "$HERE/bb-queue-lib.sh"
 GROUP=${BB_PORT_GROUP:-}
 if [ -z "$GROUP" ]; then
-  r=0; t0=$SECONDS   # bounded like every read (BOUNDS): an expiry refuses at enqueue, never falls back to a group
-  GROUP=$(timeout -k 10 "$READ_T" python3 "$HERE/bb-portgroup.py" "$PGM" "$CO" -pl "$MOD" test 2> /dev/null) || r=$?
-  case "$r" in 124|137) [ $((SECONDS - t0)) -lt "$READ_T" ] || { echo "bb-test: REFUSED (rc 15): timeout: the port-group classifier did not finish within BB_CP_READ_TIMEOUT=${READ_T}s; its process group was killed; nothing queued" >&2; exit 15; };; esac
-  [ "$r" = 0 ] || GROUP="1 classifier failed"
+  PG=$(mktemp); r=0   # bounded like every read (BOUNDS): an expiry refuses at enqueue, never falls back to a group
+  bounded "$READ_T" "$CO" "$PG" python3 "$HERE/bb-portgroup.py" "$PGM" "$CO" -pl "$MOD" test || r=$?
+  GROUP=$(sed -n '/^[01]\( \|$\)/{p;q}' "$PG"); rm -f "$PG"   # the classifier's own line, never a traceback line
+  [ -z "$TIMED_OUT" ] || { echo "bb-test: REFUSED (rc 15): timeout: the port-group classifier did not finish within BB_CP_READ_TIMEOUT=${READ_T}s; its process group was killed; nothing queued" >&2; exit 15; }
+  [ "$r" = 0 ] && [ -n "$GROUP" ] || GROUP="1 classifier failed"
   GROUP=${GROUP%% *}; case "$GROUP" in 0|1) ;; *) GROUP=1;; esac
 fi
 BB_LAUNCH=$SELF BB_NO_CP_RECORD=1 BB_DEDUP=0 BB_PORT_GROUP=$GROUP exec "$HERE/bb-build" "$CO" __launch "$MOD" "$REPEAT" "${SELS[@]}"
