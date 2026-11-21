@@ -1,0 +1,18 @@
+# bb/live-md5s.since after the owner installs #79 (main a37cd01f1: session fields with +=): bb-build is BB_BUILD_PRESESSION; every other line as in live-md5s.since.
+# file as live on cloudbb-5 on 2026-11-21. <file> <md5|absent>; one line per install-bb-fields.sh FILES entry.
+bb-cp-record absent
+bb-test absent
+bb-testcount absent
+bb-mutate 130f094861c0f835869ff42230d7bffb
+bb-tickets 8d34d9dc9ab2a4f867af863ec21be77e
+bb-hold 3561bb8e22fc2f7f3e98dc795f31eecb
+bb-wait d5b0ff8d43994a78cd188b4a41fcd995
+bb-await 56523085fccf5678eb7c208e7352c11b
+bb-netns-run bf05b7c51c2f7863ee685a195273e195
+bb-portgroup.py 8ad1c6dbe2044f984814c2b19645c48b
+bb-modules.py 9c668381f2a161c24a9b5d55cccc4945
+bb-jbct-bootstrap 3e5396ecee48b99949456cf805df1e60
+bb-result 2b99dd5c414175c4fd40a9836da76298
+bb-queue-lib.sh 2569b8af2cf8acc063024e553be66a93
+bb-queue 9cb677b671867eecdf90c9514bbd0732
+bb-build 2810f93c875ad9a106c2cda284babb81

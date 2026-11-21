@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# bb-await --ticket <id> | --file <path> | --gone <pid> [--deadline <dur>]  (2026-11-14, issue #48)
+# DRIVER: on 2026-11-13 the four bb hosts held 88 orphaned agent poll loops (ppid 1, up to 4.6 days old). Two causes: `pgrep -f "<pattern>"`
+# loops that match their own `bash -c` command line and therefore never end, and waits (a .bb/rc that never appears, a DONE marker of a
+# stopped lane) with no deadline. This tool is the one wait a lane may use instead of a hand-written loop: it takes an id, a path or a
+# numeric pid, NEVER a pattern, and always has a deadline.
+#   --ticket <id>   (<digits>-<digits>, the ticket= value bb-build printed) wait until the ticket is in the queue's done/ directory
+#                   (checked like bb-wait: every check runs reap() under the queue lock, so a ticket whose waiter died is finalized
+#                   instead of waited on forever), print bb-wait's line `ticket=<id> state=<state> rc=<rc> wall=.. wait=.. run=.. log=..`
+#                   and exit with the ticket's rc: the maven exit status when state=finished. Other states: 9 cancelled/abandoned,
+#                   5 expired, 70 orphaned or finished without a numeric rc, 4 the ticket is in none of waiting/running/done.
+#                   A maven rc equal to one of those codes is told apart by the printed state=. The checkout's .bb/rc is not read
+#                   (the ticket record is the verdict); bb-wait remains the tool that reports RC-MISMATCH (71).
+#   --file <path>   wait until the path exists (any file type); prints `awaited file=<path> present`, exit 0.
+#   --gone <pid>    wait until process <pid> is gone (a numeric pid >= 1 only; `kill -0` fails and `ps -p` finds nothing, so a
+#                   process of another user still counts as alive); prints `awaited pid=<pid> gone`, exit 0. A zombie counts as alive.
+#   --deadline <d>  <digits><s|m|h>, at most 9 digits, default 6h. When it has passed: `bb-await: deadline <d> passed waiting for <what>` on
+#                   stderr, exit 124. Precision: the clock is $EPOCHREALTIME (microseconds, bash >= 5; whole seconds of $SECONDS on an older bash),
+#                   so 124 never comes before the deadline and comes after it by one poll's overhead; the last sleep is cut to the time left.
+#                   A --ticket wait for the queue lock is bounded by the deadline too (flock -w).
+# Poll interval: BB_AWAIT_INTERVAL seconds, default 5 (a positive number, fractions allowed; zero, negative or malformed -> 5; tests set it low).
+# Signals: TERM, INT and HUP kill the sleep in progress and exit 128+signal (143, 130, 129), so no sleep is left behind with ppid 1.
+# Exit: see above; 2 usage (unknown flag, none or several of --ticket/--file/--gone, missing or malformed value, a pid that is not
+# plain digits, a pattern); 124 deadline; 128+sig killed.
+set -uo pipefail
+usage() { echo "usage: bb-await --ticket <id> | --file <path> | --gone <pid> [--deadline <digits><s|m|h>]   (never a pattern)" >&2; exit 2; }
+
+MODE=; ARG=; DL=6h; DLSET=0
+while [ $# -gt 0 ]; do
+  case $1 in
+    --ticket|--file|--gone) [ -z "$MODE" ] && [ $# -ge 2 ] || usage; MODE=${1#--}; ARG=$2; shift 2;;
+    --deadline) [ "$DLSET" = 0 ] && [ $# -ge 2 ] || usage; DL=$2; DLSET=1; shift 2;;
+    *) usage;;
+  esac
+done
+[ -n "$MODE" ] && [ -n "$ARG" ] || usage
+[[ $DL =~ ^[0-9]+[smh]$ ]] || usage
+n=${DL%[smh]}; case $DL in *s) mult=1;; *m) mult=60;; *h) mult=3600;; esac
+# 10# keeps a leading zero from being read as octal; 9 digits at most keeps the arithmetic far from overflow
+[ ${#n} -le 9 ] || usage
+LIMIT=$((10#$n * mult))
+case $MODE in
+  ticket) [[ $ARG =~ ^[0-9]+-[0-9]+$ ]] || usage; WHAT="ticket $ARG";;
+  gone)   [[ $ARG =~ ^[1-9][0-9]{0,9}$ ]] || usage; WHAT="pid $ARG to exit";;
+  file)   WHAT="file $ARG";;
+esac
+IV=${BB_AWAIT_INTERVAL:-5}; [[ $IV =~ ^[0-9]+(\.[0-9]*)?$ ]] || IV=5
+# microseconds: whole part and up to 6 fraction digits; non-positive -> 5 s (a zero interval would busy-loop)
+ip=${IV%%.*}; fp=; case $IV in *.*) fp=${IV#*.};; esac; fp=${fp}000000
+IV_US=$((10#$ip * 1000000 + 10#${fp:0:6})); [ "$IV_US" -gt 0 ] || IV_US=5000000
+now_us() { if [ -n "${EPOCHREALTIME:-}" ]; then NOW=${EPOCHREALTIME//[.,]/}; else NOW=$((SECONDS * 1000000)); fi; }
+secs() { printf '%d.%06d' $(($1 / 1000000)) $(($1 % 1000000)); }
+# rem_us: REM = microseconds left to the deadline
+rem_us() { now_us; REM=$((LIMIT * 1000000 - (NOW - START))); }
+deadline_hit() { echo "bb-await: deadline $DL passed waiting for $WHAT" >&2; exit 124; }
+SP=
+on_sig() { [ -z "$SP" ] || kill "$SP" 2>/dev/null; exit $((128 + $1)); }
+trap 'on_sig 15' TERM; trap 'on_sig 2' INT; trap 'on_sig 1' HUP
+now_us; START=$NOW
+
+if [ "$MODE" = ticket ]; then
+  SELF=$(readlink -f "$0")
+  . "$(dirname "$SELF")/bb-queue-lib.sh"
+  exec 8> "$Q/.lock"
+fi
+
+# check: return 0 when the awaited thing has happened (exits the script itself for a ticket, whose answer is an rc)
+check() {
+  case $MODE in
+    file) [ -e "$ARG" ] && { echo "awaited file=$ARG present"; exit 0; };;
+    gone) kill -0 "$ARG" 2>/dev/null || ps -p "$ARG" > /dev/null 2>&1 || { echo "awaited pid=$ARG gone"; exit 0; };;
+    ticket) ticket_check;;
+  esac
+}
+ticket_check() {
+  local where=none d f st rc cr s e wall wt rn log
+  rem_us; [ "$REM" -gt 1000 ] || REM=1000
+  flock -w "$(secs "$REM")" 8 || deadline_hit
+  reap; for d in done waiting running; do [ -f "$Q/$d/$ARG" ] && { where=$d; break; }; done; flock -u 8
+  [ "$where" != none ] || { echo "bb-await: unknown ticket $ARG (not in $Q/{waiting,running,done})" >&2; exit 4; }
+  [ "$where" = done ] || return 0
+  f=$Q/done/$ARG
+  st=$(field "$f" state); rc=$(field "$f" rc); cr=$(created_s "$f"); s=$(field "$f" started); e=$(field "$f" ended)
+  num() { case "$1" in ''|*[!0-9]*) return 1;; esac; }
+  wall=-; wt=-; rn=-
+  num "$e" && [ "$cr" != 0 ] && wall=$((e - cr))
+  num "$s" && [ "$cr" != 0 ] && wt=$((s - cr))
+  num "$s" && num "$e" && rn=$((e - s))
+  log=$(field "$f" output); [ -n "$log" ] || log=$(field "$f" co)/.bb/build.log
+  echo "ticket=$ARG state=${st:-?} rc=${rc:--} wall=${wall}s wait=${wt}s run=${rn}s log=$log"
+  case "$st" in
+    finished) num "$rc" && exit "$rc"; exit 70;;
+    cancelled|abandoned) exit 9;;
+    expired) exit 5;;
+    *) exit 70;;
+  esac
+}
+
+while :; do
+  check
+  rem_us
+  [ "$REM" -gt 0 ] || deadline_hit
+  # the last sleep is cut to the time left, so a long interval cannot overshoot the deadline
+  t=$IV_US; [ "$REM" -ge "$t" ] || t=$REM
+  sleep "$(secs "$t")" & SP=$!
+  wait "$SP" 2>/dev/null; SP=
+done

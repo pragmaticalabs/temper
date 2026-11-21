@@ -719,6 +719,7 @@ class BbIncrementalIT {
         Files.writeString(waiting,
                           Files.readString(waiting).replace("\ncap=0\n", "\ncap=5\n"));  // the submit ran with BB_MAX_REACTORS=0 so nothing started; the run below admits it
         env.put("BB_MAX_REACTORS", "5");
+        env.put("BB_NO_CP_RECORD", "1");  // the stand-in mvn counts every call; the post-green cp-record would be a second one
         env.put("BB_TEST_LOADAVG",
                 dir.resolve("loadavg").toString());
         var run = BbFixtures.run(List.of("bash",

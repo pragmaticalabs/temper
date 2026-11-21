@@ -524,4 +524,55 @@ class BbResultIT {
         assertThat(lines(run)).containsExactly("ticket=3-1 state=orphaned rc=- wall=9s",
                                                "tests: none (the ticket has no started build or no checkout)");
     }
+
+    private static final String WHY = "junit version: resolved junit-jupiter-api 5.11.4 (launcher wants 5.13.4); the launcher is junit-platform 1.13.4";
+
+    /// A bb-test ticket refused by the resolved junit check (temper#72 ruling 3) whose tests PASSED: a passing report in the checkout and
+    /// an error line in the log, so any count, report, failing test or error line printed would be a test-green read of a refused ticket.
+    private void refusedButGreen(String id, String rc) throws IOException {
+        Files.writeString(queue.resolve("done").resolve(id),
+                          "id=" + id + "\nowner=t\nco=" + co + "\ncreated=" + ((STARTED - 100) * 1_000_000_000L) + "\ngroup=0\nargs=__launch app\nstarted="
+                         + STARTED + "\nrefused=" + WHY + "\nverdict_source=guard\nstate=finished\nrc=" + rc + "\nended=" + (STARTED + 60) + "\n");
+        bbFiles(STARTED, "[ERROR] some error line\n");
+        report("app/target/surefire-reports/TEST-a.ATest.xml", suite(4, 0, 0, 0, ok("a.ATest", "t")));
+    }
+
+    @Test
+    void aRefusedTicket_whoseTestsPassed_printsRefused_neverACountOrAGreenRead() throws Exception {
+        refusedButGreen("1-60", "15");
+        var run = result("1-60");
+
+        assertThat(run.rc()).as(run.stderr()).isZero();
+        assertThat(lines(run)).containsExactly("ticket=1-60 state=finished rc=15 verdict=REFUSED wall=160s",
+                                               "refused: " + WHY,
+                                               "tests: refused (not a verdict: " + WHY + ")");
+    }
+
+    @Test
+    void aRefusedTicket_withRcZero_isStillRefused_theRefusalReplacesTheVerdict() throws Exception {
+        refusedButGreen("1-61", "0");
+
+        assertThat(lines(result("1-61"))).containsExactly("ticket=1-61 state=finished rc=0 verdict=REFUSED wall=160s",
+                                                          "refused: " + WHY,
+                                                          "tests: refused (not a verdict: " + WHY + ")");
+    }
+
+    @Test
+    void aRefusedTicket_json_saysVerdictRefused_withTheReason_andNoCountsReportsOrFailing() throws Exception {
+        refusedButGreen("1-62", "15");
+        var json = result("1-62", "--json").stdout();
+
+        assertThat(json).contains("\"verdict\": \"refused\"", "\"refused\": \"" + WHY + "\"", "\"status\": \"refused\"",
+                                  "\"reason\": \"not a verdict: " + WHY + "\"", "\"reports\": []", "\"reportDirs\": []", "\"failing\": []",
+                                  "\"firstError\": null", "\"rc\": 15")
+                        .doesNotContain("\"counted\"", "\"tests\": 4", "TEST-a.ATest.xml");
+    }
+
+    @Test
+    void anUnrefusedTicket_json_saysTheRcIsTheVerdict() throws Exception {
+        done("1-63", "finished", "0");
+        bbFiles(STARTED, "");
+
+        assertThat(result("1-63", "--json").stdout()).contains("\"verdict\": \"rc\"", "\"refused\": null");
+    }
 }
