@@ -9,6 +9,7 @@ import java.util.Map;
 
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -53,13 +54,26 @@ class BbNetnsMountsIT {
     private static Path co;
     private static BbFixtures.Outcome run;
 
+    // Why this host cannot run the class, or null. Checked per test (not by an assume in @BeforeAll): a class-level abort writes a
+    // report with no testcase, which CI's docker canary rejects as a silent zero; a per-test skip keeps every row in the report.
+    private static String unmet;
+
     @BeforeAll
     static void runTheStandIn() throws Exception {
-        assumeTrue(BbFixtures.linux(), "bb-netns-run needs GNU stat and /usr/bin/bash");
-        assumeTrue(Files.isDirectory(Path.of(JAVA_HOME)), "the container runs the host JDK");
+        if (!BbFixtures.linux()) {
+            unmet = "bb-netns-run needs GNU stat and /usr/bin/bash";
+            return;
+        }
+        if (!Files.isDirectory(Path.of(JAVA_HOME))) {
+            unmet = "the container runs the host JDK at " + JAVA_HOME + " (the build hosts' layout)";
+            return;
+        }
         var probe = BbFixtures.run(List.of("docker", "version", "--format", "{{.Server.Version}}"), new HashMap<>(Map.of("PATH", System.getenv("PATH"))), null, null);
 
-        assumeTrue(probe.rc() == 0, "needs a reachable docker daemon: " + probe.stderr());
+        if (probe.rc() != 0) {
+            unmet = "needs a reachable docker daemon: " + probe.stderr();
+            return;
+        }
         var target = Files.createDirectories(Path.of("target").toAbsolutePath());
 
         home = Files.createTempDirectory(target, "netns-mounts-home");
@@ -81,6 +95,11 @@ class BbNetnsMountsIT {
         env.put("JAVA_HOME", JAVA_HOME);
         run = BbFixtures.run(List.of(SCRIPT.toString(), "ns76mounts" + System.nanoTime(), co.toString(), home.resolve("tools/maven/bin/mvn").toString(), "-B", "verify"),
                              env, co, null);
+    }
+
+    @BeforeEach
+    void hostCanRunTheContainer() {
+        assumeTrue(unmet == null, unmet);
     }
 
     @AfterAll
