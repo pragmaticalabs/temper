@@ -46,7 +46,7 @@
 # Every other line is rejected by its key (malformed: no <[A-Za-z0-9_]{1,32}>= key), and so is the whole file when the ticket is not a
 # BB_LAUNCH one (not_launch), it names another id (foreign_file), it is not regular (not_regular), it cannot be read (unreadable) or
 # .bb/ticket does not read <id> (ticket_mismatch). Rejections are recorded as one fields_rejected=<token>[,<token>...] line (at most 256
-# bytes; details in build.log). A BB_LAUNCH ticket with no accepted verdict_source gets verdict_source=missing (a crash, OOM or kill
+# bytes; details in build.log). Under the lock, just before the append, the run ticket is read again (run_ticket): a marker that no longer reads <id> drops the copied lines and records fields_rejected=ticket_changed + verdict_source=missing (never a pass); a process the job left behind can still rewrite its OWN fields between the read and the lock, within the grammar (accepted, CTO 2026-11-21). BB_TEST_BEFORE_LOCK=<cmd> (TEST SEAM, inert unless set) runs in that window. A BB_LAUNCH ticket with no accepted verdict_source gets verdict_source=missing (a crash, OOM or kill
 # before bb-test wrote it). A rejection or a missing verdict is never a pass: a job rc of 0 is then recorded as rc=18; a non-zero rc is
 # kept. .bb/rc stays the job's own exit status. Every .bb/fields.* is removed at the grant and after the read.
 # Every ticket reaching done/ appends one line to ~/work/bb-ticket-log.tsv. `bb-wait <ticket>` blocks until it finishes (exit = rc).
@@ -183,8 +183,11 @@ if [ "${1:-}" = __run ]; then
   NOPASS=""; [ -z "$REJ" ] || { LF=${LF:+$LF$'\n'}fields_rejected=${REJ:0:256}; NOPASS=1; }
   if [ -n "${BB_LAUNCH:-}" ] && ! grep -q '^verdict_source=' <<< "$LF"; then LF=${LF:+$LF$'\n'}verdict_source=missing; NOPASS=1; fi
   WRC=$BRC; [ -z "$NOPASS" ] || [ "$BRC" != 0 ] || WRC=18   # never a pass (header: LAUNCH FIELDS); a non-zero rc is kept as it is
+  [ -z "${BB_TEST_BEFORE_LOCK:-}" ] || bash -c "$BB_TEST_BEFORE_LOCK" || true   # TEST SEAM (inert unless set): runs in the window between the fields read and the lock (BbRcTicketRecordIT)
   exec 8> "$Q/.lock"; flock 8
   [ -f "$T" ] || exit 0   # cancel or reap already finalized this ticket (first writer wins): do not recreate running/<id> or overwrite done/<id>
+  # CTO 2026-11-21: under the lock, just before the append, the run ticket must still be ours; a launch whose marker changed since the read copies nothing (a process the job left behind can still rewrite its OWN fields in that window, within the grammar: accepted)
+  if [ -n "${BB_LAUNCH:-}" ] && [ "$HT" = "$ID" ] && [ "$(run_ticket "$CO" 2> /dev/null | head -c 128 | head -n 1)" != "$ID" ]; then LF="fields_rejected=ticket_changed"$'\n'"verdict_source=missing"; [ "$BRC" != 0 ] || WRC=18; fi
   { [ -z "$LF" ] || printf '%s\n' "$LF"; printf 'state=finished\nrc=%s\nended=%s\n' "$WRC" "$(cat "$B/end" 2>/dev/null || date +%s)"; } >> "$T"
   to_done "$T"
   exit 0

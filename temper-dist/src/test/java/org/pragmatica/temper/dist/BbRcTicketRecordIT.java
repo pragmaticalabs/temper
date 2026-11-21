@@ -669,8 +669,16 @@ class BbRcTicketRecordIT {
 
     /// A ticket whose job is `body` run in its checkout, waited to done/. `launch`: a BB_LAUNCH ticket (what bb-test enqueues).
     private String launched(String id, Path co, String body, boolean launch) throws Exception {
+        return launched(id, co, body, launch, Map.of());
+    }
+
+    private String launched(String id, Path co, String body, boolean launch, Map<String, String> extra) throws Exception {
         ticket("waiting", id, co, 5, 0);
-        var more = launch ? Map.of("BB_LAUNCH", dir.resolve("stubmvn").toString()) : Map.<String, String>of();
+        var more = new HashMap<>(extra);
+
+        if (launch) {
+            more.put("BB_LAUNCH", dir.resolve("stubmvn").toString());
+        }
         var waiter = waiter(id, body, more, dir.resolve("go-" + id));
 
         assertThat(waiter.waitFor(30, TimeUnit.SECONDS)).as("waiter exits").isTrue();
@@ -742,6 +750,19 @@ class BbRcTicketRecordIT {
 
         assertThat(text).doesNotContain("verdict_source=java");
         assertThat(field("done", id, "fields_rejected")).isEqualTo("ticket_mismatch");
+        assertThat(field("done", id, "verdict_source")).isEqualTo("missing");
+        assertThat(field("done", id, "rc")).isEqualTo("18");
+    }
+
+    @Test
+    void launchFields_aTicketMarkerChangedBetweenTheReadAndTheLock_copiesNothing_neverAPass() throws Exception {
+        var co = checkout("lf-changed");
+        var id = "545-" + BbFixtures.RUN;
+        var seam = Map.of("BB_TEST_BEFORE_LOCK", "echo other > '" + co.resolve(".bb/ticket") + "'");
+        var text = launched(id, co, "printf 'verdict_source=java\\n' > .bb/fields.$BB_TICKET; exit 0", true, seam);
+
+        assertThat(text).doesNotContain("verdict_source=java");
+        assertThat(field("done", id, "fields_rejected")).isEqualTo("ticket_changed");
         assertThat(field("done", id, "verdict_source")).isEqualTo("missing");
         assertThat(field("done", id, "rc")).isEqualTo("18");
     }
