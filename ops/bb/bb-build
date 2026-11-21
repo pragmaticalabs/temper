@@ -39,6 +39,13 @@
 # (those three words first, in that order; refused with rc 2 under BB_QUEUE=0 or without --reader; the flag is not part of the
 # maven args or the dedup key). A malformed value never blocks a build: "bb-build: ignoring BB_<NAME>: not <regex>" on stderr,
 # the field is omitted. Old callers set none of these.
+# INCREMENTAL (2026-11-19, design docs/bb-build-once-design.md §1): `bb-build [--detached --reader L] --since <base> <checkout> [goals]` asks
+# bb-modules.py (next to this file) for the module set S = am(C u amd(C)) of the paths changed since <base> (git diff <base>...HEAD, dirty
+# tracked and untracked files), prints it, and runs the goals with an explicit `-pl S` (no -am/-amd: the closure already covers the whole
+# set, so no upstream resolves from a stale .m2-local jar). FULL (root/parent pom, .mvn/, unmapped path, unparsable pom; the cause goes on the since_reason= ticket line) keeps the whole
+# reactor; NONE (no change at all) prints "nothing changed", queues nothing and exits 0. The ticket gains since=<base> and modules=<n|FULL>
+# right after group_reason= (same optional-line rule as the owner fields). The dedup key hashes the EXPANDED args. Refused (rc 2): a missing
+# or unreadable base, a missing bb-modules.py, or caller args that already carry -pl/-am/-amd/-f (two selections of the modules).
 # JBCT BOOTSTRAP (2026-11-19, feat/bb-jbct-bootstrap): a run that asks for a jbct:* goal, an org.pragmatica-lite:jbct-maven-plugin:* goal or the jbct
 # profile, in a checkout whose .m2-local lacks the jbct-maven-plugin jar of its effective version (the root pom's plugin entry), first runs CI's bootstrap
 # (`mvn install -B -DskipTests -pl <ci.yml list at HEAD> -am`) inside the same ticket, same cap and port group, before the main maven
@@ -127,6 +134,12 @@ if [ "${1:-}" = __run ]; then
   exit 0
 fi
 
+SINCE=""
+if [ "${1:-}" = --since ]; then
+  [ -n "${2:-}" ] && [ -n "${3:-}" ] || { echo "refusing: --since needs <base> and a checkout" >&2; exit 2; }
+  [[ $2 =~ ^[A-Za-z0-9._/~^@{}-]{1,200}$ ]] && [[ $2 != -* ]] || { echo "refusing: --since base must be a git ref (^[A-Za-z0-9._/~^@{}-]{1,200}\$, not starting with -)" >&2; exit 2; }
+  SINCE=$2; shift 2
+fi
 CO=$(cd "$1" && pwd); shift
 # Ownership guard (2026-09-27, after a cross-agent build into another agent's checkout):
 # every caller declares BB_OWNER (its agent prefix, e.g. s5, v1552); a checkout belongs to the
@@ -135,6 +148,19 @@ CO=$(cd "$1" && pwd); shift
 case "$BB_OWNER" in *[!A-Za-z0-9_]*|"") echo "refusing: BB_OWNER must be [A-Za-z0-9_]+" >&2; exit 4;; esac
 case "$(basename "$CO")" in "$BB_OWNER"-*) ;; *) echo "refusing: $CO is not owned by BB_OWNER=$BB_OWNER (name must start with $BB_OWNER-)" >&2; exit 4;; esac
 [ $# -gt 0 ] || set -- clean install
+MODS=""; SINCE_REASON=""
+if [ -n "$SINCE" ]; then
+  [ -f "$(dirname "$SELF")/bb-modules.py" ] || { echo "refusing: --since needs bb-modules.py next to bb-build" >&2; exit 2; }
+  case " $* " in *" -pl "*|*" --projects"*|*" -pl"[!\ ]*|*" -am "*|*" -amd "*|*" -f "*|*" --file"*) echo "refusing: --since expands to its own -pl; the args already select modules" >&2; exit 2;; esac
+  SEL=$(python3 "$(dirname "$SELF")/bb-modules.py" "$CO" "$SINCE") || { echo "refusing: bb-modules.py failed for base $SINCE in $CO" >&2; exit 2; }
+  case $SEL in
+    NONE) echo "bb-build: nothing changed since $SINCE; nothing queued"; exit 0;;
+    FULL|"FULL "*) MODS=FULL; SINCE_REASON=$(printf '%s' "${SEL#FULL}" | tr -c 'A-Za-z0-9._/:@+-' '?'); SINCE_REASON=${SINCE_REASON#\?}
+       echo "bb-build: --since $SINCE -> FULL reactor (${SINCE_REASON:-no reason given})";;
+    *) MODS=$(printf '%s' "$SEL" | tr ',' '\n' | wc -l | tr -d ' '); MODS=$((MODS + 1)); set -- -pl "$SEL" "$@"
+       echo "bb-build: --since $SINCE -> -pl $SEL ($MODS modules)";;
+  esac
+fi
 case "${BB_REQUIRE_DOCKER:-1}" in 0|1) ;; *) echo "refusing: BB_REQUIRE_DOCKER must be 0 or 1 (or unset)" >&2; exit 2;; esac
 B=$CO/.bb; mkdir -p "$B"
 if [ ! -f "$B/rc" ] && [ -f "$B/start" ]; then
@@ -226,6 +252,8 @@ fi
 
 # Ticket owner fields (T3): each optional, each validated; a bad value is dropped with a notice and never blocks the build.
 OWNER_FIELDS=""
+[ -z "$SINCE" ] || OWNER_FIELDS+="since=$SINCE"$'\n'"modules=$MODS"$'\n'
+[ -z "$SINCE_REASON" ] || OWNER_FIELDS+="since_reason=$SINCE_REASON"$'\n'
 ownerval() {  # ownerval <BB_NAME> <regex> -> value on stdout when set and valid; notice on stderr when set and malformed
   local v=${!1:-}
   [ -n "$v" ] || return 1

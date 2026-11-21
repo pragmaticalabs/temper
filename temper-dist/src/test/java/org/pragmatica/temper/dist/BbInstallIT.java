@@ -197,6 +197,8 @@ class BbInstallIT {
         assertThat(pin("BB_LIB_PREMEM")).isEqualTo(BbFixtures.md5(prev("bb-queue-lib.sh.premem")));
         assertThat(pin("BB_QUEUE_PREMEM")).isEqualTo(BbFixtures.md5(prev("bb-queue.premem")));
         assertThat(pin("BB_BUILD_PRECAP")).isEqualTo(BbFixtures.md5(prev("bb-build.precap")));
+        assertThat(pin("BB_BUILD_PRESINCE")).isEqualTo(BbFixtures.md5(prev("bb-build.presince")));
+        assertThat(pin("BB_PORTGROUP_PRESINCE")).isEqualTo(BbFixtures.md5(prev("bb-portgroup.py.presince")));
         assertThat(pin("BB_LIB_PRECAP")).isEqualTo(BbFixtures.md5(prev("bb-queue-lib.sh.precap")));
         assertThat(pin("BB_QUEUE_PRECAP")).isEqualTo(BbFixtures.md5(prev("bb-queue.precap")));
         assertThat(pin("BB_LIB_PREOFFQ")).isEqualTo(BbFixtures.md5(prev("bb-queue-lib.sh.preoffq")));
@@ -207,6 +209,8 @@ class BbInstallIT {
         assertThat(pin("BB_AWAIT_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-await")));
         assertThat(pin("BB_NETNS_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-netns-run")));
         assertThat(pin("BB_PORTGROUP_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-portgroup.py")));
+        assertThat(pin("BB_MODULES_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-modules.py")));
+        assertThat(pin("BB_BUILD_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-build")));
         assertThat(pin("BB_MUTATE_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-mutate")));
         assertThat(pin("BB_MUTATE_OLD")).isEqualTo(BbFixtures.md5(prev("bb-mutate")));
         assertThat(pin("BB_JBCTBOOT_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-jbct-bootstrap")));
@@ -230,6 +234,7 @@ class BbInstallIT {
                                                           "bb-await",
                                                           "bb-netns-run",
                                                           "bb-portgroup.py",
+                                                          "bb-modules.py",
                                                           "bb-jbct-bootstrap",
                                                           "bb-result");
 
@@ -249,6 +254,7 @@ class BbInstallIT {
                                                                     "installed builder@h1 bb-await before=absent after=" + pin("BB_AWAIT_NEW"),
                                                                     "installed builder@h1 bb-netns-run before=absent after=" + pin("BB_NETNS_NEW"),
                                                                     "installed builder@h1 bb-portgroup.py before=absent after=" + pin("BB_PORTGROUP_NEW"),
+                                                                    "installed builder@h1 bb-modules.py before=absent after=" + pin("BB_MODULES_NEW"),
                                                                     "installed builder@h1 bb-jbct-bootstrap before=absent after=" + pin("BB_JBCTBOOT_NEW"),
                                                                     "installed builder@h1 bb-result before=absent after=" + pin("BB_RESULT_NEW"),
                                                                     "installed builder@h1 bb-queue-lib.sh before=" + BbFixtures.BB_LIB_OLD
@@ -294,6 +300,7 @@ class BbInstallIT {
                                                                      "unchanged builder@h1 bb-await " + pin("BB_AWAIT_NEW"),
                                                                      "unchanged builder@h1 bb-netns-run " + pin("BB_NETNS_NEW"),
                                                                      "unchanged builder@h1 bb-portgroup.py " + pin("BB_PORTGROUP_NEW"),
+                                                                     "unchanged builder@h1 bb-modules.py " + pin("BB_MODULES_NEW"),
                                                                      "unchanged builder@h1 bb-jbct-bootstrap " + pin("BB_JBCTBOOT_NEW"),
                                                                      "unchanged builder@h1 bb-result " + pin("BB_RESULT_NEW"),
                                                                      "unchanged builder@h1 bb-queue-lib.sh " + pin("BB_LIB_NEW"),
@@ -489,6 +496,25 @@ class BbInstallIT {
         }
     }
 
+    /// The bb-build and bb-portgroup.py before `--since` (BB_BUILD_PRESINCE, BB_PORTGROUP_PRESINCE) are accepted sources and are replaced, backed up under their md5.
+    @Test
+    void aHostRunningThePreSinceBuild_isUpdatedToTheOneWithSince() throws Exception {
+        var tools = host("h1");
+
+        assertThat(install("builder@h1").rc()).isZero();
+        Files.write(tools.resolve("bb-build"), prev("bb-build.presince"));
+        Files.write(tools.resolve("bb-portgroup.py"), prev("bb-portgroup.py.presince"));
+        var run = install("builder@h1");
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        assertThat(run.stdout()).contains("installed builder@h1 bb-build before=" + pin("BB_BUILD_PRESINCE")
+                                         + " after=" + pin("BB_BUILD_NEW"),
+                                          "installed builder@h1 bb-portgroup.py before=" + pin("BB_PORTGROUP_PRESINCE")
+                                         + " after=" + pin("BB_PORTGROUP_NEW"));
+        assertThat(tools.resolve("bb-build.bak-" + pin("BB_BUILD_PRESINCE"))).hasBinaryContent(prev("bb-build.presince"));
+        assertThat(tools.resolve("bb-portgroup.py.bak-" + pin("BB_PORTGROUP_PRESINCE"))).hasBinaryContent(prev("bb-portgroup.py.presince"));
+    }
+
     /// The bb-queue-lib.sh, bb-queue and bb-tickets before the off-queue reactor list (BB_*_PREOFFQ, 2026-11-20) are accepted sources and are
     /// replaced, backed up under their md5. Mutation: leave a PREOFFQ out of its accepted list -> the install is refused (65), red.
     @Test
@@ -641,6 +667,7 @@ class BbInstallIT {
                              "bb-await",
                              "bb-netns-run",
                              "bb-portgroup.py",
+                             "bb-modules.py",
                              "bb-jbct-bootstrap",
                              "bb-result",
                              "bb-mutate")) {
@@ -653,6 +680,59 @@ class BbInstallIT {
         assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
         assertThat(run.stdout().lines()).allMatch(l -> l.startsWith("unchanged "));
         assertThat(listing(tools)).isEqualTo(before);
+    }
+
+    /// bb-build calls bb-modules.py for --since: the helper must be on the host before the caller is replaced, so no host ever runs a bb-build that needs a missing one.
+    @Test
+    void bbModules_isInstalledBeforeBbBuild_andNamedAsPhaseOneAcceptsAbsentOrNew() throws Exception {
+        host("h1");
+        var run = install("builder@h1");
+        var order = run.stdout().lines().map(l -> l.split(" ")[2]).toList();
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        assertThat(order).contains("bb-modules.py", "bb-build");
+        assertThat(order.indexOf("bb-modules.py")).isLessThan(order.indexOf("bb-build"));
+    }
+
+    @Test
+    void aWrongBbModules_isRefused_namingAbsentAsAcceptedAndThePin_andWritesNothing() throws Exception {
+        var tools = host("h1");
+
+        Files.writeString(tools.resolve("bb-modules.py"), "a diverged modules helper\n");
+        var before = listing(tools);
+        var run = install("builder@h1");
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isEqualTo(65);
+        assertThat(run.stdout().lines().toList()).containsExactly("refused builder@h1 bb-modules.py installed="
+                                                                 + BbFixtures.md5("a diverged modules helper\n".getBytes())
+                                                                 + " expected=" + pin("BB_MODULES_NEW"));
+        assertThat(listing(tools)).isEqualTo(before);
+    }
+
+    /// The md5s every host held on 2026-11-21 (read by ssh md5sum on cloudbb-5 and bigboy-aether) are each accepted: the files that
+    /// equal a NEW are unchanged, the two that differ (bb-build, bb-portgroup.py) are PRESINCE and are replaced.
+    /// Mutation: drop BB_BUILD_PRESINCE from accepted_of -> the live host is refused, exit 65, red.
+    @Test
+    void aHostHoldingTheLive20261121Files_isAcceptedForEveryFile() throws Exception {
+        var live = java.util.Map.of("bb-build", "24183c7d359b4030faeef894bbe4ba52",
+                                    "bb-queue-lib.sh", "2569b8af2cf8acc063024e553be66a93",
+                                    "bb-queue", "9cb677b671867eecdf90c9514bbd0732",
+                                    "bb-tickets", "8d34d9dc9ab2a4f867af863ec21be77e",
+                                    "bb-jbct-bootstrap", "3e5396ecee48b99949456cf805df1e60",
+                                    "bb-result", "2b99dd5c414175c4fd40a9836da76298",
+                                    "bb-portgroup.py", "884caf3cf37b12cf5cf1d97e96f76a4c");
+        var tools = host("h1");
+
+        assertThat(install("builder@h1").rc()).isZero();
+        Files.write(tools.resolve("bb-build"), prev("bb-build.presince"));
+        Files.write(tools.resolve("bb-portgroup.py"), prev("bb-portgroup.py.presince"));
+        for (var e : live.entrySet()) {
+            assertThat(BbFixtures.md5(Files.readAllBytes(tools.resolve(e.getKey())))).as(e.getKey()).isEqualTo(e.getValue());
+        }
+        var run = install("builder@h1");
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        assertThat(run.stdout()).doesNotContain("refused");
     }
 
     @Test
@@ -688,6 +768,7 @@ class BbInstallIT {
                                                                  + "|" + pin("BB_BUILD_PRECAP")
                                                                  + "|" + pin("BB_BUILD_PREJBCT")
                                                                  + "|" + pin("BB_BUILD_PREHELP")
+                                                                 + "|" + pin("BB_BUILD_PRESINCE")
                                                                  + "|" + pin("BB_BUILD_NEW"));
         assertThat(listing(good)).isEqualTo(goodBefore);
         assertThat(listing(diverged)).isEqualTo(divergedBefore);
@@ -786,6 +867,7 @@ class BbInstallIT {
                                 "bb-await",
                                 "bb-netns-run",
                                 "bb-portgroup.py",
+                                "bb-modules.py",
                                 "bb-jbct-bootstrap",
                                 "bb-result",
                                 "bb-mutate",
