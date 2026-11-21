@@ -3,7 +3,12 @@
 # Runs maven for ONE port-group ticket in its own docker network namespace: own loopback (so the tests' fixed ports cannot
 # collide with another ticket's) plus NAT egress on the default bridge. The container is a thin shell over the host:
 #   image bb-hostfs:2 = empty skeleton (usr-merge symlinks, empty /sbin); host /usr and the JDK/Debian config dirs are mounted read-only,
-#   $HOME (maven, checkouts, .m2-local) rw; /tmp is the container own (gone with it); the checkout is the cwd at the SAME path, so
+#   the checkout rw (its .m2-local lives inside via .mvn/maven.config); ~/tools and the maven install read-only; NOTHING else of $HOME (2026-11-21, #76:
+#   it was `-v $HOME:$HOME` rw, so test code could rewrite ~/tools/bb-*, other checkouts and the queue). $HOME in the container is a private tmpfs
+#   (owned by the caller, mode 0700, 1 GiB): it exists and is writable (Testcontainers writes ~/.testcontainers.properties, java userPrefs, ~/.cache)
+#   but is throwaway, and the bind mounts above nest under it at their host paths. Chosen over an empty bind of a host dir because nothing then has to be
+#   created or cleaned on the host, and over a bare read-only $HOME because tools that write there on first use would fail instead of just forgetting.
+#   /tmp is the container own (gone with it); the checkout is the cwd at the SAME path, so
 #   /proc/<pid>/cwd, pgrep and the queue's kill set see containerized processes exactly like host ones (same uid, same paths).
 # BB_NETNS_NETWORK overrides the docker network (default bridge); it exists only for the negative control (container:<name> shares another run namespace).
 # Name bb-<ticket-id>: `bb-queue cancel --running` docker-kills it. No HCLOUD_TOKEN and no other host env enters the container.
@@ -12,6 +17,8 @@
 #   ports from inside the namespace (their ports are published on the host, i.e. on the gateway). No gateway = exit 3 (fail closed, never a silent skip).
 #   Before maven a canary runs `docker version` inside the container; if the daemon cannot be reached: "docker unreachable inside netns", exit 97.
 #   No socket = exit 3, the same fail-closed rule: a netns ticket never runs without docker (BB_PG_ISOLATE=0 at enqueue is the host-run escape).
+# LIMIT (CTO ruling 2026-11-21): The docker socket is root-equivalent; host integrity against code that deliberately uses it is not claimed.
+#   The harm closed here is accidental writes through $HOME.
 # stdout/stderr are maven's (the waiter redirects them to .bb/build.log); the exit code is maven's (125-127 = docker itself failed).
 set -u
 [ $# -ge 3 ] || { echo "usage: bb-netns-run <ticket-id> <checkout> <mvn> [args...]" >&2; exit 2; }
@@ -23,8 +30,13 @@ if ! docker image inspect "$IMG" > /dev/null 2>&1; then
   tar -C "$T" -cf "$T.tar" . && docker import "$T.tar" "$IMG" > /dev/null; rm -rf "$T" "$T.tar"
 fi
 ARGS=(--rm --init --name "bb-$ID" --label "bb.ticket=$ID" --user "$(id -u):$(id -g)" --network "${BB_NETNS_NETWORK:-bridge}"
-      -v /usr:/usr:ro -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro -v "$HOME:$HOME" -w "$CO"
+      -v /usr:/usr:ro -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro --tmpfs "$HOME:rw,uid=$(id -u),gid=$(id -g),mode=0700,size=1g" -v "$CO:$CO" -w "$CO"
       -e "HOME=$HOME" -e "USER=$(id -un)" -e JAVA_HOME=/usr/lib/jvm/java-25-openjdk-amd64 -e PATH=/usr/local/bin:/usr/bin:/bin)
+[ -d "$HOME/tools" ] && ARGS+=(-v "$HOME/tools:$HOME/tools:ro")
+# the maven install: ~/tools/maven is a symlink to an install outside ~/tools on the hosts, so mount what the real path points at (a mvn that is not <home>/bin/mvn: the file)
+REAL=$(readlink -f "$MVN") || REAL=$MVN
+case $REAL in */bin/mvn) MH=${REAL%/bin/mvn} ;; *) MH=$REAL ;; esac
+case "$MH/" in "$HOME/tools/"*) ;; *) [ -e "$MH" ] && ARGS+=(-v "$MH:$MH:ro") ;; esac
 for d in alternatives java-25-openjdk java-openjdk ssl ca-certificates; do [ -e "/etc/$d" ] && ARGS+=(-v "/etc/$d:/etc/$d:ro"); done
 for v in LANG LC_ALL TZ MAVEN_OPTS; do [ -n "${!v:-}" ] && ARGS+=(-e "$v=${!v}"); done
 SOCK=${BB_DOCKER_SOCK:-/var/run/docker.sock}; NET=${BB_NETNS_NETWORK:-bridge}

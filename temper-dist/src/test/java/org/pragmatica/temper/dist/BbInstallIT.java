@@ -183,6 +183,7 @@ class BbInstallIT {
         assertThat(pin("BB_PORTGROUP_PREV")).isEqualTo(BbFixtures.md5(prev("bb-portgroup.py")));
         assertThat(pin("BB_BUILD_LIVE")).isEqualTo(BbFixtures.md5(prev("bb-build.live")));
         assertThat(pin("BB_NETNS_PREV")).isEqualTo(BbFixtures.md5(prev("bb-netns-run")));
+        assertThat(pin("BB_NETNS_PREMOUNTS")).isEqualTo(BbFixtures.md5(prev("bb-netns-run.premounts")));
         assertThat(pin("BB_BUILD_PRE31")).isEqualTo(BbFixtures.md5(prev("bb-build.pre31")));
         assertThat(pin("BB_QUEUE_PRE31")).isEqualTo(BbFixtures.md5(prev("bb-queue.pre31")));
         assertThat(pin("BB_TICKETS_PRE31")).isEqualTo(BbFixtures.md5(prev("bb-tickets.pre31")));
@@ -670,6 +671,22 @@ class BbInstallIT {
                                          + " after=" + pin("BB_NETNS_NEW"));
         assertThat(tools.resolve("bb-netns-run")).hasBinaryContent(Files.readAllBytes(OPS_BB.resolve("bb-netns-run")));
         assertThat(tools.resolve("bb-netns-run.bak-" + pin("BB_NETNS_PREV"))).hasBinaryContent(prev("bb-netns-run"));
+    }
+
+    /// The bb-netns-run live since 2026-11-12 (BB_NETNS_PREMOUNTS: docker socket, whole $HOME mounted rw; #76) is an accepted source and is replaced, backed up under its md5.
+    @Test
+    void aHostRunningTheNetnsRunWithTheWholeHomeMounted_isUpdatedToTheNarrowMounts() throws Exception {
+        var tools = host("h1");
+
+        assertThat(install("builder@h1").rc()).isZero();
+        Files.write(tools.resolve("bb-netns-run"), prev("bb-netns-run.premounts"));
+        var run = install("builder@h1");
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        assertThat(run.stdout()).contains("installed builder@h1 bb-netns-run before=" + pin("BB_NETNS_PREMOUNTS")
+                                         + " after=" + pin("BB_NETNS_NEW"));
+        assertThat(tools.resolve("bb-netns-run")).hasBinaryContent(Files.readAllBytes(OPS_BB.resolve("bb-netns-run")));
+        assertThat(tools.resolve("bb-netns-run.bak-" + pin("BB_NETNS_PREMOUNTS"))).hasBinaryContent(prev("bb-netns-run.premounts"));
     }
 
     /// The bb-queue the 2026-11-11 hosts run (BB_QUEUE_LIVE) printed a header the worker could not parse; it is an accepted source and is replaced.

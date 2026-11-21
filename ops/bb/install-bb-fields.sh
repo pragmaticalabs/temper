@@ -85,7 +85,8 @@ readonly BB_WAIT_NEW=d742e51de2f05b57a422143d0ef0ab01
 readonly BB_AWAIT_PREREFUSED=56523085fccf5678eb7c208e7352c11b
 readonly BB_AWAIT_NEW=c170d09c8d379f16849fc59ea094a72d
 readonly BB_NETNS_PREV=9661165d4ef938ea43eec5b8d2d619d9   # 2026-11-11: no docker socket in the container; live on c3/c4/d1
-readonly BB_NETNS_NEW=bf05b7c51c2f7863ee685a195273e195
+readonly BB_NETNS_PREMOUNTS=bf05b7c51c2f7863ee685a195273e195   # 2026-11-12: docker socket, but the whole $HOME mounted rw (#76); live on all four hosts
+readonly BB_NETNS_NEW=b6f5bff9ced0044a469fa035f507c6fc
 readonly BB_PORTGROUP_PREV=a93ade2ff7dddcc75cee3d4169a08499   # the 2026-11-09 host snapshot, live on c4/d1 since 2026-11-11
 readonly BB_PORTGROUP_PRESINCE=884caf3cf37b12cf5cf1d97e96f76a4c   # before the pom walk and closures were factored out for bb-modules.py
 readonly BB_PORTGROUP_NEW=8ad1c6dbe2044f984814c2b19645c48b
@@ -135,7 +136,7 @@ accepted_of() {  # the md5s a host may hold besides absent, in the order the ref
     bb-hold) echo "$BB_HOLD_OLD $BB_HOLD_PRELEDGER $BB_HOLD_NEW" ;;
     bb-tickets) echo "$BB_TICKETS_OLD $BB_TICKETS_PRE31 $BB_TICKETS_PREOFFQ $BB_TICKETS_NEW" ;;
     bb-portgroup.py) echo "$BB_PORTGROUP_PREV $BB_PORTGROUP_PRESINCE $BB_PORTGROUP_NEW" ;;
-    bb-netns-run) echo "$BB_NETNS_PREV $BB_NETNS_NEW" ;;
+    bb-netns-run) echo "$BB_NETNS_PREV $BB_NETNS_PREMOUNTS $BB_NETNS_NEW" ;;
     bb-wait) echo "$BB_WAIT_PRERC $BB_WAIT_PREREFUSED $BB_WAIT_NEW" ;;
     bb-await) echo "$BB_AWAIT_PREREFUSED $BB_AWAIT_NEW" ;;
     bb-mutate) echo "$BB_MUTATE_OLD $BB_MUTATE_PREVIA $BB_MUTATE_NEW" ;;
