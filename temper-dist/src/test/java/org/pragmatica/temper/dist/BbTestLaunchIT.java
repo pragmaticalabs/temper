@@ -189,8 +189,11 @@ class BbTestLaunchIT {
         return enqueue(extra, cmd.toArray(String[]::new));
     }
 
+    /// A rebuild that must RUN, so BB_DEDUP=0: the stub mvn makes a build sub-second, the first build and a refused launch can share
+    /// one `date +%s` second, `.bb/start` then still equals the first ticket's started=, and dedup returns that stale build (rc 8,
+    /// root ticket 1795252690384665546-3070202). The race itself is bb-build's: temper#80.
     private Done green() throws Exception {
-        var built = build(Map.of());
+        var built = build(Map.of("BB_DEDUP", "0"));
 
         assertThat(built.rc()).as(log()).isZero();
 
