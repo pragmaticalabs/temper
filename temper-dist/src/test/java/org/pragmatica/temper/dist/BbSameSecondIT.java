@@ -25,6 +25,11 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 /// Dedup decision for a checkout without `.bb/ticket` (a run launched before this change): NOT current, so no dedup. That is the safe direction:
 /// the cost is one redundant build, never a stale answer.
 ///
+/// The same weakness in three more places, each moved to the ticket id: bb-wait's RC-MISMATCH check, bb-result's "is this still the checkout's run"
+/// test and bb-build's "rc deleted by hand" refusal. Without `.bb/ticket` (a pre-#80 run) the safe direction is per place: bb-wait skips the
+/// RC-MISMATCH comparison (its verdict is the ticket's rc either way, so only the tamper check is lost); bb-result says `unavailable` (counts of an
+/// unidentifiable run are worse than none); bb-build keeps the plain running message (never a hand deletion guessed onto a ticket).
+///
 /// Probes (each red, reverted): compare `.bb/start` to the ticket's `started=` again -> [#aSecondBuildInTheSameSecond_doesNotMakeTheFirstOneCurrent];
 /// stop writing `.bb/ticket` -> [#aRepeatWithNothingBetween_isStillDeduped].
 class BbSameSecondIT {
@@ -45,8 +50,11 @@ class BbSameSecondIT {
         BbFixtures.executable(tools.resolve("bb-build"),
                               Files.readString(BbFixtures.OPS_BB.resolve("bb-build")));
         Files.copy(BbFixtures.OPS_BB.resolve("bb-queue-lib.sh"), tools.resolve("bb-queue-lib.sh"), StandardCopyOption.REPLACE_EXISTING);
+        Files.copy(BbFixtures.OPS_BB.resolve("bb-wait"), tools.resolve("bb-wait"), StandardCopyOption.REPLACE_EXISTING);
+        tools.resolve("bb-wait").toFile().setExecutable(true);
+        Files.copy(BbFixtures.OPS_BB.resolve("bb-result"), tools.resolve("bb-result"), StandardCopyOption.REPLACE_EXISTING);
         Files.copy(BbFixtures.OPS_BB.resolve("bb-portgroup.py"), tools.resolve("bb-portgroup.py"), StandardCopyOption.REPLACE_EXISTING);
-        var mvn = BbFixtures.executable(dir.resolve("stub/mvn"), "#!/bin/sh\necho \"HOST $*\"\n");
+        var mvn = BbFixtures.executable(dir.resolve("stub/mvn"), "#!/bin/sh\necho \"HOST $*\"\ncase \"$*\" in *failing*) exit 3;; esac\n");
 
         BbFixtures.executable(dir.resolve("fakebin/date"),
                               "#!/bin/sh\nif [ \"$*\" = \"+%s\" ]; then echo 1700000000; else exec /bin/date \"$@\"; fi\n");
@@ -144,5 +152,119 @@ class BbSameSecondIT {
         assertThat(again.outcome().rc()).as("deduped onto a result .bb no longer holds: " + again.outcome().stderr()).isZero();
         assertThat(again.ticket()).isNotNull().isNotEqualTo(first.ticket());
         assertThat(Files.readString(co.resolve(".bb/ticket")).strip()).isEqualTo(again.ticket());
+    }
+
+    private BbFixtures.Outcome wait(String ticket) throws Exception {
+        var e = new HashMap<>(env);
+
+        e.put("BB_WAIT_INTERVAL", "15");
+
+        return BbFixtures.run(List.of(dir.resolve("tools/bb-wait").toString(), ticket), e, null, null);
+    }
+
+    private BbFixtures.Outcome result(String ticket) throws Exception {
+        return BbFixtures.run(List.of("python3", dir.resolve("tools/bb-result").toString(), ticket), env, null, null);
+    }
+
+    private void report() throws Exception {
+        var xml = co.resolve("target/surefire-reports/TEST-x.xml");
+
+        Files.createDirectories(xml.getParent());
+        Files.writeString(xml, "<testsuite name=\"s\" tests=\"4\" failures=\"0\" errors=\"0\" skipped=\"0\"><testcase classname=\"c\" name=\"n\"/></testsuite>\n");
+    }
+
+    private void withoutTicketFile() throws Exception {
+        Files.delete(co.resolve(".bb/ticket"));
+    }
+
+    @Test
+    void bbWait_ofAnEarlierRunSharingTheStartSecond_isNotAMismatchAgainstTheLaterRunsRc() throws Exception {
+        var first = build("-B", "verify");
+        var between = build("-B", "failing");
+
+        assertThat(Files.readString(co.resolve(".bb/rc")).strip()).as("the premise: the later run's rc is in .bb").isEqualTo("3");
+        var waited = wait(first.ticket());
+
+        assertThat(waited.rc()).as(waited.stdout() + waited.stderr()).isZero();
+        assertThat(waited.stderr()).doesNotContain("RC-MISMATCH");
+        assertThat(wait(between.ticket()).rc()).isEqualTo(3);
+    }
+
+    @Test
+    void bbWait_withoutBbTicket_skipsTheMismatchCheck_andStillReturnsTheTicketsRc() throws Exception {
+        var first = build("-B", "verify");
+
+        withoutTicketFile();
+        Files.delete(co.resolve(".bb/rc"));
+        Files.writeString(co.resolve(".bb/rc"), "7\n");
+        var waited = wait(first.ticket());
+
+        assertThat(waited.rc()).as(waited.stdout() + waited.stderr()).isZero();
+        assertThat(waited.stderr()).doesNotContain("RC-MISMATCH");
+    }
+
+    @Test
+    void bbResult_ofAnEarlierRunSharingTheStartSecond_isUnavailable_neverTheLaterRunsCounts() throws Exception {
+        var first = build("-B", "verify");
+
+        build("-B", "failing");
+        report();
+        var out = result(first.ticket());
+
+        assertThat(out.rc()).as(out.stdout() + out.stderr()).isZero();
+        assertThat(out.stdout()).contains("tests: unavailable").doesNotContain("tests: 4");
+    }
+
+    @Test
+    void bbResult_withoutBbTicket_isUnavailable() throws Exception {
+        var first = build("-B", "verify");
+
+        withoutTicketFile();
+        report();
+        var out = result(first.ticket());
+
+        assertThat(out.stdout()).as(out.stdout() + out.stderr()).contains("tests: unavailable").doesNotContain("tests: 4");
+    }
+
+    private BbFixtures.Outcome rerunWithRcGone() throws Exception {
+        Files.deleteIfExists(co.resolve(".bb/rc"));
+        var e = new HashMap<>(env);
+
+        e.put("BB_DEDUP", "0");
+
+        return BbFixtures.run(List.of(dir.resolve("tools/bb-build").toString(), co.toString(), "-B", "again"), e, null, null);
+    }
+
+    @Test
+    void aDeletedRc_afterAnEarlierRunSharedItsSecond_isNotBlamedOnTheEarlierRun() throws Exception {
+        var first = build("-B", "verify");
+        var later = "1700000000000000000-1";
+
+        Files.writeString(dir.resolve("q/done").resolve(later),
+                          "id=" + later + "\nowner=ss\nco=" + co + "\ncreated=1\ngroup=0\nargs=-B x \nstarted=1700000000\nstate=orphaned\nended=1700000001\n");
+        Files.writeString(co.resolve(".bb/ticket"), later + "\n");
+        var refused = rerunWithRcGone();
+
+        assertThat(refused.rc()).as(refused.stdout() + refused.stderr()).isEqualTo(3);
+        assertThat(refused.stderr()).contains("a build appears to be running").doesNotContain("deleted by hand").doesNotContain(first.ticket());
+    }
+
+    @Test
+    void aDeletedRc_withoutBbTicket_keepsTheRunningMessage_neverAGuessedHandDeletion() throws Exception {
+        build("-B", "verify");
+        withoutTicketFile();
+        var refused = rerunWithRcGone();
+
+        assertThat(refused.rc()).as(refused.stdout() + refused.stderr()).isEqualTo(3);
+        assertThat(refused.stderr()).contains("a build appears to be running").doesNotContain("deleted by hand");
+    }
+
+    @Test
+    void aDeletedRc_ofTheRunThatOwnsBb_isStillNamedAsAHandDeletion() throws Exception {
+        var first = build("-B", "verify");
+        var refused = rerunWithRcGone();
+
+        assertThat(refused.rc()).as(refused.stdout() + refused.stderr()).isEqualTo(3);
+        assertThat(refused.stderr()).contains("was deleted by hand after ticket " + first.ticket() + " finished");
     }
 }
