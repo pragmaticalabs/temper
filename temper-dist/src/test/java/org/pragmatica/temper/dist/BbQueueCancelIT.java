@@ -384,6 +384,48 @@ class BbQueueCancelIT {
         assertThat(queue.resolve("running").resolve(id)).doesNotExist();
     }
 
+    /// Issue #80: the run is identified by `.bb/ticket`, not by its start second. `.bb/rc` and a `.bb/start` equal to the ticket's started= are
+    /// another run's when `.bb/ticket` names a different ticket (two launches granted in one second): not too late, the cancel proceeds.
+    /// A checkout with no `.bb/ticket` (launched before this change) keeps the start comparison, because a wrong "not too late" would cancel a
+    /// finished build and overwrite its real rc; that is [#cancelRunning_tooLate_isOrphanedWithNoRc_neverTheFilesValue].
+    @Test
+    void cancelRunning_aTicketFileNamingAnotherRun_isNotTooLate_eventhoughTheStartSecondMatches() throws Exception {
+        var co = checkout("co1");
+        var id = "100-" + RUN;
+
+        ticket("running", id, ME, co, 1);
+        var b = bb("co1");
+
+        Files.writeString(b.resolve("start"), "7\n");
+        Files.writeString(b.resolve("rc"), "0\n");
+        Files.writeString(b.resolve("ticket"), "99-" + RUN + "\n");
+        waiter(id, co);
+
+        var run = queue(ME, Map.of(), "cancel", "--running", id);
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        assertThat(run.stdout()).doesNotContain("too late").contains("cancelled running");
+        assertThat(field("done", id, "state")).isEqualTo("cancelled");
+    }
+
+    @Test
+    void cancelRunning_aTicketFileNamingThisRun_isTooLate() throws Exception {
+        var co = checkout("co1");
+        var id = "100-" + RUN;
+
+        ticket("running", id, ME, co, 1);
+        var b = bb("co1");
+
+        Files.writeString(b.resolve("start"), "8\n");
+        Files.writeString(b.resolve("rc"), "0\n");
+        Files.writeString(b.resolve("ticket"), id + "\n");
+        var run = queue(ME, Map.of(), "cancel", "--running", id);
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        assertThat(run.stdout()).contains("too late");
+        assertThat(field("done", id, "state")).isEqualTo("orphaned");
+    }
+
     /// First writer wins: the REAL `bb-build __run` waiter, whose build already wrote rc 0, is held (by a flock shim) at its final
     /// lock; a too-late cancel finalizes the ticket meanwhile. When the waiter then gets the lock it must neither recreate
     /// running/<id> nor overwrite done/<id>.

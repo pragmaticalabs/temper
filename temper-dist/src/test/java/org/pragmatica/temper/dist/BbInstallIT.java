@@ -230,6 +230,11 @@ class BbInstallIT {
         assertThat(pin("BB_BUILD_PREHELP")).isEqualTo(BbFixtures.md5(prev("bb-build.prehelp")));
         assertThat(pin("BB_RESULT_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-result")));
         assertThat(pin("BB_RESULT_PRECP")).isEqualTo(BbFixtures.md5(prev("bb-result.precp")));
+        assertThat(pin("BB_BUILD_PRE80")).isEqualTo(BbFixtures.md5(prev("bb-build.pre80")));
+        assertThat(pin("BB_QUEUE_PRE80")).isEqualTo(BbFixtures.md5(prev("bb-queue.pre80")));
+        assertThat(pin("BB_LIB_PRE80")).isEqualTo(BbFixtures.md5(prev("bb-queue-lib.sh.pre80")));
+        assertThat(pin("BB_RESULT_PRE80")).isEqualTo(BbFixtures.md5(prev("bb-result.pre80")));
+        assertThat(pin("BB_WAIT_PRE80")).isEqualTo(BbFixtures.md5(prev("bb-wait.pre80")));
     }
 
     /// The bb-test lane helpers go in before bb-build (which calls bb-cp-record); a host holding a stranger's bb-test is refused, naming the one pin and
@@ -941,6 +946,43 @@ class BbInstallIT {
         assertThat(run.stdout()).doesNotContain("refused");
     }
 
+    /// A host at main's install set after #70 (bb-build dafd74a3, bb-queue 6d96fab8, bb-queue-lib.sh e607b50f, bb-result f4505867, bb-wait d742e51d,
+    /// with bb-cp-record, bb-test, bb-testcount, bb-hold, bb-await, bb-portgroup.py and bb-modules.py at their pins) is accepted for every file and
+    /// upgraded to this change's run-identity set (#80). Mutation: drop BB_*_PRE80 from accepted_of -> the host is refused, exit 65, red.
+    @Test
+    void aHostAtTheMain70InstallSet_isAcceptedAndUpgraded() throws Exception {
+        var live = java.util.Map.ofEntries(java.util.Map.entry("bb-build", "dafd74a3ea2fec81b1a3d39067422f6a"),
+                                           java.util.Map.entry("bb-queue", "6d96fab85663b88fa2d0b9b0214d4b59"),
+                                           java.util.Map.entry("bb-queue-lib.sh", "e607b50fda23b34c7468cd89d0e9f247"),
+                                           java.util.Map.entry("bb-result", "f4505867d09a1b3946280944678757ba"),
+                                           java.util.Map.entry("bb-wait", "d742e51de2f05b57a422143d0ef0ab01"),
+                                           java.util.Map.entry("bb-cp-record", "3a75a8750a940c983170a43c6c8611b0"),
+                                           java.util.Map.entry("bb-test", "4a3022874afe57bbaea792a53c063f7e"),
+                                           java.util.Map.entry("bb-testcount", "7ef8a4c3eba2a517146eed6d7ac31511"),
+                                           java.util.Map.entry("bb-hold", "c8c6947d1de945e38c5cf08f8448dae9"),
+                                           java.util.Map.entry("bb-await", "c170d09c8d379f16849fc59ea094a72d"),
+                                           java.util.Map.entry("bb-portgroup.py", "8ad1c6dbe2044f984814c2b19645c48b"),
+                                           java.util.Map.entry("bb-modules.py", "9c668381f2a161c24a9b5d55cccc4945"));
+        var tools = host("h1");
+
+        assertThat(install("builder@h1").rc()).isZero();
+        Files.write(tools.resolve("bb-build"), prev("bb-build.pre80"));
+        Files.write(tools.resolve("bb-queue"), prev("bb-queue.pre80"));
+        Files.write(tools.resolve("bb-queue-lib.sh"), prev("bb-queue-lib.sh.pre80"));
+        Files.write(tools.resolve("bb-result"), prev("bb-result.pre80"));
+        Files.write(tools.resolve("bb-wait"), prev("bb-wait.pre80"));
+        for (var e : live.entrySet()) {
+            assertThat(BbFixtures.md5(Files.readAllBytes(tools.resolve(e.getKey())))).as(e.getKey()).isEqualTo(e.getValue());
+        }
+        var run = install("builder@h1");
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        assertThat(run.stdout()).doesNotContain("refused");
+        for (var f : List.of("bb-build", "bb-queue", "bb-queue-lib.sh", "bb-result", "bb-wait")) {
+            assertThat(BbFixtures.md5(Files.readAllBytes(tools.resolve(f)))).as(f).isEqualTo(BbFixtures.md5(OPS_BB.resolve(f)));
+        }
+    }
+
     /// A host after the owner's install-bb-79.sh (#63 + #79: bb-build 2810f93c, bb-portgroup.py and bb-modules.py at main's
     /// values) and still on the pre-#70 bb-result, bb-queue-lib.sh, bb-queue is accepted for every file and is updated.
     /// Mutation: drop BB_BUILD_PRESESSION from accepted_of -> the post-install host is refused, red.
@@ -1019,6 +1061,7 @@ class BbInstallIT {
                                                                  + "|" + pin("BB_BUILD_PRESINCE")
                                                                  + "|" + pin("BB_BUILD_PREFIELDS")
                                                                  + "|" + pin("BB_BUILD_PRESESSION")
+                                                                 + "|" + pin("BB_BUILD_PRE80")
                                                                  + "|" + pin("BB_BUILD_NEW"));
         assertThat(listing(good)).isEqualTo(goodBefore);
         assertThat(listing(diverged)).isEqualTo(divergedBefore);
@@ -1058,6 +1101,7 @@ class BbInstallIT {
                            + "|" + pin("BB_LIB_PRECAP")
                            + "|" + pin("BB_LIB_PREOFFQ")
                            + "|" + pin("BB_LIB_PRELEDGER")
+                           + "|" + pin("BB_LIB_PRE80")
                            + "|" + pin("BB_LIB_NEW"))
                   .contains("bb-queue installed=" + BbFixtures.md5("unrelated tool\n".getBytes())
                            + " expected=" + BbFixtures.BB_QUEUE_OLD
@@ -1069,6 +1113,7 @@ class BbInstallIT {
                            + "|" + pin("BB_QUEUE_PRECAP")
                            + "|" + pin("BB_QUEUE_PREOFFQ")
                            + "|" + pin("BB_QUEUE_PRELEDGER")
+                           + "|" + pin("BB_QUEUE_PRE80")
                            + "|" + pin("BB_QUEUE_NEW"));
     }
 

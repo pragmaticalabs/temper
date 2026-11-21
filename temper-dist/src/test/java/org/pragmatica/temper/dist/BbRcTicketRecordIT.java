@@ -308,7 +308,7 @@ class BbRcTicketRecordIT {
     }
 
     /// CTO 2026-11-13: lanes deleted `.bb/rc` to "reset" a checkout. bb-build then refused with "a build appears to be running", which
-    /// told them nothing. Once the build's ticket is in done/ (its started= equals `.bb/start`) and no waiting/running ticket names the
+    /// told them nothing. Once the build's ticket is in done/ (`.bb/ticket` names it) and no waiting/running ticket names the
     /// checkout, the refusal names the hand deletion, the ticket and what to do instead; a live ticket or no ticket at all keeps the
     /// running message. Probes: drop the done/ lookup -> red; drop the live-ticket check -> the running-ticket half red; drop the
     /// state=finished check -> the orphaned/cancelled half red.
@@ -344,6 +344,7 @@ class BbRcTicketRecordIT {
         // and with no ticket for this .bb/start (e.g. a BB_QUEUE=0 build): the running message, never a guessed deletion
         Files.delete(queue.resolve("running").resolve(live));
         Files.writeString(co.resolve(".bb/start"), "1\n");
+        Files.delete(co.resolve(".bb/ticket"));   // #80: a run with no ticket (BB_QUEUE=0, or from before #80) is never blamed on a done/ ticket
         var ticketless = tool("bb-build", Map.of("BB_MAX_REACTORS", "0", "BB_DEDUP", "0"), co.toString(), "-B", "again");
 
         assertThat(ticketless.rc()).as(ticketless.stdout() + ticketless.stderr()).isEqualTo(3);
@@ -355,6 +356,7 @@ class BbRcTicketRecordIT {
             var gone = ticket("done", state + "-" + BbFixtures.RUN, co, 5, 0);
 
             Files.writeString(gone, "started=1\nstate=" + state + "\n", java.nio.file.StandardOpenOption.APPEND);
+            Files.writeString(co.resolve(".bb/ticket"), gone.getFileName() + "\n");   // #80: .bb/ticket names the run that owns .bb
             var killed = tool("bb-build", Map.of("BB_MAX_REACTORS", "0", "BB_DEDUP", "0"), co.toString(), "-B", "again");
 
             assertThat(killed.rc()).as(state + ": " + killed.stdout() + killed.stderr()).isEqualTo(3);
