@@ -485,30 +485,33 @@ class BbTestLaunchIT {
                   .as("java's own exit is recorded, never read as the verdict").contains("java exit 137");
     }
 
-    /// WALL (bto26 G5, CTO ruling on vbt10): one outer bound, BB_TEST_WALL_TIMEOUT, on the whole launch. The fixture bb-test reads a FIFO
-    /// bare in the walled launch, a read hidden from the audit that no inner bound covers; a 5 s wall refuses it with rc 17 on every
-    /// surface and kills its group. Probe: the walled re-run dropped (the launch runs unwalled) -> red: the read blocks, the row times out.
-    @Test
-    @Timeout(value = 120, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
-    void aReadHiddenFromTheAudit_isCutByTheWallBound_refusedWithRc17_onEverySurface() throws Exception {
-        var fifo = dir.resolve("wall.fifo");
-        var pid = dir.resolve("wall.pid");
-        var anchor = "  guard launcher_ok\n";
+    // ---- W (CTO ruling on vbt11): bb-test's body is not isolated from bytes the tests write; a hang or stall is bounded by W, the REPEAT
+    // bound (BB_TEST_REPEAT_TIMEOUT) and the OVERALL bound (REPEAT x it + BB_TEST_OVERHEAD_TIMEOUT). An expiry is rc 17, the bound named.
+
+    private static final String ANCHOR = "  guard launcher_ok\n";
+    private static final Map<String, String> SHORT_W = Map.of("BB_TEST_REPEAT_TIMEOUT", "1", "BB_TEST_OVERHEAD_TIMEOUT", "4");
+    private static final String OVERALL_5S = "overall: the launch did not finish within 5s (--repeat 1 x BB_TEST_REPEAT_TIMEOUT=1s + "
+                                           + "BB_TEST_OVERHEAD_TIMEOUT=4s); its process group was killed";
+
+    private void fixtureBbTest(String anchor, String inserted) throws Exception {
         var source = Files.readString(BbFixtures.OPS_BB.resolve("bb-test"));
 
         assertThat(source).contains(anchor);
-        assertThat(BbFixtures.run(List.of("mkfifo", fifo.toString()), Map.of(), null, null).rc()).isZero();
-        BbFixtures.executable(tools.resolve("bb-test"),
-                              source.replace(anchor, anchor + "  echo $$ > '" + pid + "'; read -r _ < '" + fifo + "'\n"));
+        BbFixtures.executable(tools.resolve("bb-test"), source.replace(anchor, inserted));
+    }
+
+    private Done timedBbTest(Map<String, String> w, String... args) throws Exception {
         var log = dir.resolve("ticket-log.tsv").toString();
 
         assertThat(build(Map.of("BB_TEST_TICKET_LOG", log)).rc()).as(log()).isZero();
-        var started = System.nanoTime();
-        var run = bbTest(Map.of("BB_TEST_TICKET_LOG", log, "BB_TEST_WALL_TIMEOUT", "5"), "fx.CalcTest#passes");
-        var seconds = (System.nanoTime() - started) / 1_000_000_000L;
-        var why = "wall: the launch did not finish within BB_TEST_WALL_TIMEOUT=5s; its process group was killed";
+        var all = new HashMap<>(w);
 
-        assertThat(seconds).as("cut at the wall (5 s) + the 10 s KILL grace, never by the blocked read").isLessThan(45);
+        all.put("BB_TEST_TICKET_LOG", log);
+        return bbTest(all, args);
+    }
+
+    private void assertRc17(Done run, String why, long seconds) throws Exception {
+        assertThat(seconds).as("cut at the W bound + the 10 s KILL grace, never by the blocked read").isLessThan(45);
         assertThat(run.rc()).as(run.doneText()).isEqualTo(17);
         assertThat(Files.readString(co.resolve(".bb/rc")).strip()).isEqualTo("17");
         assertThat(run.doneText()).contains("\nrefused=" + why, "\nverdict_source=guard\n").doesNotContain("verdict_source=java");
@@ -521,14 +524,162 @@ class BbTestLaunchIT {
 
         assertThat(text.lines().findFirst().orElseThrow()).contains("rc=17 verdict=REFUSED");
         assertThat(text).contains("refused: " + why);
-        assertThat(pid).as("the hidden read was reached").exists();
-        var walled = Long.parseLong(Files.readString(pid).strip());
+        assertThat(bbResult(run.id(), "--json").stdout()).contains("\"verdict\": \"refused\"", "\"refused\": \"" + why + "\"");
+    }
 
-        stalled.add(walled);
-        for (var i = 0; i < 50 && ProcessHandle.of(walled).isPresent(); i++) {
+    private void assertKilled(Path pidFile, String what) throws Exception {
+        assertThat(pidFile).as(what + " was reached").exists();
+        var pid = Long.parseLong(Files.readString(pidFile).strip());
+
+        stalled.add(pid);
+        for (var i = 0; i < 50 && ProcessHandle.of(pid).isPresent(); i++) {
             Thread.sleep(100);
         }
-        assertThat(ProcessHandle.of(walled)).as("the walled launch's group was killed").isEmpty();
+        assertThat(ProcessHandle.of(pid)).as(what + ": its process group was killed").isEmpty();
+    }
+
+    /// OVERALL: the fixture bb-test reads a FIFO bare in the walled launch, outside every inner bound and every REPEAT; a 5 s overall bound
+    /// refuses it with rc 17 naming `overall` on every surface and kills the walled launch. Probe: the walled re-run dropped -> red (it hangs).
+    @Test
+    @Timeout(value = 120, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
+    void aBareReadOutsideEveryInnerBound_isCutByTheOverallBound_refusedWithRc17_onEverySurface() throws Exception {
+        var fifo = dir.resolve("wall.fifo");
+        var pid = dir.resolve("wall.pid");
+
+        assertThat(BbFixtures.run(List.of("mkfifo", fifo.toString()), Map.of(), null, null).rc()).isZero();
+        fixtureBbTest(ANCHOR, ANCHOR + "  echo $$ > '" + pid + "'; read -r _ < '" + fifo + "'\n");
+        var started = System.nanoTime();
+        var run = timedBbTest(SHORT_W, "fx.CalcTest#passes");
+
+        assertRc17(run, OVERALL_5S, (System.nanoTime() - started) / 1_000_000_000L);
+        assertKilled(pid, "the walled launch");
+    }
+
+    /// REPEAT (D2 i): the stand-in java passes its 1st call and blocks on a FIFO in its 2nd. An 8 s REPEAT bound (java's own bound stays
+    /// 10800 s, the overall bound is 2 x 8 + 60 s) refuses it with rc 17 naming `repeat` and run 2/2 on every surface; the blocked java is
+    /// killed through the REPEAT re-run's TERM trap. Probe p1: the REPEAT re-run dropped (the loop runs java in the walled launch) -> red.
+    @Test
+    @Timeout(value = 120, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
+    void aSecondRepeatThatHangs_isCutByTheRepeatBound_refusedWithRc17NamingRepeat_andJavaIsKilled() throws Exception {
+        var fifo = dir.resolve("java.fifo");
+
+        assertThat(BbFixtures.run(List.of("mkfifo", fifo.toString()), Map.of(), null, null).rc()).isZero();
+        var java = BbFixtures.executable(dir.resolve("stub/second-hangs-java"),
+                                         "#!/usr/bin/env bash\nn=$(( $(cat '" + dir + "/java.n' 2>/dev/null || echo 0) + 1 ))\necho $n > '" + dir
+                                        + "/java.n'\necho $$ > '" + dir + "/java$n.pid'\n[ \"$n\" -lt 2 ] || read -r _ < '" + fifo + "'\nexit 0\n");
+        var started = System.nanoTime();
+        var run = timedBbTest(Map.of("BB_TEST_REPEAT_TIMEOUT", "8", "BB_TEST_OVERHEAD_TIMEOUT", "60", "BB_TEST_JAVA", java.toString()),
+                              "fx.CalcTest#passes", "--repeat", "2");
+
+        assertRc17(run, "repeat: run 2/2 did not finish within BB_TEST_REPEAT_TIMEOUT=8s; its process group was killed",
+                   (System.nanoTime() - started) / 1_000_000_000L);
+        assertThat(dir.resolve("java1.pid")).as("run 1/2 ran").exists();
+        assertKilled(dir.resolve("java2.pid"), "the blocked java of run 2/2");
+        assertThat(Files.readString(co.resolve("fx/target/bb-test-reports").resolve(run.id() + ".refused").resolve("console.txt")))
+                  .as("run 1's line is kept with the refused reports, never printed").contains("bb-test: run 1/2 java exit 0");
+    }
+
+    /// --repeat is capped at 5 (D2 ii): W at the cap is 5 x 11800 + 3100 = 62100 s; 6 and above are refused at enqueue, nothing queued.
+    /// Probe p2: the cap check dropped -> red (6 queues).
+    @ParameterizedTest(name = "--repeat {0}")
+    @ValueSource(strings = {"6", "99", "100"})
+    void aRepeatAboveTheCap_isRefusedAtEnqueue(String n) throws Exception {
+        var run = BbFixtures.run(List.of(tools.resolve("bb-test").toString(), co.toString(), "fx", "fx.CalcTest#passes", "--repeat", n),
+                                 env, null, null);
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isEqualTo(2);
+        assertThat(run.stderr()).contains("--repeat " + n + " is above the cap of 5", "62100 s");
+        assertThat(run.stdout()).doesNotContain("queued");
+    }
+
+    /// The cap itself is accepted (D2 iii): --repeat 5 queues and runs five java runs, each its own REPEAT re-run, each in its run dir.
+    @Test
+    @Timeout(value = 120, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
+    void repeatAtTheCap_isAccepted_andRunsFiveTimes() throws Exception {
+        green();
+        var run = bbTest(Map.of(), "fx.CalcTest#passes", "--repeat", "5");
+
+        assertThat(run.rc()).as(run.doneText() + log()).isZero();
+        for (var i = 1; i <= 5; i++) {
+            assertThat(co.resolve("fx/target/bb-test-reports").resolve(run.id()).resolve("run" + i)).isDirectory();
+            assertThat(log()).contains("bb-test: run " + i + "/5 java exit 0");
+        }
+    }
+
+    /// N5 (D3): the module selector must not start with "-" (a later command would read it as an option, e.g. bb-portgroup.py's -pl).
+    /// Refused at enqueue (rc 2), nothing queued. Probe p3: the leading-dash check dropped -> red (none of them names the refusal).
+    @ParameterizedTest(name = "module {0}")
+    @ValueSource(strings = {"-pl", "--since", "-"})
+    void aModuleStartingWithADash_isRefusedAtEnqueue(String module) throws Exception {
+        var run = BbFixtures.run(List.of(tools.resolve("bb-test").toString(), co.toString(), module, "fx.CalcTest#passes"), env, null, null);
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isEqualTo(2);
+        assertThat(run.stderr()).contains("module must not start with '-'", module);
+        assertThat(run.stdout()).doesNotContain("queued");
+    }
+
+    /// N5 control: a normal module is accepted and runs.
+    @Test
+    @Timeout(value = 120, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
+    void aNormalModule_isAccepted() throws Exception {
+        green();
+        assertThat(bbTest(Map.of(), "fx.CalcTest#passes").rc()).as(log()).isZero();
+    }
+
+    /// D4: every vbt11 escape form E1-E9 (vbt11-report.md, vbt11a), inserted into a fixture copy of bb-test so that it reads a FIFO under the
+    /// fixture checkout (E8: under /tmp, where the form moved it). The forms escaped the deleted static audits; here each must END within
+    /// the 5 s overall bound with an rc 17 refusal, never hang. E1-E4 and E7-E9 sit after `guard launcher_ok` in the walled launch (the
+    /// report's harness point); E5 before the walled launch's `cd /` (its cwd is the checkout there); E6's `$1` carrier is re-created with
+    /// `set --`, since its own place (enqueue, before `CO=$1`) is outside W: W bounds the launch, not the enqueue. Probe p4: this run.
+    @ParameterizedTest(name = "{0}")
+    @ValueSource(strings = {"E1", "E2", "E3", "E4", "E5", "E6", "E7", "E8", "E9"})
+    @Timeout(value = 120, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
+    void everyVbt11EscapeForm_readingAFifo_endsWithinW_withRc17(String id) throws Exception {
+        var fifo = "[ -p \"$CO/f\" ] || mkfifo \"$CO/f\"; ";
+        var form = switch (id) {
+            case "E1" -> "echo \"$CO/f\" | sed 's/^/cat /e'";
+            case "E2" -> "echo \"$CO\" > /dev/null; sed -n 1p \"$_/f\"";
+            case "E3" -> "[[ $CO =~ (.*) ]]; sed -n 1p \"${BASH_REMATCH[1]}/f\"";
+            case "E4" -> "sed -n 1p \"/proc/$PPID/cwd/f\"";
+            case "E6" -> "set -- \"$CO\"; sed -n 1p \"$1/f\"";
+            case "E7" -> "for g in \"$CO\"/[f]; do sed -n 1p \"$g\"; done";
+            case "E8" -> "R=$(mktemp); echo \"$R\" > '" + dir.resolve("e8.path") + "'; mv \"$CO/f\" \"$R\"; sed -n 1p \"$R\"";
+            case "E9" -> "sed -n 1p \"$tco/f\"";
+            default -> null;
+        };
+        if (form == null) {
+            var cd = "  CO=$(pwd); cd /;";
+            fixtureBbTest(cd, "  [ -z \"${BB_TEST_WALLED:-}\" ] || { [ -p f ] || mkfifo f; V=$(sed -n 1p f); }; CO=$(pwd); cd /;");
+        } else {
+            fixtureBbTest(ANCHOR, ANCHOR + "  " + fifo + form + "\n");
+        }
+        var started = System.nanoTime();
+
+        try {
+            assertRc17(timedBbTest(SHORT_W, "fx.CalcTest#passes"), OVERALL_5S, (System.nanoTime() - started) / 1_000_000_000L);
+            assertThat(id.equals("E8") ? Path.of(Files.readString(dir.resolve("e8.path")).strip()) : co.resolve("f"))
+                      .as("the form reached its FIFO").exists();
+        } finally {
+            if (Files.exists(dir.resolve("e8.path"))) {
+                Files.deleteIfExists(Path.of(Files.readString(dir.resolve("e8.path")).strip()));
+            }
+        }
+    }
+
+    /// D4 control: the instrument can pass. A `bounded` capped read of a regular file in the fixture checkout, inserted at the same point,
+    /// succeeds (rc 0) and its content reaches the result (the build log).
+    @Test
+    @Timeout(value = 120, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
+    void aBoundedReadOfARegularFile_atTheProbePoint_succeeds_andItsContentReachesTheResult() throws Exception {
+        var content = "probe-content-" + System.nanoTime();
+
+        fixtureBbTest(ANCHOR, ANCHOR + "  bounded \"$READ_T\" \"$CO\" - python3 -I -c \"$CAP_PY\" \"$READ_CAP\" \"$CO/.bb/probe.txt\"\n");
+        green();
+        Files.writeString(co.resolve(".bb/probe.txt"), content + "\n");
+        var run = bbTest(Map.of(), "fx.CalcTest#passes");
+
+        assertThat(run.rc()).as(run.doneText() + log()).isZero();
+        assertThat(log()).contains(content);
     }
 
     /// The two classpath reads are bounded the same way (a python3 on PATH that stalls on one read's code, passing every other call through).
