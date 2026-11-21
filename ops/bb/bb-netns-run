@@ -5,7 +5,7 @@
 #   image bb-hostfs:2 = empty skeleton (usr-merge symlinks, empty /sbin); host /usr and the JDK/Debian config dirs are mounted read-only,
 #   the checkout rw (its .m2-local lives inside via .mvn/maven.config); ~/tools and the maven install read-only; NOTHING else of $HOME (2026-11-21, #76:
 #   it was `-v $HOME:$HOME` rw, so test code could rewrite ~/tools/bb-*, other checkouts and the queue). $HOME in the container is a private tmpfs
-#   (owned by the caller, mode 0700, 1 GiB): it exists and is writable (Testcontainers writes ~/.testcontainers.properties, java userPrefs, ~/.cache)
+#   (owned by the caller, mode 0700, 1 GiB, exec: JNA maps a native library it extracts to ~/.cache, docker defaults tmpfs to noexec): it exists and is writable (Testcontainers writes ~/.testcontainers.properties, java userPrefs, ~/.cache)
 #   but is throwaway, and the bind mounts above nest under it at their host paths. Chosen over an empty bind of a host dir because nothing then has to be
 #   created or cleaned on the host, and over a bare read-only $HOME because tools that write there on first use would fail instead of just forgetting.
 #   /tmp is the container own (gone with it); the checkout is the cwd at the SAME path, so
@@ -30,7 +30,7 @@ if ! docker image inspect "$IMG" > /dev/null 2>&1; then
   tar -C "$T" -cf "$T.tar" . && docker import "$T.tar" "$IMG" > /dev/null; rm -rf "$T" "$T.tar"
 fi
 ARGS=(--rm --init --name "bb-$ID" --label "bb.ticket=$ID" --user "$(id -u):$(id -g)" --network "${BB_NETNS_NETWORK:-bridge}"
-      -v /usr:/usr:ro -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro --tmpfs "$HOME:rw,uid=$(id -u),gid=$(id -g),mode=0700,size=1g" -v "$CO:$CO" -w "$CO"
+      -v /usr:/usr:ro -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro --tmpfs "$HOME:rw,exec,uid=$(id -u),gid=$(id -g),mode=0700,size=1g" -v "$CO:$CO" -w "$CO"
       -e "HOME=$HOME" -e "USER=$(id -un)" -e JAVA_HOME=/usr/lib/jvm/java-25-openjdk-amd64 -e PATH=/usr/local/bin:/usr/bin:/bin)
 [ -d "$HOME/tools" ] && ARGS+=(-v "$HOME/tools:$HOME/tools:ro")
 # the maven install: ~/tools/maven is a symlink to an install outside ~/tools on the hosts, so mount what the real path points at (a mvn that is not <home>/bin/mvn: the file)
