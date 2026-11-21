@@ -578,14 +578,16 @@ class BbTestLaunchIT {
 
     /// vbt9: the three remaining calls are bounded too, each with a planted FIFO (a read that blocks forever) and a 3 s bound.
     /// Probe (per row): replace that call's bound by the bare command -> red: the read blocks on the FIFO, the row's 120 s thread timeout fails it.
-    private void passingCheck() throws Exception {   // the stale-jar check passes, so the launch reaches the call under test
+    private void passingCheck() throws Exception {   // the stale-jar check passes, so the launch reaches the call under test; CHECK_FIFO=<path>: each check (re)plants a FIFO there
         var real = tools.resolve("bb-cp-record");
         var text = Files.readString(real);
         var nl = text.indexOf('\n');
 
         BbFixtures.executable(real,
                               text.substring(0, nl + 1)
-                             + "import os, sys\nif len(sys.argv) > 1 and sys.argv[1] == 'check' and os.environ.get('CHECK_OK'):\n    sys.exit(0)\n"
+                             + "import os, sys\nif len(sys.argv) > 1 and sys.argv[1] == 'check' and os.environ.get('CHECK_FIFO'):\n"
+                             + "    f = os.environ['CHECK_FIFO']\n    os.path.lexists(f) and os.remove(f)\n    os.mkfifo(f)\n"
+                             + "if len(sys.argv) > 1 and sys.argv[1] == 'check' and os.environ.get('CHECK_OK'):\n    sys.exit(0)\n"
                              + text.substring(nl + 1));
     }
 
@@ -656,15 +658,16 @@ class BbTestLaunchIT {
         assertThat(build(Map.of("BB_TEST_TICKET_LOG", log)).rc()).as(log()).isZero();
         passingCheck();
         mkfifo(co.resolve(".bb/cp/fx.cp"));
-        mkfifo(co.resolve(".bb/refused"));
-        var started = System.nanoTime();
-        var run = bbTest(Map.of("BB_TEST_TICKET_LOG", log, "CHECK_OK", "1", "BB_CP_READ_TIMEOUT", "3"), "fx.CalcTest#passes");
+        var started = System.nanoTime();   // planted by the launch-time check: bb-build's enqueue clears .bb/refused, so a FIFO planted before it never reaches the write
+        var run = bbTest(Map.of("BB_TEST_TICKET_LOG", log, "CHECK_OK", "1", "CHECK_FIFO", co.resolve(".bb/refused").toString(), "BB_CP_READ_TIMEOUT", "3"),
+                         "fx.CalcTest#passes");
 
         assertThat((System.nanoTime() - started) / 1_000_000_000L).as("cut at the read bound + the write bound, not blocked forever").isLessThan(60);
         assertThat(run.rc()).as(run.doneText()).isEqualTo(15);
         assertThat(Files.readString(co.resolve(".bb/rc")).strip()).isEqualTo("15");
         assertThat(run.doneText()).contains("\nrefused=timeout: the classpath record read did not finish within BB_CP_READ_TIMEOUT=3s", "\nverdict_source=guard\n");
-        assertThat(Files.isRegularFile(co.resolve(".bb/refused"))).as("the planted FIFO was never opened for the write").isFalse();
+        assertThat(BbFixtures.run(List.of("test", "-p", co.resolve(".bb/refused").toString()), Map.of(), null, null).rc())
+                  .as("the FIFO the launch-time check planted is still there: the write met it and was cut").isZero();
     }
 
     /// A bound that is not a positive integer is refused at enqueue (rc 2), never read as "no bound" (timeout 0 would disable it).
