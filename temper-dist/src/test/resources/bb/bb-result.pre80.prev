@@ -1,0 +1,319 @@
+#!/usr/bin/env python3
+# bb-result <ticket-id> [--json]  (issue: lanes burned context reading build.log and surefire XML by hand, ~7.5% of lane tool output)
+# ONE short summary of a FINISHED bb queue ticket: verdict, test counts, the first failing test or the first build error.
+# Installed as ~/tools/bb-result by ops/bb/install-bb-fields.sh. READ-ONLY: no lock, no mkdir, no file written, no reap().
+# python3, not bash: it parses XML and JSON and reads a log by bounded chunks, which bash would do with a pipeline per report.
+#
+# Usage: bb-result <ticket-id> [--json]      <ticket-id> is the ticket= value bb-build printed, ^[0-9]+-[0-9]+$
+# Queue root: ${BB_TEST_QUEUE_ROOT:-$HOME/work/queue}, the lib's own variable.
+# Default output, plain text, at most 5 lines (each cut to 300 chars, the cut marked by "..."):
+#   ticket=<id> state=<state> rc=<rc> wall=<s>s          the fields and sources of bb-wait's line: done/<id> record, wall = ended - created
+#   tests: <n> run, <f> failures, <e> errors, <s> skipped (<k> report files[, <b> bad report files])
+#       or `tests: none (no report written by this build)`
+#       or `tests: unavailable (a later build in this checkout replaced the reports)`
+#   reports: <dir>                       the one report directory, or `<checkout>/… (<n> report dirs)` when there are several modules
+#   first failing: <Class>#<method>: <first line of the message>     when any failure or error exists
+#   first error: <first "[ERROR]" line of the build log>              when rc != 0 and no failing test (not blank, not a bare "[ERROR]")
+# REFUSED (a ticket with refused=, bb-test's resolved junit check): the first line carries verdict=REFUSED, the second is
+#   `refused: <reason naming the resolved versions>`, the tests line is `tests: refused (not a verdict: <reason>)`, and no count, report,
+#   failing test or error line is printed; --json has "verdict":"refused", "refused":<reason>, tests.status "refused", no reports or
+#   failing. Any other ticket: "verdict":"rc" (the rc field is the verdict), "refused":null.
+# --json: one JSON object with the same facts and the full detail: every failing test with its message's first line (cut at 1000 chars),
+#   per-report-file counts, report paths, the log path. A ticket that is not finished: {"v":1,"ticket":..,"state":..,"finished":false}.
+# Exit: 0 a summary of a DONE ticket was printed (the verdict is the rc field, not the exit status); 3 the ticket is waiting or running
+#   (`ticket=<id> state=waiting|running: not finished; use bb-await --ticket <id>`); 4 unknown ticket (in none of waiting/running/done);
+#   2 usage, including a malformed id.
+# REPORT SELECTION: only <co>/**/target/surefire-reports/TEST-*.xml and <co>/**/target/failsafe-reports/TEST-*.xml whose mtime is at or
+#   after the ticket's started=. .git, .m2-local, .bb, node_modules and every src directory are pruned (fixture TEST-*.xml under
+#   src/test/resources are never counted), a target directory is entered only for its two report directories, depth at most 8 below
+#   the checkout, 20 s. Counts are the sum of the testsuite attributes tests/failures/errors/skipped per file; an unparseable file is
+#   counted in `bad report files` and never stops the summary.
+# GUARANTEE and LIMITS: the counts come only from this build's reports, or the line says why not. When the checkout's .bb/start no longer
+#   equals the ticket's started= a later build owns the checkout and overwrote the reports and the log: counts and first error are then
+#   `unavailable`, never another build's numbers. Not guaranteed: a report written by a forked JVM after the waiter recorded `ended` is
+#   still counted when newer than started; a checkout whose .bb/start was deleted is `unavailable` (the overwrite check cannot
+#   be made); the verdict is the ticket's rc, not the XML (a build can be rc 0 with zero
+#   reports, or rc != 0 with none, as in a compile failure). "first failing" is the first by report path, then document order.
+#   The log is scanned in bounded chunks: its first 64 MB, then its last 16 MB; a first [ERROR] line elsewhere is reported as not found.
+#   A mvn run by hand in the checkout AFTER the ticket, outside bb-build, does not touch .bb/start: the ticket then still looks like the
+#   checkout's latest build, and that run's newer reports are counted as the ticket's. Only bb-build runs are told apart.
+#   Only regular files are read (a FIFO or device named TEST-*.xml is skipped). Every character that is not printable (ESC, NUL, DEL, C1,
+#   a byte that is not UTF-8) is printed as `?` in text and --json alike, so a log or a test message cannot drive the terminal.
+import json
+import os
+import re
+import stat
+import sys
+import time
+import xml.etree.ElementTree as ET
+
+ID_RE = re.compile(r'^[0-9]+-[0-9]+$')
+KEY_RE = re.compile(r'^([A-Za-z_]{1,32})=(.*)$')
+LINE_CUT = 300
+MSG_CUT = 1000
+PRUNE = {'.git', '.m2-local', '.bb', 'node_modules', 'src'}
+REPORT_DIRS = {'surefire-reports', 'failsafe-reports'}
+MAX_DEPTH = 8
+WALK_SECONDS = 20
+LOG_HEAD = 64 * 1024 * 1024
+LOG_TAIL = 16 * 1024 * 1024
+CHUNK = 1024 * 1024
+USAGE = 'usage: bb-result <ticket-id> [--json]   (the ticket= value bb-build printed)'
+
+
+def clean(s):
+    """Every char that is not printable (ESC, NUL, DEL, C1, U+FFFD from a bad byte, a lone surrogate) becomes `?`; tab stays."""
+    return ''.join(c if (c == '\t' or (c.isprintable() and c != '\ufffd')) else '?' for c in s)
+
+
+def clean_all(o):
+    if isinstance(o, str):
+        return clean(o)
+    if isinstance(o, list):
+        return [clean_all(x) for x in o]
+    if isinstance(o, dict):
+        return {k: clean_all(v) for k, v in o.items()}
+    return o
+
+
+def cut(s, n=LINE_CUT):
+    return s if len(s) <= n else s[:n - 3] + '...'
+
+
+def read_ticket(path):
+    fields = {}
+    with open(path, 'rb') as f:
+        data = f.read(1 << 20)
+    for raw in data.decode('utf-8', 'replace').splitlines():
+        m = KEY_RE.match(raw)
+        if m:
+            fields[m.group(1)] = m.group(2)
+    return fields
+
+
+def is_num(s):
+    return s is not None and s.isascii() and s.isdigit()
+
+
+def find_reports(co, started):
+    """Report files of this build: (sorted paths, dirs, incomplete)."""
+    found, dirs = [], set()
+    deadline = time.monotonic() + WALK_SECONDS
+    incomplete = False
+    base_depth = co.rstrip('/').count('/')
+    for root, subdirs, files in os.walk(co):
+        if time.monotonic() > deadline:
+            incomplete = True
+            break
+        depth = root.rstrip('/').count('/') - base_depth
+        name = os.path.basename(root)
+        parent = os.path.basename(os.path.dirname(root))
+        if name in REPORT_DIRS and parent == 'target':
+            subdirs[:] = []
+            if depth + 1 <= MAX_DEPTH:
+                for f in files:
+                    if f.startswith('TEST-') and f.endswith('.xml'):
+                        p = os.path.join(root, f)
+                        try:
+                            st = os.stat(p)
+                            if stat.S_ISREG(st.st_mode) and st.st_mtime >= started:   # a FIFO or device would block the parse
+                                found.append(p)
+                                dirs.add(root)
+                        except OSError:
+                            pass
+            continue
+        if name == 'target':
+            subdirs[:] = [d for d in subdirs if d in REPORT_DIRS]
+        else:
+            subdirs[:] = [d for d in subdirs if d not in PRUNE]
+        if depth >= MAX_DEPTH:
+            subdirs[:] = []
+    return sorted(found), sorted(dirs), incomplete
+
+
+def first_line(s):
+    for ln in (s or '').splitlines():
+        if ln.strip():
+            return ln.strip()
+    return ''
+
+
+def parse_report(path):
+    """-> (counts dict, failing list); raises on an unparseable or non-numeric file."""
+    counts = {'tests': 0, 'failures': 0, 'errors': 0, 'skipped': 0}
+    failing = []
+    depth = 0
+    root_tag = None
+    for ev, el in ET.iterparse(path, events=('start', 'end')):
+        if ev == 'start':
+            if depth == 0:
+                root_tag = el.tag
+            if el.tag == 'testsuite' and ((depth == 0) or (depth == 1 and root_tag == 'testsuites')):
+                for k in counts:
+                    counts[k] += int(float(el.get(k, '0') or '0'))
+            depth += 1
+            continue
+        depth -= 1
+        if el.tag == 'testcase':
+            for child in el:
+                if child.tag in ('failure', 'error'):
+                    msg = first_line(child.get('message')) or first_line(child.text)
+                    failing.append({'class': el.get('classname', ''), 'name': el.get('name', ''), 'kind': child.tag,
+                                    'message': cut(msg, MSG_CUT), 'file': path})
+                    break
+            el.clear()
+    return counts, failing
+
+
+def error_text(ln):
+    """The line without trailing blanks when it is `[ERROR]` followed by something other than blanks, else None. Linear: no regex."""
+    if not ln.startswith(b'[ERROR]'):
+        return None
+    if not ln[7:].strip(b' \t\r'):
+        return None
+    return ln.rstrip(b' \t\r').decode('utf-8', 'replace')
+
+
+def first_error(log):
+    def scan(f, start, limit):
+        f.seek(start)
+        left, carry = limit, b''
+        while left > 0:
+            buf = f.read(min(CHUNK, left))
+            if not buf:
+                break
+            left -= len(buf)
+            lines = (carry + buf).split(b'\n')
+            carry = lines.pop()
+            for ln in lines:
+                t = error_text(ln)
+                if t:
+                    return t
+            if len(carry) > CHUNK:
+                carry = carry[:8192]   # a monster line: only its start matters
+        return error_text(carry)
+
+    try:
+        with open(log, 'rb') as f:
+            size = os.fstat(f.fileno()).st_size
+            hit = scan(f, 0, LOG_HEAD)
+            if hit is None and size > LOG_HEAD:
+                hit = scan(f, max(LOG_HEAD, size - LOG_TAIL), LOG_TAIL)
+    except OSError:
+        return None, 'the build log cannot be read'
+    if hit is None:
+        return None, 'no [ERROR] line in the first 64 MB or last 16 MB of the build log' if size > LOG_HEAD else 'no [ERROR] line in the build log'
+    return hit, None
+
+
+def main(argv):
+    as_json, tid = False, None
+    for a in argv:
+        if a == '--json' and not as_json:
+            as_json = True
+        elif tid is None and ID_RE.match(a):
+            tid = a
+        else:
+            print(USAGE, file=sys.stderr)
+            return 2
+    if tid is None:
+        print(USAGE, file=sys.stderr)
+        return 2
+    q = os.environ.get('BB_TEST_QUEUE_ROOT') or os.path.join(os.environ.get('HOME', ''), 'work', 'queue')
+    where = None
+    for d in ('done', 'waiting', 'running'):
+        if os.path.isfile(os.path.join(q, d, tid)):
+            where = d
+            break
+    if where is None:
+        print('bb-result: unknown ticket %s (not in %s/{waiting,running,done})' % (tid, q), file=sys.stderr)
+        return 4
+    if where != 'done':
+        if as_json:
+            print(json.dumps({'v': 1, 'ticket': tid, 'state': where, 'finished': False}))
+        else:
+            print('ticket=%s state=%s: not finished; use bb-await --ticket %s' % (tid, where, tid))
+        return 3
+    t = read_ticket(os.path.join(q, 'done', tid))
+    state, rc, started, ended, co = t.get('state'), t.get('rc'), t.get('started'), t.get('ended'), t.get('co', '')
+    created = t.get('created')
+    cr = int(created) // 1000000000 if is_num(created) else 0
+    wall = int(ended) - cr if is_num(ended) and cr != 0 else None
+    log = t.get('output') or (co + '/.bb/build.log')
+    refused = t.get('refused')  # a bb-test resolved-junit refusal: it REPLACES the verdict (no count, no failing test, no error line)
+    head = 'ticket=%s state=%s rc=%s wall=%ss' % (tid, state or '?', rc if rc else '-', wall if wall is not None else '-')
+    if refused:
+        head = 'ticket=%s state=%s rc=%s verdict=REFUSED wall=%ss' % (tid, state or '?', rc if rc else '-', wall if wall is not None else '-')
+
+    tests = {'status': 'none', 'reason': 'no report written by this build'}
+    reports, dirs, failing, bad = [], [], [], 0
+    owned = True
+    if refused:
+        tests = {'status': 'refused', 'reason': 'not a verdict: ' + refused}
+    elif not os.path.isabs(co) or not is_num(started):
+        tests = {'status': 'none', 'reason': 'the ticket has no started build or no checkout'}
+    else:
+        try:
+            with open(os.path.join(co, '.bb', 'start')) as f:
+                cur = f.read().strip()
+        except OSError:
+            cur = None
+        if cur != started:
+            owned = False
+            reason = ('a later build in this checkout replaced the reports' if cur is not None
+                      else "the checkout's .bb/start is gone")
+            tests = {'status': 'unavailable', 'reason': reason}
+        else:
+            paths, dirs, incomplete = find_reports(co, int(started))
+            tot = {'tests': 0, 'failures': 0, 'errors': 0, 'skipped': 0}
+            for p in paths:
+                try:
+                    c, fl = parse_report(p)
+                except Exception:
+                    bad += 1
+                    reports.append({'path': p, 'bad': True})
+                    continue
+                for k in tot:
+                    tot[k] += c[k]
+                failing += fl
+                reports.append(dict(c, path=p))
+            if paths:
+                tests = dict(tot, status='counted', reportFiles=len(paths), badReportFiles=bad, incomplete=incomplete)
+            elif incomplete:
+                tests = {'status': 'none', 'reason': 'the report search stopped after %d s' % WALK_SECONDS}
+
+    err, err_why = None, None
+    if (rc or '') not in ('', '0') and not failing and not refused:
+        err, err_why = ((None, 'unavailable: a later build in this checkout replaced the log') if not owned
+                        else first_error(log))
+
+    if as_json:
+        out = {'v': 1, 'ticket': tid, 'state': state, 'finished': True, 'rc': int(rc) if is_num(rc) else None,
+               'wall': wall, 'started': int(started) if is_num(started) else None, 'ended': int(ended) if is_num(ended) else None,
+               'co': co, 'log': log, 'tests': tests, 'reportDirs': dirs, 'reports': reports, 'failing': failing,
+               'firstError': err, 'firstErrorNote': err_why, 'verdict': 'refused' if refused else 'rc', 'refused': refused}
+        print(json.dumps(clean_all(out)))
+        return 0
+
+    lines = [head] + (['refused: ' + refused] if refused else [])
+    if tests['status'] == 'counted':
+        extra = '%d report files' % tests['reportFiles'] + (', %d bad report files' % bad if bad else '')
+        tail = ' [search stopped after %d s: counts may be partial]' % WALK_SECONDS if tests['incomplete'] else ''
+        lines.append('tests: %d run, %d failures, %d errors, %d skipped (%s)%s'
+                     % (tests['tests'], tests['failures'], tests['errors'], tests['skipped'], extra, tail))
+        lines.append('reports: ' + (dirs[0] + '/' if len(dirs) == 1 else '%s/… (%d report dirs)' % (co.rstrip('/'), len(dirs))))
+    else:
+        lines.append('tests: %s (%s)' % (tests['status'], tests['reason']))
+    if failing:
+        f = failing[0]
+        lines.append('first failing: %s#%s: %s' % (f['class'], f['name'], f['message']))
+    elif err:
+        lines.append('first error: ' + err)
+    elif err_why:
+        lines.append('first error: ' + err_why)
+    print('\n'.join(cut(clean(ln)) for ln in lines))
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))

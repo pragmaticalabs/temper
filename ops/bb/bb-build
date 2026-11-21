@@ -184,7 +184,8 @@ if [ ! -f "$B/rc" ] && [ -f "$B/start" ]; then
   # lanes rm'd it to "reset" a checkout). Name the second case: no waiting/running ticket for this checkout and the done/ ticket named by .bb/ticket (#80; was: whose started= is this .bb/start), state=finished and a numeric rc= (its build wrote .bb/rc; an orphaned or cancelled run may never have).
   # Anything else (e.g. a BB_QUEUE=0 build, which has no ticket) keeps the running message. One direct done/<ticket> lookup: done/ holds tens
   # of thousands of tickets, so no scan (v50a: a field() fork per file took ~2 min on bigboy).
-  TK=$(cat "$B/ticket" 2>/dev/null || true); LIVE=""; FIN=""
+  TK=$(run_ticket "$CO" || true)   # unknown (no .bb/ticket) leaves TK empty: the plain message below
+  LIVE=""; FIN=""
   for f in "$Q"/waiting/* "$Q"/running/*; do [ -f "$f" ] && [ "$(field "$f" co)" = "$CO" ] && LIVE=${f##*/}; done
   if [ -z "$LIVE" ] && [ -n "$TK" ] && [ -f "$Q/done/$TK" ]; then   # #80: .bb/ticket names the run that owns .bb; none (pre-#80 run) = no guess
     f=$Q/done/$TK
@@ -258,7 +259,7 @@ if [ -n "$KEY" ] && [ "${BB_DEDUP:-1}" != 0 ]; then
     f=$Q/done/$f
     [ "$(field "$f" key)" = "$KEY" ] && [ "$(field "$f" state)" = finished ] || continue
     o=$(field "$f" co)
-    [ -f "$o/.bb/rc" ] && [ "$(cat "$o/.bb/ticket" 2>/dev/null)" = "${f##*/}" ] || continue   # since rebuilt/removed: .bb/ticket names the run that owns .bb now (#80; no .bb/ticket = a pre-#80 run = not current)
+    [ -f "$o/.bb/rc" ] && run_current "$o" "${f##*/}" || continue   # since rebuilt/removed: not current, and unknown (no .bb/ticket, a pre-#80 run) counts as not current (#80)
     echo "dedup: identical build already finished: rc=$(field "$f" rc) ended=$(date -d @"$(field "$f" ended)" -Is) owner=$(field "$f" owner)" >&2
     echo "dedup: read its result at $o/.bb (bb-report $o); BB_DEDUP=0 to run anyway" >&2; exit 8
   done

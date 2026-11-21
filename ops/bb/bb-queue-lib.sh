@@ -42,6 +42,23 @@ TLOG=${BB_TEST_TICKET_LOG:-$HOME/work/bb-ticket-log.tsv}
 [ -n "${LIB_READONLY:-}" ] || mkdir -p "$Q/waiting" "$Q/running" "$Q/done"
 
 field() { sed -n "s/^$2=//p" "$1" 2>/dev/null | tail -1; }
+# RUN IDENTITY (#80). Two runs granted in the same second share a `date +%s` start, so .bb/start cannot say whose run a checkout holds; bb-build
+# writes the granted ticket's id to <co>/.bb/ticket (cleared at enqueue and by never_started). These two functions are the ONLY readers of it.
+#   run_ticket <co>            prints the id in <co>/.bb/ticket; returns 1 (prints nothing) when the file is absent.
+#   run_current <co> <ticket> [<started>]   is <ticket> the checkout's current run? THREE states, by return code:
+#       0 current       .bb/ticket names <ticket>
+#       1 not current   .bb/ticket names another run (a later build owns the checkout)
+#       2 unknown       .bb/ticket is absent (deleted, or a run from before #80) and no <started> was given
+#     With <started> (the ticket's started= second) an absent .bb/ticket is not unknown: it falls back to .bb/start equal to <started>
+#     (0 or 1), the pre-#80 identity, for the caller whose wrong "not current" would be worse than a start-second guess.
+#   Each caller states what 2 means for it at the call. bb-result (python) calls this through `bash -c '. bb-queue-lib.sh; run_current ...'`.
+run_ticket() { [ -f "$1/.bb/ticket" ] || return 1; cat "$1/.bb/ticket"; }
+run_current() {
+  local cur
+  if cur=$(run_ticket "$1"); then [ "$cur" = "$2" ]; return; fi
+  [ $# -ge 3 ] || return 2
+  [ "$(cat "$1/.bb/start" 2>/dev/null)" = "$3" ]
+}
 reactors() { pgrep -u "$USER" -fc "$PAT" || true; }
 waiter_alive() { pgrep -u "$USER" -f -- "bb-build __run $1( |\$)" > /dev/null; }
 # co_reactor_alive <co>: a maven reactor is running with its cwd in <co> OR BELOW it (it outlives a kill -9 of its waiter).

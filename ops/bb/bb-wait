@@ -38,7 +38,7 @@ while :; do
     case "$st" in
       finished)
         co=$(field "$f" co)
-        if n "$rc" && [ "$(cat "$co/.bb/ticket" 2>/dev/null)" = "$ID" ]; then
+        if n "$rc" && run_current "$co" "$ID"; then   # not current or unknown (no .bb/ticket) skips the check
           fr=$(cat "$co/.bb/rc" 2>/dev/null || echo absent)
           [ "$fr" = "$rc" ] || { echo "RC-MISMATCH ticket=$rc file=$fr: the ticket record is the verdict; re-run the build in a fresh checkout; never edit or restore .bb/rc" >&2; exit 71; }
         fi

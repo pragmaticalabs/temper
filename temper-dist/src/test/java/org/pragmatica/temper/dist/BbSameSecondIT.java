@@ -267,4 +267,54 @@ class BbSameSecondIT {
         assertThat(refused.rc()).as(refused.stdout() + refused.stderr()).isEqualTo(3);
         assertThat(refused.stderr()).contains("was deleted by hand after ticket " + first.ticket() + " finished");
     }
+
+    /// THE GREP ROW (CTO ruling, #80): one copy of "is this the checkout's current run?", in bb-queue-lib.sh (run_current). Outside the lib no
+    /// code line of ops/bb compares `.bb/start` with a `started=` and none reads `.bb/ticket` to compare it; comments are not code.
+    private static final Pattern STARTS = Pattern.compile("(/start\"?|\\.bb/start).*started|started.*(/start\"?|\\.bb/start)");
+    private static final Pattern TICKET_READS = Pattern.compile("(cat|read)\\b.*[./]ticket\\b|<\\s*\"?[^ ]*/ticket|'\\.bb',\\s*'ticket'");
+
+    static List<String> inlineIdentityCompares(Path dir) throws Exception {
+        var found = new ArrayList<String>();
+        try (var files = Files.list(dir)) {
+            for (var f : files.filter(Files::isRegularFile).sorted().toList()) {
+                if (f.getFileName().toString().equals("bb-queue-lib.sh")) {
+                    continue;
+                }
+                var n = 0;
+                for (var line : Files.readAllLines(f)) {
+                    n++;
+                    var code = line.replaceFirst("(^|\\s)#.*$", "");
+                    if (STARTS.matcher(code).find() || TICKET_READS.matcher(code).find()) {
+                        found.add(f.getFileName() + ":" + n + ": " + line.strip());
+                    }
+                }
+            }
+        }
+        return found;
+    }
+
+    @Test
+    void noScriptOutsideTheLib_comparesRunIdentityInline() throws Exception {
+        assertThat(inlineIdentityCompares(BbFixtures.OPS_BB)).isEmpty();
+    }
+
+    @Test
+    void theGrepRow_goesRedForOneInlineCompareReAddedInOneCaller(@TempDir Path copy) throws Exception {
+        try (var files = Files.list(BbFixtures.OPS_BB)) {
+            for (var f : files.filter(Files::isRegularFile).toList()) {
+                Files.copy(f, copy.resolve(f.getFileName()));
+            }
+        }
+        for (var mutant : List.of(
+                "[ \"$(cat \"$co/.bb/start\")\" = \"$(field \"$T\" started)\" ]",
+                "[ \"$(cat \"$co/.bb/ticket\" 2>/dev/null)\" = \"$ID\" ]")) {
+            var wait = copy.resolve("bb-wait");
+            var original = Files.readString(wait);
+
+            Files.writeString(wait, original + "\nif " + mutant + "; then :; fi\n");
+
+            assertThat(inlineIdentityCompares(copy)).as(mutant).anyMatch(l -> l.startsWith("bb-wait:"));
+            Files.writeString(wait, original);
+        }
+    }
 }
