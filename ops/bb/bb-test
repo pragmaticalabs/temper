@@ -32,12 +32,27 @@
 # script that expands a checkout variable: the roots below, and every variable assigned (transitively) from a word that expands one
 # (D, BASE, CP, RD, OUT, ...): the checkout's .bb/ records, its target/ trees, the classpath built from them. EVERY command here that
 # opens such content (reads it, runs a program on it, or writes it, a redirect included) runs through bounded() (timeout on the process
-# group, BOUNDS). Named exemptions, each with its reason in the selftest: commands that open no file content ([ ], [[ ]], echo/printf
-# without a redirect, mkdir, mktemp, rm, mv, cd, refuse, exit, return, local), OWN-TEMP (RD and OUT: assigned only from
-# `mktemp "$CO/.bb/..."` or empty, read only after the bounded call that wrote them exited), ENQUEUE (exec bb-build: the queue, which
-# bounds this script's own __launch mode). Anything else fails BbTestGuardIT#everyCheckoutRead_isBounded, which parses this file
-# (comments and heredoc bodies skipped) and prints every command it classified. A .bb/refused write that expires is skipped (10 s
-# fixed bound: BB_CP_READ_TIMEOUT may be the bad value being refused); the ticket's refused= still lands, written first.
+# group, BOUNDS; bounded() opens its <out> file inside the timeout too). Named exemptions, each with its reason in the selftest: commands
+# that open no file content ([ ], [[ ]], echo/printf without a redirect, mkdir, mktemp, rm, mv, refuse, exit, return, local; cd only as
+# the pwd-only `$(cd "$X" && pwd)` or `cd /`), ENQUEUE (exec bb-build: the queue, which bounds this script's own __launch mode). Anything else fails
+# BbTestGuardIT#everyCheckoutRead_isBounded, which parses this file (comments and heredoc bodies skipped) and prints every command it
+# classified. A .bb/refused write that expires is skipped (10 s fixed bound: BB_CP_READ_TIMEOUT may be the bad value being refused); the
+# ticket's refused= still lands, written first.
+# OWN-TEMP (bounded) (CTO ruling via bto23): RD and OUT, this run's mktemp files under .bb/, have NO exemption. Checkout test code runs as
+# this uid while they exist and can name them (java's console file is its stdout: /proc/self/fd/1), so it can swap one for a FIFO, a
+# device or a huge file; a 0700 dir or a regular-file check before the open would be a TOCTOU window, not a bound. The invariant: every
+# open of one runs through bounded(), and every READ of one is CAP_PY under bounded(): at most BB_TEST_READ_CAP bytes (default 1073741824
+# = 1 GiB: no bb-test ticket ran on any host yet; the largest output of any ticket in the cloudbb-5..8 ledgers on 2026-11-21 was a
+# 363735259-byte whole-reactor build.log, and one module's selection is a subset). Over the cap (a huge file, /dev/zero), a FIFO that never
+# opens or ends: a REFUSAL (rc 15) naming the cap or the timeout, never a pass on partial output (refused, not truncated: a truncated record
+# or console is the partial output a verdict must not rest on). A read file is never reused after java ran. The selftest checks it: an
+# own-temp variable (assigned only from mktemp or empty) named by a bounded() call other than as its <out> must be the CAP_PY read.
+# Limit: same-uid code can still rewrite an own-temp file within the cap; the bound guarantees an end within the caps, not the content.
+# NO HIDDEN READS (bto23, bto24): bb-build starts the __launch mode with the checkout as its cwd, where a bare relative word (cat x) would
+# read checkout content through no checkout variable, and no parser can tell a file word from text. So the mode leaves it first
+# (`CO=$(pwd); cd /`, the selftest requires that line); every other cd/pushd/popd outside bounded() is a violation (but the pwd-only
+# `$(cd "$X" && pwd)`), and so is a relative path word (./x, x/y) of a command or redirect outside bounded(). An empty or relative PATH
+# entry is refused at the top (rc 2): `timeout` itself would resolve there.
 # checkout-roots: CO MOD
 # A REFUSAL REPLACES THE VERDICT: rc 15 (the ticket's rc=, so .bb/rc), the ticket gets refused=<reason naming the resolved versions> and
 # verdict_source=guard (never verdict_source=java), .bb/refused holds the same reason, the ticket log's state column reads refused, bb-result
@@ -51,6 +66,7 @@
 # (requireDocker=true|false) state it, so a count with Testcontainers skipped never passes for a full one.
 # Mutation flow (§3) and BB_LOAD (§4) are not implemented here.
 set -euo pipefail
+case ":$PATH:" in *::*|*:[!/]*) echo "bb-test: PATH has an empty or relative entry ($PATH); the launch runs in the checkout, where it would resolve a command (timeout itself) to checkout content, unbounded (NO HIDDEN READS); refused (rc 2)" >&2; exit 2;; esac
 SELF=$(readlink -f "$0"); HERE=$(dirname "$SELF")
 LAUNCHER_VERSION=1.13.4
 LAUNCHER_SHA=${BB_TEST_LAUNCHER_SHA:-3fdfc37e29744a9a67dd5365e81467e26fbde0b7aa204e6f8bbe79eeaa7ae892}
@@ -65,15 +81,40 @@ launcher_ok() {
 }
 
 JAVA_T=${BB_JAVA_TIMEOUT-10800}; READ_T=${BB_CP_READ_TIMEOUT-300}   # set but empty: refused, never the default
+READ_CAP=${BB_TEST_READ_CAP-1073741824}   # OWN-TEMP (bounded): the byte cap of every own-temp read
 TIMED_OUT=
 bounded() {  # <secs> <dir> <out|-> <cmd>...: cmd run in <dir> under `timeout` (BOUNDS), output appended to <out> (-: this script's own stdout/stderr); TIMED_OUT=<secs> on expiry
   local s=$1 d=$2 o=$3 t0=$SECONDS r=0; shift 3
-  if [ "$o" = - ]; then (cd "$d" && exec timeout -k 10 "$s" "$@") || r=$?; else (cd "$d" && exec timeout -k 10 "$s" "$@") >> "$o" 2>&1 || r=$?; fi
+  if [ "$o" = - ]; then (cd "$d" && exec timeout -k 10 "$s" "$@") || r=$?
+  else (cd "$d" && exec timeout -k 10 "$s" sh -c 'o=$1; shift; exec "$@" >> "$o" 2>&1' sh "$o" "$@") || r=$?; fi   # <out> opened under the timeout: a FIFO swapped in for it costs at most <secs>
   TIMED_OUT=; case "$r" in 124|137) [ $((SECONDS - t0)) -lt "$s" ] || TIMED_OUT=$s;; esac   # a fast own exit 124/137 is java's, not ours
   return "$r"
 }
-bounds_ok() { [[ $JAVA_T =~ ^[1-9][0-9]*$ && $READ_T =~ ^[1-9][0-9]*$ ]]; }
-BOUNDS_BAD="BB_JAVA_TIMEOUT ($JAVA_T) and BB_CP_READ_TIMEOUT ($READ_T) must be positive integers (seconds)"
+bounds_ok() { [[ $JAVA_T =~ ^[1-9][0-9]*$ && $READ_T =~ ^[1-9][0-9]*$ && $READ_CAP =~ ^[1-9][0-9]{0,15}$ ]]; }
+BOUNDS_BAD="BB_JAVA_TIMEOUT ($JAVA_T) and BB_CP_READ_TIMEOUT ($READ_T) must be positive integers (seconds), BB_TEST_READ_CAP ($READ_CAP) a positive byte count"
+# cap_check <rc of a bounded CAP_PY read> <its start, $SECONDS> <what>: 0 returns; else refuses (rc 15) naming the cap, the timeout or the exit
+cap_check() {
+  case $1 in
+    0) return 0;;
+    3) refuse "byte cap: $3 is over BB_TEST_READ_CAP=${READ_CAP} bytes; it was not read";;
+    124|137) [ $((SECONDS - $2)) -lt "$READ_T" ] || refuse "timeout: reading $3 did not finish within BB_CP_READ_TIMEOUT=${READ_T}s; its process group was killed";;
+  esac
+  refuse "$3 cannot be read (exit $1)"
+}
+
+# CAP_PY <cap> <file>: the file's bytes on stdout if it holds at most <cap>, else exit 3 with nothing written (OWN-TEMP (bounded)).
+read -r -d '' CAP_PY <<'PY' || true
+# bb-test own-temp read
+import os, sys
+cap = int(sys.argv[1])
+with open(sys.argv[2], 'rb') as f:
+    if os.fstat(f.fileno()).st_size > cap:
+        sys.exit(3)
+    b = f.read(cap + 1)
+if len(b) > cap:
+    sys.exit(3)
+sys.stdout.buffer.write(b)
+PY
 
 # ENTRY_PY <classpath>: "b <entry> is a <kind>" for the first entry that exists but is neither a regular file nor a directory, else "ok".
 read -r -d '' ENTRY_PY <<'PY' || true
@@ -145,7 +186,7 @@ PY
 if [ "${1:-}" = __launch ]; then
   # ---- the queue ticket's job: runs where maven would, in the checkout. args: <module> <repeat> <selector>... [-D...] ----
   shift
-  CO=$(pwd); MOD=$1; REPEAT=$2; shift 2
+  CO=$(pwd); cd /; MOD=$1; REPEAT=$2; shift 2   # NO HIDDEN READS: leave the checkout cwd, so a bare relative word never names checkout content
   . "$HERE/bb-queue-lib.sh"
   TICKET=""; N=0
   for f in "$Q"/running/*; do [ -f "$f" ] && [ "$(field "$f" co)" = "$CO" ] && { TICKET=${f##*/}; N=$((N + 1)); }; done
@@ -175,7 +216,8 @@ if [ "${1:-}" = __launch ]; then
   RD=$(mktemp "$CO/.bb/bb-test-read.XXXXXX"); r=0
   bounded "$READ_T" "$CO" "$RD" "$HERE/bb-cp-record" check "$CO" "$MOD" || r=$?   # the stale-jar check is bounded like every read (BOUNDS)
   [ -z "$TIMED_OUT" ] || refuse "timeout: the stale-jar check did not finish within BB_CP_READ_TIMEOUT=${READ_T}s; its process group was killed"
-  cat "$RD"; rm -f "$RD"; RD=
+  c=0; t0=$SECONDS; bounded "$READ_T" "$CO" - python3 -I -c "$CAP_PY" "$READ_CAP" "$RD" || c=$?   # OWN-TEMP (bounded): every read is capped
+  cap_check "$c" "$t0" "the stale-jar check's output"; rm -f "$RD"; RD=
   [ "$r" = 0 ] || { source_is guard; exit "$r"; }
   guard launcher_ok
   JAVA=${BB_TEST_JAVA:-${JAVA_HOME:-/usr/lib/jvm/java-25-openjdk-amd64}/bin/java}
@@ -183,13 +225,17 @@ if [ "${1:-}" = __launch ]; then
   bounded "$READ_T" "$CO" "$RD" cat "$CO/.bb/cp/${MOD//\//__}.cp" || r=$?
   [ -z "$TIMED_OUT" ] || refuse "timeout: the classpath record read did not finish within BB_CP_READ_TIMEOUT=${READ_T}s; its process group was killed"
   [ "$r" = 0 ] || refuse "the classpath record cannot be read (exit $r)"
-  CP="$CO/$MOD/target/test-classes:$CO/$MOD/target/classes:$(cat "$RD")"; rm -f "$RD"; RD=
+  c=0; t0=$SECONDS; X=$(bounded "$READ_T" "$CO" - python3 -I -c "$CAP_PY" "$READ_CAP" "$RD") || c=$?
+  cap_check "$c" "$t0" "the classpath record"; rm -f "$RD"; RD=
+  CP="$CO/$MOD/target/test-classes:$CO/$MOD/target/classes:$X"
   # vbt7 F2 (fail closed, never hang): java opens every classpath entry, so a FIFO or device entry (or a symlink to one) would block it
   # before the resolved check is ever reached. Such an entry is refused here, before java runs; the check itself is bounded (BOUNDS).
   RD=$(mktemp "$CO/.bb/bb-test-read.XXXXXX"); r=0
   bounded "$READ_T" "$CO" "$RD" python3 -I -c "$ENTRY_PY" "$CP" || r=$?
   [ -z "$TIMED_OUT" ] || refuse "timeout: the classpath entry check did not finish within BB_CP_READ_TIMEOUT=${READ_T}s; its process group was killed"
-  E=$(sed -n '/^\(ok\|b .*\)$/{p;q}' "$RD")
+  c=0; t0=$SECONDS; X=$(bounded "$READ_T" "$CO" - python3 -I -c "$CAP_PY" "$READ_CAP" "$RD") || c=$?
+  cap_check "$c" "$t0" "the classpath entry check's output"; rm -f "$RD"; RD=   # never reused after java ran
+  E=$(printf '%s\n' "$X" | sed -n '/^\(ok\|b .*\)$/{p;q}')
   [ "$r" = 0 ] && [ -n "$E" ] || refuse "the classpath entry check failed (exit $r)"
   [ "$E" = ok ] || refuse "unreadable classpath entry: ${E#b }, not a regular file or directory"
   RC=0; RDK=false
@@ -203,22 +249,32 @@ if [ "${1:-}" = __launch ]; then
     bounded "$JAVA_T" "$CO/$MOD" "$OUT" "$JAVA" ${JVM[@]+"${JVM[@]}"} -jar "$LAUNCHER_JAR" execute --disable-banner --fail-if-no-tests \
         --class-path "$CP" --reports-dir "$D" "${SELS[@]}" || r=$?
     JT=$TIMED_OUT   # bounded() below resets TIMED_OUT
-    : > "$RD"   # the count is bounded too (BOUNDS); fail closed: an expiry prints "count timed out" and REFUSES, never a count, never a pass
+    RD=$(mktemp "$CO/.bb/bb-test-read.XXXXXX")   # a fresh file: the count is bounded too (BOUNDS); fail closed: an expiry prints "count timed out" and REFUSES, never a count, never a pass
     bounded "$READ_T" "$CO" "$RD" "$HERE/bb-testcount" "$D" || true
-    if [ -n "$TIMED_OUT" ]; then CNT="count timed out after ${READ_T}s (BB_CP_READ_TIMEOUT)"; else CNT=$(tr '\n' ' ' < "$RD"); fi
-    echo "bb-test: run $i/$REPEAT java exit $r; requireDocker=$RDK; $CNT" >> "$OUT"
+    if [ -n "$TIMED_OUT" ]; then CNT="count timed out after ${READ_T}s (BB_CP_READ_TIMEOUT)"; else
+      c=0; t0=$SECONDS; X=$(bounded "$READ_T" "$CO" - python3 -I -c "$CAP_PY" "$READ_CAP" "$RD") || c=$?
+      cap_check "$c" "$t0" "the testcount output of run $i/$REPEAT"; CNT=$(printf '%s\n' "$X" | tr '\n' ' ')
+    fi
+    rm -f "$RD"; RD=; TO=$TIMED_OUT; w=0
+    bounded "$READ_T" "$CO" "$OUT" printf '%s\n' "bb-test: run $i/$REPEAT java exit $r; requireDocker=$RDK; $CNT" || w=$?   # OUT opened under the bound
+    [ -z "$TIMED_OUT" ] || refuse "timeout: the console file write of run $i/$REPEAT did not finish within BB_CP_READ_TIMEOUT=${READ_T}s; its process group was killed"
+    [ "$w" = 0 ] || refuse "the console file cannot be written (run $i/$REPEAT, exit $w)"
+    TIMED_OUT=$TO
     [ -z "$JT" ] || refuse "timeout: java run $i/$REPEAT did not finish within BB_JAVA_TIMEOUT=${JAVA_T}s; its process group was killed"
     [ -z "$TIMED_OUT" ] || refuse "timeout: the testcount read of run $i/$REPEAT did not finish within BB_CP_READ_TIMEOUT=${READ_T}s; its process group was killed"
     [ "$r" -le "$RC" ] || RC=$r
   done
-  : > "$RD"; r=0
+  RD=$(mktemp "$CO/.bb/bb-test-read.XXXXXX"); r=0
   bounded "$READ_T" "$CO" "$RD" python3 -I -c "$JUNIT_PY" "$LAUNCHER_VERSION" "$CP" || r=$?
   [ -z "$TIMED_OUT" ] || refuse "timeout: the resolved junit read did not finish within BB_CP_READ_TIMEOUT=${READ_T}s; its process group was killed"
-  JUNIT=$(sed -n '/^[vx] /{p;q}' "$RD"); rm -f "$RD"; RD=
+  c=0; t0=$SECONDS; X=$(bounded "$READ_T" "$CO" - python3 -I -c "$CAP_PY" "$READ_CAP" "$RD") || c=$?
+  cap_check "$c" "$t0" "the resolved junit read's output"; rm -f "$RD"; RD=
+  JUNIT=$(printf '%s\n' "$X" | sed -n '/^[vx] /{p;q}')
   [ "$r" = 0 ] && [ -n "$JUNIT" ] || JUNIT="x the read of the classpath's junit jars failed"
   [ "${JUNIT%% *}" = v ] || refuse "junit version: ${JUNIT#x }; the launcher is junit-platform $LAUNCHER_VERSION"
+  c=0; t0=$SECONDS; bounded "$READ_T" "$CO" - python3 -I -c "$CAP_PY" "$READ_CAP" "$OUT" || c=$?   # printed whole or not at all
+  cap_check "$c" "$t0" "the console output"; rm -f "$OUT"
   source_is java
-  cat "$OUT"; rm -f "$OUT"
   echo "bb-test: resolved junit on the test classpath: ${JUNIT#v }"
   exit "$RC"
 fi

@@ -629,6 +629,70 @@ class BbTestLaunchIT {
         assertThat(run.doneText()).doesNotContain("verdict_source=java");
     }
 
+    /// OWN-TEMP (bounded) (CTO ruling via bto23): test code runs as this uid while OUT (java's console file) exists, and names it as its own
+    /// stdout (/proc/$$/fd/1). Swapped for a FIFO mid-run, the count-line write (nobody reads it) or the console read (a holder keeps a
+    /// writer, so it never ends) is cut at the bound and REFUSED, never a hang, never a pass on partial output.
+    /// Probe P-a: this row on the old bb-test (a28a356b9: `echo ... >> "$OUT"`, `cat "$OUT"`) -> red (the open blocks; the row's timeout).
+    @ParameterizedTest(name = "{0}")
+    @ValueSource(strings = {"fifo", "held fifo"})
+    @Timeout(value = 90, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
+    void testCodeSwappingTheConsoleFileForAFifo_isRefusedWithinTheBound_neverHangsNorPasses(String form) throws Exception {
+        var log = dir.resolve("ticket-log.tsv").toString();
+        var holder = dir.resolve("holder.pid");
+        var java = BbFixtures.executable(dir.resolve("stub/swap-java"),
+                                         "#!/usr/bin/env bash\no=$(readlink /proc/$$/fd/1); rm -f \"$o\"; mkfifo \"$o\"\n"
+                                        + (form.equals("fifo") ? "" : "sleep 600 <> \"$o\" >/dev/null 2>&1 &\necho $! > \"" + holder + "\"\n")
+                                        + "exit 0\n");
+
+        assertThat(build(Map.of("BB_TEST_TICKET_LOG", log)).rc()).as(log()).isZero();
+        var started = System.nanoTime();
+        var run = bbTest(Map.of("BB_TEST_TICKET_LOG", log, "BB_TEST_JAVA", java.toString(), "BB_CP_READ_TIMEOUT", "3"), "fx.CalcTest#passes");
+
+        if (Files.exists(holder)) {
+            stalled.add(Long.parseLong(Files.readString(holder).strip()));
+        }
+        assertTimeoutRefusal(run, form.equals("fifo")
+                                  ? "the console file write of run 1/1 did not finish within BB_CP_READ_TIMEOUT=3s; its process group was killed"
+                                  : "reading the console output did not finish within BB_CP_READ_TIMEOUT=3s; its process group was killed",
+                             (System.nanoTime() - started) / 1_000_000_000L, List.of());
+        var kept = co.resolve("fx/target/bb-test-reports").resolve(run.id() + ".refused").resolve("console.txt");
+
+        assertThat(Files.exists(kept) && !Files.isRegularFile(kept)).as("the FIFO is kept as the console, never read").isTrue();
+    }
+
+    /// OWN-TEMP (bounded): every own-temp read holds at most BB_TEST_READ_CAP bytes (default 1 GiB; 4096 here). Console output past it, or the
+    /// console file swapped for /dev/zero by the test code, is REFUSED naming the byte cap, never printed in part. Control: the same run under
+    /// the default cap passes, java's exit is the verdict. Probe: drop the cap (a28a356b9's `cat "$OUT"`) -> red.
+    @ParameterizedTest(name = "{0}")
+    @ValueSource(strings = {"grown", "dev-zero"})
+    @Timeout(value = 90, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
+    void consoleOutputPastTheByteCap_isRefusedNamingTheCap_neverPrintedInPart(String form) throws Exception {
+        var log = dir.resolve("ticket-log.tsv").toString();
+        var java = BbFixtures.executable(dir.resolve("stub/big-java"),
+                                         "#!/usr/bin/env bash\n"
+                                        + (form.equals("grown") ? "head -c 10000 /dev/zero | tr '\\0' x\n"
+                                                                : "o=$(readlink /proc/$$/fd/1); rm -f \"$o\"; ln -s /dev/zero \"$o\"\n")
+                                        + "exit 0\n");
+
+        assertThat(build(Map.of("BB_TEST_TICKET_LOG", log)).rc()).as(log()).isZero();
+        var run = bbTest(Map.of("BB_TEST_TICKET_LOG", log, "BB_TEST_JAVA", java.toString(), "BB_TEST_READ_CAP", "4096"), "fx.CalcTest#passes");
+        var why = "byte cap: the console output is over BB_TEST_READ_CAP=4096 bytes; it was not read";
+
+        assertThat(run.rc()).as(run.doneText()).isEqualTo(15);
+        assertThat(Files.readString(co.resolve(".bb/rc")).strip()).isEqualTo("15");
+        assertThat(run.doneText()).contains("\nrefused=" + why, "\nverdict_source=guard\n").doesNotContain("verdict_source=java");
+        assertThat(Files.readString(co.resolve(".bb/refused"))).contains(why);
+        assertThat(bbResult(run.id()).stdout()).contains("rc=15 verdict=REFUSED", "refused: " + why).doesNotContain("xxxxxxxx");
+        if (form.equals("grown")) {
+            assertThat(Files.size(co.resolve("fx/target/bb-test-reports").resolve(run.id() + ".refused").resolve("console.txt")))
+                      .as("the whole console is kept for the reader, not printed").isGreaterThan(10000);
+            var control = bbTest(Map.of("BB_TEST_TICKET_LOG", log, "BB_TEST_JAVA", java.toString()), "fx.CalcTest#passes");
+
+            assertThat(control.rc()).as("control: the default cap: " + control.doneText()).isZero();
+            assertThat(control.doneText()).contains("verdict_source=java").doesNotContain("refused=");
+        }
+    }
+
     @Test
     @Timeout(value = 120, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
     void aPortGroupClassifierThatBlocksOnRead_isRefusedNamingTheTimeout_atEnqueue_nothingQueued() throws Exception {

@@ -13,8 +13,12 @@ import java.util.regex.Pattern;
 /// check is the right instrument). Definition, as the script's header states it: a CHECKOUT VARIABLE is a root named on the
 /// header's `# checkout-roots:` line, or any variable assigned (transitively) from a word that expands one. Every simple command
 /// (command substitutions included, each its own command) whose words or redirect targets expand a checkout variable is classified:
-/// BOUNDED (runs through bounded()), one of the named exemptions below (each with its reason), or VIOLATION. Comments and heredoc
-/// bodies are skipped. Not a full shell parser: separators ; && || | & ( ) { } and newlines split commands; $(..) nests; $((..)),
+/// BOUNDED (runs through bounded()), one of the named exemptions below (each with its reason), or VIOLATION. OWN-TEMP (a checkout
+/// variable assigned only from `$(mktemp ...)` or empty: RD, OUT) has no exemption: named by a bounded() call other than as its <out>, the
+/// call must be the CAP_PY read (the byte cap). NO HIDDEN READS: a cd/pushd onto a checkout variable (but `$(cd "$X" && pwd)`) and a
+/// relative path word of a command or redirect, outside bounded(), are VIOLATIONs; so is any cd/pushd/popd but `cd /` and the pwd-only
+/// form, and the __launch mode must leave the checkout cwd (`CO=$(pwd); cd /`), since a bare relative word cannot be told from text.
+/// Comments and heredoc bodies are skipped. Not a full shell parser: separators ; && || | & ( ) { } and newlines split commands; $(..) nests; $((..)),
 /// ${..} and quotes are opaque words; single-quoted text expands nothing.
 final class BbTestReadAudit {
     record Call(int line, String verdict, String text) {
@@ -24,7 +28,7 @@ final class BbTestReadAudit {
         }
     }
 
-    record Audit(List<String> roots, Set<String> checkoutVars, List<Call> calls, List<String> problems) {}
+    record Audit(List<String> roots, Set<String> checkoutVars, Set<String> ownTemp, List<Call> calls, List<String> problems) {}
 
     /// Commands that open no file content: their checkout-derived words are names or text, never read. A redirect on any of them
     /// is classified on its own.
@@ -39,20 +43,21 @@ final class BbTestReadAudit {
         NO_CONTENT.put("mktemp", "creates a new file O_EXCL; opens no existing content");
         NO_CONTENT.put("rm", "unlinks; opens no file content");
         NO_CONTENT.put("mv", "renames; opens no file content");
-        NO_CONTENT.put("cd", "changes directory; opens no file content");
         NO_CONTENT.put("refuse", "this script's own function: its body is audited command by command like the rest");
         NO_CONTENT.put("exit", "shell builtin; opens nothing");
         NO_CONTENT.put("return", "shell builtin; opens nothing");
         NO_CONTENT.put("local", "shell builtin (assignments); opens nothing");
     }
 
-    static final Set<String> OWN_TEMP_VARS = Set.of("RD", "OUT");
-    static final String OWN_TEMP = "OWN-TEMP (RD, OUT: this run's own mktemp files under .bb/, assigned only from mktemp \"$CO/.bb/...\" or empty;"
-                                   + " read only after the bounded call that wrote them exited)";
+    static final String CAPPED_READ = "python3 -I -c \"$CAP_PY\" \"$READ_CAP\" ";
+    static final Pattern OWN_TEMP_VALUE = Pattern.compile("^(\\$\\(mktemp [^()]*\\))?$");
+    static final Pattern PWD_ONLY_CD = Pattern.compile("\\$\\(cd \"\\$\\{?[A-Za-z_][A-Za-z0-9_]*\\}?\" && pwd\\)");
+    static final Pattern RELATIVE = Pattern.compile("^(\\.\\.?/|[A-Za-z0-9_.][A-Za-z0-9_.+-]*/)");
+    static final Set<String> CD = Set.of("cd", "pushd", "popd");
+    static final Pattern LEAVES_CHECKOUT = Pattern.compile("(?m)^  CO=\\$\\(pwd\\); cd /; ");
     static final String ENQUEUE = "ENQUEUE (exec bb-build: hands the checkout to the queue, which runs this script's bounded __launch mode)";
     static final Pattern ROOTS = Pattern.compile("(?m)^# checkout-roots:((?: [A-Z_][A-Z0-9_]*)+)$");
     static final Pattern ASSIGN = Pattern.compile("^([A-Za-z_][A-Za-z0-9_]*)\\+?=(.*)$", Pattern.DOTALL);
-    static final Pattern OWN_TEMP_VALUE = Pattern.compile("^(\\$\\(mktemp \"\\$CO/\\.bb/[A-Za-z.-]+XXXXXX\"\\))?$");
     static final Pattern BOUNDED_DEF = Pattern.compile("(?ms)^bounded\\(\\) \\{(.*?)^\\}$");
     static final String SUB = "\u0001";
     static final Set<String> KEYWORDS = Set.of("if", "then", "else", "elif", "do", "while", "until", "!", "time");
@@ -63,7 +68,7 @@ final class BbTestReadAudit {
         var problems = new ArrayList<String>();
         var rootLine = ROOTS.matcher(source);
         if (!rootLine.find()) {
-            return new Audit(List.of(), Set.of(), List.of(), List.of("no '# checkout-roots: <VAR>...' line in the header"));
+            return new Audit(List.of(), Set.of(), Set.of(), List.of(), List.of("no '# checkout-roots: <VAR>...' line in the header"));
         }
         var roots = List.of(rootLine.group(1).strip().split(" "));
         var def = BOUNDED_DEF.matcher(source);
@@ -71,11 +76,20 @@ final class BbTestReadAudit {
             problems.add("no top-level bounded() definition");
         } else {
             var body = def.group(1);
-            var runs = count(body, "\"$@\"");
-            var timed = count(body, "exec timeout -k 10 \"$s\" \"$@\"");
-            if (runs == 0 || runs != timed) {
+            var code = String.join("\n", body.lines().map(BbTestReadAudit::stripComment).toList());
+            var runs = count(code.replaceAll("'[^']*'", "''"), "\"$@\"");
+            var timed = count(code, "(cd \"$d\" && exec timeout -k 10 \"$s\" ");
+            if (runs == 0 || runs != timed || runs != count(code, "(cd \"$d\" && exec ")) {
                 problems.add("bounded() runs its command " + runs + " time(s), " + timed + " of them under exec timeout -k 10 \"$s\"");
             }
+            if (Pattern.compile("\\)\\s*[0-9&]*>").matcher(code).find()) {
+                problems.add("bounded() opens its <out> outside the timeout (a redirect on the subshell): a FIFO there would hang it");
+            }
+        }
+        var defLines = def.reset().find() ? new int[] {lineOf(source, def.start(1)), lineOf(source, def.end(1))} : new int[] {0, -1};
+        if (!LEAVES_CHECKOUT.matcher(source).find()) {
+            problems.add("the __launch mode does not leave the checkout cwd (`  CO=$(pwd); cd /; `): a bare relative word (cat x) would read"
+                         + " checkout content through no checkout variable");
         }
         var segs = segments(source);
         var vars = new LinkedHashSet<>(roots);
@@ -91,17 +105,27 @@ final class BbTestReadAudit {
                 }
             }
         }
+        var ownTemp = new LinkedHashSet<>(vars);
         for (var seg : segs) {
             for (var i = 0; i < seg.words().size(); i++) {
                 var a = assigned(seg, i);
-                if (a != null && OWN_TEMP_VARS.contains(a[0]) && !OWN_TEMP_VALUE.matcher(a[1]).matches()) {
-                    problems.add("line " + seg.line() + ": " + a[0] + " is OWN-TEMP but assigned " + a[1]);
+                if (a != null && !OWN_TEMP_VALUE.matcher(a[1]).matches()) {
+                    ownTemp.remove(a[0]);
                 }
+            }
+        }
+        ownTemp.removeAll(roots);
+        var pwdOnly = new LinkedHashMap<Integer, Integer>();
+        var lines = source.split("\n", -1);
+        for (var n = 0; n < lines.length; n++) {
+            var m = PWD_ONLY_CD.matcher(stripComment(lines[n]));
+            while (m.find()) {
+                pwdOnly.merge(n + 1, 1, Integer::sum);
             }
         }
         var calls = new ArrayList<Call>();
         for (var seg : segs) {
-            var verdict = classify(seg, vars);
+            var verdict = classify(seg, vars, ownTemp, pwdOnly, defLines);
             if (verdict != null) {
                 calls.add(new Call(seg.line(), verdict, String.join(" ", seg.full())));
             }
@@ -111,7 +135,11 @@ final class BbTestReadAudit {
                 problems.add(call.toString());
             }
         }
-        return new Audit(roots, vars, calls, problems);
+        return new Audit(roots, vars, ownTemp, calls, problems);
+    }
+
+    private static int lineOf(String text, int offset) {
+        return (int) text.substring(0, offset).chars().filter(c -> c == '\n').count() + 1;
     }
 
     private static int count(String text, String needle) {
@@ -171,7 +199,7 @@ final class BbTestReadAudit {
     private static final Pattern REDIRECT = Pattern.compile("^([0-9]*|&)(<|>>|>)(&?)(.*)$", Pattern.DOTALL);
 
     /// null: the command expands no checkout variable (outside the definition).
-    private static String classify(Seg seg, Set<String> vars) {
+    private static String classify(Seg seg, Set<String> vars, Set<String> ownTemp, Map<Integer, Integer> pwdOnly, int[] defLines) {
         var words = new ArrayList<String>();
         var opens = new ArrayList<String[]>();   // {op, target}
         for (var i = 0; i < seg.words().size(); i++) {
@@ -187,22 +215,47 @@ final class BbTestReadAudit {
             }
             words.add(w);
         }
+        var k = 0;
+        while (k < words.size() && (KEYWORDS.contains(words.get(k)) || ASSIGN.matcher(words.get(k)).matches())) {
+            k++;
+        }
+        var c = k < words.size() && (words.get(k).equals("builtin") || words.get(k).equals("command")) ? k + 1 : k;
+        if (c < words.size() && CD.contains(words.get(c))) {
+            if (seg.line() >= defLines[0] && seg.line() <= defLines[1]) {
+                return null;                                    // bounded()'s own (cd "$d" && exec timeout ...): the definition rule checks it
+            }
+            if (pwdOnly.getOrDefault(seg.line(), 0) > 0) {
+                pwdOnly.merge(seg.line(), -1, Integer::sum);
+                return "NO-CONTENT cd (the pwd-only $(cd \"$X\" && pwd): its subshell runs nothing else)";
+            }
+            if (words.size() == c + 2 && words.get(c).equals("cd") && words.get(c + 1).equals("/")) {
+                return "NO-CONTENT cd / (leaves the checkout cwd: a bare relative word then resolves under /, never in the checkout)";
+            }
+            return "VIOLATION (" + String.join(" ", words.subList(c, words.size())) + " outside bounded(): a relative read after it names no checkout variable)";
+        }
+        var bounded = k < words.size() && words.get(k).equals("bounded");
+        if (!bounded) {
+            for (var o : opens) {
+                if (RELATIVE.matcher(o[1].replace("\"", "")).find()) {
+                    return "VIOLATION (redirect " + o[0] + " onto the relative path " + o[1] + ": it resolves against the cwd, not through a checkout variable)";
+                }
+            }
+            for (var w : words.subList(Math.min(k, words.size()), words.size())) {
+                if (RELATIVE.matcher(w.replace("\"", "")).find()) {
+                    return "VIOLATION (the relative path " + w + ", not through bounded: the launch's cwd is the checkout)";
+                }
+            }
+        }
         var all = String.join(" ", seg.words());
         if (!mentions(all, vars)) {
             return null;
         }
-        String openVerdict = null;
         for (var o : opens) {
-            var hit = mentioned(o[1], vars);
-            if (hit.isEmpty()) {
-                continue;
-            }
-            if (!OWN_TEMP_VARS.containsAll(hit)) {
+            if (!mentioned(o[1], vars).isEmpty()) {
                 return "VIOLATION (redirect " + o[0] + " onto checkout content " + o[1] + ", not through bounded)";
             }
-            openVerdict = OWN_TEMP;
         }
-        var k = 0;
+        k = 0;
         while (k < words.size() && (KEYWORDS.contains(words.get(k)) || ASSIGN.matcher(words.get(k)).matches())) {
             k++;
         }
@@ -210,25 +263,31 @@ final class BbTestReadAudit {
             return null;
         }
         if (k == words.size()) {
-            return openVerdict == null ? "ASSIGN (no command; derives a checkout variable)" : openVerdict;
+            return "ASSIGN (no command; derives a checkout variable)";
         }
         var cmd = words.get(k);
         var args = String.join(" ", words.subList(k, words.size()));
         if (cmd.equals("bounded")) {
-            return "BOUNDED";
+            var read = words.subList(Math.min(k + 4, words.size()), words.size());
+            var head = String.join(" ", words.subList(k + 1, Math.min(k + 3, words.size())));
+            var temp = mentioned(String.join(" ", read) + " " + head, ownTemp);
+            if (temp.isEmpty()) {
+                return "BOUNDED";
+            }
+            var capped = k + 3 < words.size() && words.get(k + 3).equals("-") && read.size() == 6
+                         && String.join(" ", read).startsWith(CAPPED_READ) && ownTemp.stream().anyMatch(v -> read.get(5).equals("\"$" + v + "\""));
+            return capped ? "BOUNDED (capped own-temp read: CAP_PY, BB_TEST_READ_CAP bytes)"
+                          : "VIOLATION (bounded() reads own-temp " + temp + " without the byte cap: it must be - " + CAPPED_READ + "\"$V\")";
         }
         if (cmd.equals("exec") && k + 1 < words.size() && words.get(k + 1).equals("\"$HERE/bb-build\"")) {
             return ENQUEUE;
         }
         if (NO_CONTENT.containsKey(cmd)) {
-            return openVerdict != null ? openVerdict : "NO-CONTENT " + cmd + " (" + NO_CONTENT.get(cmd) + ")";
+            return "NO-CONTENT " + cmd + " (" + NO_CONTENT.get(cmd) + ")";
         }
         var hit = mentioned(args, vars);
         if (hit.isEmpty()) {
-            return openVerdict;
-        }
-        if (OWN_TEMP_VARS.containsAll(hit)) {
-            return OWN_TEMP;
+            return null;
         }
         return "VIOLATION (" + cmd + " opens checkout content " + hit + ", not through bounded)";
     }
