@@ -65,7 +65,7 @@ readonly BB_BUILD_PREHELP=a942996fc17ef7851bac693f135defc2   # the #64 version: 
 readonly BB_BUILD_PRESINCE=24183c7d359b4030faeef894bbe4ba52   # the #67 version, live on every host from 2026-11-21: no --since (docs/bb-build-once-design.md section 1)
 readonly BB_BUILD_PREFIELDS=399f2414202fb5b9676960ff5b1ffece   # the #63 version: a full session triple overwrote since=/modules= (issue #75)
 readonly BB_BUILD_PRETICKET=2810f93c875ad9a106c2cda284babb81   # the pre-#80 version: dedup identifies a run by its start second (issue #80)
-readonly BB_BUILD_NEW=f26638c49ed812636fa7c4a57f60c7ed
+readonly BB_BUILD_NEW=265f607ba4fc8a1dedd49d30ba145380
 # bb-jbct-bootstrap: absent on every host before its first install; bb-build calls it, so it is installed first.
 readonly BB_JBCTBOOT_NEW=3e5396ecee48b99949456cf805df1e60
 # bb-result: absent on every host before its first install. No trailing comment on a pin line: bb-drift reads it by pattern.

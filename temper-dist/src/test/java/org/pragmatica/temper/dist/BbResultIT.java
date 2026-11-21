@@ -486,6 +486,7 @@ class BbResultIT {
         assertThat(logJson.stdout()).contains("bad?[31mr?? end").doesNotContain("\\u001b").doesNotContain("\\u0000");
 
         done("4-7", "finished", "1");
+        Files.writeString(co.resolve(".bb/ticket"), "4-7\n");
         report("a/target/surefire-reports/TEST-a.xml", suite(1, 1, 0, 0, failed("a.A", "t", "failure", "m\u007f\u009bz")));
         var msgRun = result("4-7");
         var msgJson = result("4-7", "--json");

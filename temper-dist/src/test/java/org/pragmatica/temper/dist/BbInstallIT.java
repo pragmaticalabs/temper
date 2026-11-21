@@ -493,6 +493,8 @@ class BbInstallIT {
             var key = switch (name) {
                 case "bb-build" -> "BB_BUILD_";
                 case "bb-queue-lib.sh" -> "BB_LIB_";
+                case "bb-wait" -> "BB_WAIT_";
+                case "bb-result" -> "BB_RESULT_";
                 default -> "BB_QUEUE_";
             };
 
@@ -784,6 +786,8 @@ class BbInstallIT {
             var key = switch (name) {
                 case "bb-build" -> "BB_BUILD_";
                 case "bb-queue-lib.sh" -> "BB_LIB_";
+                case "bb-wait" -> "BB_WAIT_";
+                case "bb-result" -> "BB_RESULT_";
                 default -> "BB_QUEUE_";
             };
 

@@ -170,7 +170,7 @@ if [ ! -f "$B/rc" ] && [ -f "$B/start" ]; then
   # lanes rm'd it to "reset" a checkout). Name the second case: no waiting/running ticket for this checkout and the done/ ticket named by .bb/ticket (#80; was: whose started= is this .bb/start), state=finished and a numeric rc= (its build wrote .bb/rc; an orphaned or cancelled run may never have).
   # Anything else (e.g. a BB_QUEUE=0 build, which has no ticket) keeps the running message. One direct done/<ticket> lookup: done/ holds tens
   # of thousands of tickets, so no scan (v50a: a field() fork per file took ~2 min on bigboy).
-  TK=$(cat "$B/ticket" 2>/dev/null); LIVE=""; FIN=""
+  TK=$(cat "$B/ticket" 2>/dev/null || true); LIVE=""; FIN=""
   for f in "$Q"/waiting/* "$Q"/running/*; do [ -f "$f" ] && [ "$(field "$f" co)" = "$CO" ] && LIVE=${f##*/}; done
   if [ -z "$LIVE" ] && [ -n "$TK" ] && [ -f "$Q/done/$TK" ]; then   # #80: .bb/ticket names the run that owns .bb; none (pre-#80 run) = no guess
     f=$Q/done/$TK
