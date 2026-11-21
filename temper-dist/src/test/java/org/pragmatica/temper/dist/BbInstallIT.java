@@ -198,6 +198,7 @@ class BbInstallIT {
         assertThat(pin("BB_QUEUE_PREMEM")).isEqualTo(BbFixtures.md5(prev("bb-queue.premem")));
         assertThat(pin("BB_BUILD_PRECAP")).isEqualTo(BbFixtures.md5(prev("bb-build.precap")));
         assertThat(pin("BB_BUILD_PRESINCE")).isEqualTo(BbFixtures.md5(prev("bb-build.presince")));
+        assertThat(pin("BB_BUILD_PREFIELDS")).isEqualTo(BbFixtures.md5(prev("bb-build.prefields")));
         assertThat(pin("BB_PORTGROUP_PRESINCE")).isEqualTo(BbFixtures.md5(prev("bb-portgroup.py.presince")));
         assertThat(pin("BB_LIB_PRECAP")).isEqualTo(BbFixtures.md5(prev("bb-queue-lib.sh.precap")));
         assertThat(pin("BB_QUEUE_PRECAP")).isEqualTo(BbFixtures.md5(prev("bb-queue.precap")));
@@ -735,6 +736,21 @@ class BbInstallIT {
         assertThat(run.stdout()).doesNotContain("refused");
     }
 
+    /// The bb-build of 2026-11-21 05:18 (#63, BB_BUILD_PREFIELDS, before the session-fields fix #75) is an accepted source and is replaced, backed up under its md5.
+    /// Mutation: drop BB_BUILD_PREFIELDS from accepted_of -> the host is refused, exit 65, red.
+    @Test
+    void aHostRunningThePreFieldsBuild_isUpdated() throws Exception {
+        var tools = host("h1");
+
+        assertThat(install("builder@h1").rc()).isZero();
+        Files.write(tools.resolve("bb-build"), prev("bb-build.prefields"));
+        var run = install("builder@h1");
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        assertThat(run.stdout()).contains("installed builder@h1 bb-build before=" + pin("BB_BUILD_PREFIELDS") + " after=" + pin("BB_BUILD_NEW"));
+        assertThat(tools.resolve("bb-build.bak-" + pin("BB_BUILD_PREFIELDS"))).hasBinaryContent(prev("bb-build.prefields"));
+    }
+
     @Test
     void anExistingBakOfThatName_isKept() throws Exception {
         var tools = host("h1");
@@ -769,6 +785,7 @@ class BbInstallIT {
                                                                  + "|" + pin("BB_BUILD_PREJBCT")
                                                                  + "|" + pin("BB_BUILD_PREHELP")
                                                                  + "|" + pin("BB_BUILD_PRESINCE")
+                                                                 + "|" + pin("BB_BUILD_PREFIELDS")
                                                                  + "|" + pin("BB_BUILD_NEW"));
         assertThat(listing(good)).isEqualTo(goodBefore);
         assertThat(listing(diverged)).isEqualTo(divergedBefore);

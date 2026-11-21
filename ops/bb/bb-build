@@ -265,7 +265,7 @@ SP=$(ownerval BB_SESSION_PID '^[1-9][0-9]{0,9}$') || SP=""
 SS=$(ownerval BB_SESSION_START '^[1-9][0-9]{8,10}$') || SS=""
 SL=$(ownerval BB_SESSION_LABEL "$LABEL_RE") || SL=""
 if [ -n "$SP" ] && [ -n "$SS" ] && [ -n "$SL" ]; then
-  OWNER_FIELDS=$(printf 'session_pid=%s\nsession_start=%s\nsession_label=%s\n' "$SP" "$SS" "$SL")$'\n'
+  OWNER_FIELDS+=$(printf 'session_pid=%s\nsession_start=%s\nsession_label=%s\n' "$SP" "$SS" "$SL")$'\n'
 elif [ -n "${BB_SESSION_PID:-}${BB_SESSION_START:-}${BB_SESSION_LABEL:-}" ]; then
   echo "bb-build: ignoring BB_SESSION_PID/BB_SESSION_START/BB_SESSION_LABEL: need all three, each valid" >&2
 fi

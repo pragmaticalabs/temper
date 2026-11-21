@@ -499,9 +499,12 @@ class BbIncrementalIT {
         env.put("BB_TEST_MVN", mvn.toString());
         env.put("BB_PORT_GROUP", "0");
         env.put("BB_MAX_REACTORS", "0");
+        env.putAll(extraEnv);
 
         return env;
     }
+
+    private final Map<String, String> extraEnv = new HashMap<>();
 
     private BbFixtures.Outcome bb(Path queue, String... args) throws Exception {
         var command = new ArrayList<String>();
@@ -576,6 +579,29 @@ class BbIncrementalIT {
         assertThat(value(lines, "since")).isEqualTo("base");
         assertThat(value(lines, "since_reason")).isEqualTo("root-pom");
         assertThat(out.stdout()).contains("--since base -> FULL reactor (root-pom)");
+    }
+
+    /// A full valid BB_SESSION_* triple must not drop the since=/modules= lines (issue #75: the session block assigned instead of appending).
+    /// Mutation: restore `OWNER_FIELDS=` for the session block in bb-build -> since, modules and since_reason are null, red.
+    @Test
+    void since_withAFullSessionTriple_keepsSinceAndModules_besideTheSessionFields() throws Exception {
+        assumeTrue(BbFixtures.linux(), "bb-build needs GNU tools, flock and pgrep");
+        var co = reactor("sessiontkt");
+
+        commit(co, "m/src/main/java/A.java", "class A { int changed; }\n");
+        extraEnv.put("BB_SESSION_PID", "37444");
+        extraEnv.put("BB_SESSION_START", "1793667998");
+        extraEnv.put("BB_SESSION_LABEL", "CTO");
+        var queue = dir.resolve("q");
+        var out = bb(queue, "--since", "base", co.toString(), "-B", "test");
+        var lines = ticket(queue, out);
+
+        assertThat(out.rc()).as(out.stderr()).isZero();
+        assertThat(value(lines, "since")).isEqualTo("base");
+        assertThat(value(lines, "modules")).isEqualTo("5");
+        assertThat(value(lines, "session_pid")).isEqualTo("37444");
+        assertThat(value(lines, "session_start")).isEqualTo("1793667998");
+        assertThat(value(lines, "session_label")).isEqualTo("CTO");
     }
 
     @Test
