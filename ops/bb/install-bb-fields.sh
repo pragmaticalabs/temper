@@ -69,7 +69,7 @@ readonly BB_BUILD_PREFIELDS=399f2414202fb5b9676960ff5b1ffece   # the #63 version
 readonly BB_BUILD_PRESESSION=2810f93c875ad9a106c2cda284babb81   # the #79 version: session fields fixed with +=, no bb-cp-record hook, no BB_LAUNCH, no launch ledger (bb-test lane)
 readonly BB_BUILD_PRE80=dafd74a3ea2fec81b1a3d39067422f6a   # the #70 version: dedup identifies a run by its start second (issue #80)
 readonly BB_BUILD_PRE76=2f349b869a02dcfec552ab0b8b1f972c   # the #80/#81 version: bb-test's launch writes its ticket fields into the queue (issue #76)
-readonly BB_BUILD_NEW=b9be3200afe47fab4792a09952d03bfa
+readonly BB_BUILD_NEW=3c8760cbce9740aa4fd20ea8927e1ec0
 # bb-jbct-bootstrap: absent on every host before its first install; bb-build calls it, so it is installed first.
 readonly BB_JBCTBOOT_NEW=3e5396ecee48b99949456cf805df1e60
 # bb-result: absent on every host before its first install. No trailing comment on a pin line: bb-drift reads it by pattern.

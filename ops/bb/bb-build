@@ -162,14 +162,14 @@ if [ "${1:-}" = __run ]; then
   wait "$C"; BRC=$?   # the build's exit status: the verdict. Never re-read from $B/rc, which a lane can delete or rewrite
   LF="" REJ=""   # LAUNCH FIELDS (header): read before the lock, so a slow or hostile file never holds the queue; set -e: every read is || true
   rej() { case ",$REJ," in *",$1,"*) ;; *) REJ=${REJ:+$REJ,}$1;; esac; echo "bb-build: launch fields: rejected $1${2:+: $2}" >> "$B/build.log"; }
-  HT=""; [ -L "$B/ticket" ] || HT=$(run_ticket "$CO" 2> /dev/null | head -c 128 | head -n 1) || true   # the lib's reader (#80); bounded: head ends the pipe (SIGPIPE) after 128 bytes; a symlink or absent ticket reads as "" = mismatch
+  HT=$(run_ticket "$CO" 2> /dev/null | head -c 128 | head -n 1) || true   # the lib's reader (#80); bounded: head ends the pipe (SIGPIPE) after 128 bytes; an absent run ticket reads as "" = mismatch
   for f in "$B"/fields.*; do
     [ -e "$f" ] || [ -L "$f" ] || continue
     n=${f##*/fields.}
     if [ -z "${BB_LAUNCH:-}" ]; then rej not_launch "$f"
     elif [ "$n" != "$ID" ]; then rej foreign_file "$f names ticket $n, not $ID"
     elif [ -L "$f" ] || [ ! -f "$f" ]; then rej not_regular "$f"
-    elif [ "$HT" != "$ID" ]; then rej ticket_mismatch ".bb/ticket reads '${HT//[^A-Za-z0-9_-]/?}', not $ID"
+    elif [ "$HT" != "$ID" ]; then rej ticket_mismatch "the checkout's run ticket reads '${HT//[^A-Za-z0-9_-]/?}', not $ID"
     else
       X=$(timeout -k 5 10 head -c 65536 "$f" 2> /dev/null | LC_ALL=C awk '
         { k = ""; if (match($0, /^[A-Za-z0-9_]+=/) && RLENGTH <= 33) { k = substr($0, 1, RLENGTH - 1); v = substr($0, RLENGTH + 1) } }
