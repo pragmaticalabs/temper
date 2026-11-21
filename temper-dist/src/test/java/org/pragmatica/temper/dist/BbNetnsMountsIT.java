@@ -44,6 +44,7 @@ class BbNetnsMountsIT {
         mkdir -p "$PWD/.m2-local" 2> /dev/null; w m2-local "$PWD/.m2-local/x"
         w home "$HOME/.testcontainers.properties"
         printf '#!/usr/bin/bash\necho EXEC-OK\n' > "$HOME/.cache-exec"; chmod +x "$HOME/.cache-exec"; "$HOME/.cache-exec" 2> /dev/null || echo "EXEC-DENIED home"
+        echo "MARKER BB_NETNS=${BB_NETNS:-unset}"
         echo "MAVEN RAN $*"
         "$JAVA_HOME/bin/java" -version 2>&1 | head -1
         """;
@@ -132,6 +133,12 @@ class BbNetnsMountsIT {
     @Test
     void theM2SeedIsReadableAtItsHostPath() throws Exception {
         assertThat(run.stdout()).contains("SEED-READ seed");
+    }
+
+    /// BbTestLaunchIT fails, not skips, on a missing seed jar when it sees this marker (63 rows once skipped silently, #76).
+    @Test
+    void theContainerCarriesTheNetnsMarker() throws Exception {
+        assertThat(run.stdout()).contains("MARKER BB_NETNS=1");
     }
 
     @Test

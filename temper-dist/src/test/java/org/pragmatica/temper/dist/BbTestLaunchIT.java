@@ -62,13 +62,22 @@ class BbTestLaunchIT {
     private Path launcher;
     private Map<String, String> env;
 
+    /// Outside a build container a missing seed jar is a skip (CI runners and workstations have none). Inside a bb-netns-run container
+    /// (BB_NETNS=1, exported by the script) it is a FAILURE naming the path: the narrowed mounts hid the seed once and 63 rows skipped silently (#76).
+    private static void seededOrSkip(Path jar, String skipReason) {
+        if (!Files.exists(jar) && System.getenv("BB_NETNS") != null) {
+            throw new AssertionError("the seed jar is missing inside the bb-netns-run container: " + jar + " (bb-netns-run must mount ~/work/temper-m2-seed)");
+        }
+        assumeTrue(Files.exists(jar), skipReason);
+    }
+
     private record Done(String id, int rc, String doneText) {}
 
     @BeforeEach
     void fixture() throws Exception {
         assumeTrue(BbFixtures.linux(), "bb-build needs GNU tools, flock and pgrep");
         launcher = Path.of(System.getProperty("user.home")).resolve(SEED);
-        assumeTrue(Files.exists(launcher), "the seeded console launcher is on build hosts only (CI runners have no ~/work/temper-m2-seed)");
+        seededOrSkip(launcher, "the seeded console launcher is on build hosts only (CI runners have no ~/work/temper-m2-seed)");
         tools = dir.resolve("tools");
         for (var f : List.of("bb-build", "bb-test", "bb-cp-record", "bb-testcount")) {
             BbFixtures.executable(tools.resolve(f),
@@ -371,7 +380,7 @@ class BbTestLaunchIT {
     void aRunWhoseTestsPassed_onAnotherResolvedJupiter_isRefusedOnEverySurface() throws Exception {
         var old = Path.of(System.getProperty("user.home")).resolve(OLD_API);
 
-        assumeTrue(Files.exists(old), "the seeded junit-jupiter-api 5.11.4 is on build hosts only");
+        seededOrSkip(old, "the seeded junit-jupiter-api 5.11.4 is on build hosts only");
         var extra = Map.of("RECORD_EXTRA", old.toString(), "BB_TEST_TICKET_LOG", dir.resolve("ticket-log.tsv").toString());
 
         assertThat(build(extra).rc()).as(log()).isZero();
