@@ -14,6 +14,37 @@ import os, sys, xml.etree.ElementTree as ET
 TEST_PHASES = {'test', 'prepare-package', 'package', 'pre-integration-test', 'integration-test', 'post-integration-test',
                'verify', 'install', 'deploy'}
 
+NS = '{http://maven.apache.org/POM/4.0.0}'
+
+def load_reactor(co, visit=None):
+    # the reactor read from the checkout's own poms: path -> (groupId, artifactId, [dep artifactIds]). visit(path, root) sees each
+    # parsed pom (bb-modules.py reads the parent and packaging from it). Raises on an unreadable or unparsable pom.
+    mods = {}
+    def walk(d):
+        r = ET.parse(os.path.join(co, d, 'pom.xml')).getroot()
+        aid = r.findtext(NS + 'artifactId')
+        gid = r.findtext(NS + 'groupId') or r.findtext(NS + 'parent/' + NS + 'groupId')
+        deps = [x.findtext(NS + 'artifactId') for x in r.findall(NS + 'dependencies/' + NS + 'dependency')]
+        mods[d] = (gid, aid, deps)
+        if visit:
+            visit(d, r)
+        for m in r.findall(NS + 'modules/' + NS + 'module') + r.findall(NS + 'profiles/' + NS + 'profile/' + NS + 'modules/' + NS + 'module'):
+            walk(os.path.normpath(os.path.join(d, m.text.strip())))
+    walk('.')
+    return mods
+
+def upstreams(mods):
+    by_aid = {aid: d for d, (_, aid, _) in mods.items()}
+    return {d: {by_aid[x] for x in deps if x in by_aid} for d, (_, _, deps) in mods.items()}
+
+def close(start, edges):
+    out, todo = set(start), list(start)
+    while todo:
+        for n in edges(todo.pop()):
+            if n not in out:
+                out.add(n); todo.append(n)
+    return out
+
 def runs_tests(arg):
     # a lifecycle phase from test on, or a plugin goal that itself runs tests (surefire:test, failsafe:integration-test)
     return arg in TEST_PHASES or (':' in arg and arg.rsplit(':', 1)[1] in ('test', 'integration-test'))
@@ -56,18 +87,8 @@ def main(mods_file, co, args):
     if not inc:
         return '1 whole reactor (no -pl inclusion)'
 
-    ns = '{http://maven.apache.org/POM/4.0.0}'
-    mods = {}   # path -> (groupId, artifactId, [dep artifactIds])
-    def walk(d):
-        r = ET.parse(os.path.join(co, d, 'pom.xml')).getroot()
-        aid = r.findtext(ns + 'artifactId')
-        gid = r.findtext(ns + 'groupId') or r.findtext(ns + 'parent/' + ns + 'groupId')
-        deps = [x.findtext(ns + 'artifactId') for x in r.findall(ns + 'dependencies/' + ns + 'dependency')]
-        mods[d] = (gid, aid, deps)
-        for m in r.findall(ns + 'modules/' + ns + 'module') + r.findall(ns + 'profiles/' + ns + 'profile/' + ns + 'modules/' + ns + 'module'):
-            walk(os.path.normpath(os.path.join(d, m.text.strip())))
     try:
-        walk('.')
+        mods = load_reactor(co)
     except Exception as e:
         return '1 could not read the reactor (%s)' % type(e).__name__
 
@@ -86,15 +107,7 @@ def main(mods_file, co, args):
         if d is None:
             return '1 cannot resolve -pl selector %r' % s
         chosen.add(d)
-    by_aid = {aid: d for d, (_, aid, _) in mods.items()}
-    ups = {d: {by_aid[x] for x in deps if x in by_aid} for d, (_, _, deps) in mods.items()}
-    def close(start, edges):
-        out, todo = set(start), list(start)
-        while todo:
-            for n in edges(todo.pop()):
-                if n not in out:
-                    out.add(n); todo.append(n)
-        return out
+    ups = upstreams(mods)
     final = set(chosen)
     if am:
         final |= close(chosen, lambda d: ups[d])

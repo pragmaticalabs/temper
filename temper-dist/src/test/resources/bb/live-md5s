@@ -1,4 +1,4 @@
-# The ~/tools md5s on cloudbb-5, read by ssh md5sum on 2026-11-20 (bto16). One line per install-bb-fields.sh FILES entry:
+# The ~/tools md5s on cloudbb-5, read by ssh md5sum on 2026-11-21 (bto27; unchanged from 2026-11-20 bto16, plus bb-modules.py absent). One line per install-bb-fields.sh FILES entry:
 # <file> <md5|absent>. BbInstallIT installs onto a host holding exactly this set, so a host at today's live set is never refused.
 bb-cp-record absent
 bb-test absent
@@ -10,6 +10,7 @@ bb-wait d5b0ff8d43994a78cd188b4a41fcd995
 bb-await 56523085fccf5678eb7c208e7352c11b
 bb-netns-run bf05b7c51c2f7863ee685a195273e195
 bb-portgroup.py 884caf3cf37b12cf5cf1d97e96f76a4c
+bb-modules.py absent
 bb-jbct-bootstrap 3e5396ecee48b99949456cf805df1e60
 bb-result 2b99dd5c414175c4fd40a9836da76298
 bb-queue-lib.sh 2569b8af2cf8acc063024e553be66a93

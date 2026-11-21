@@ -33,7 +33,7 @@ PROG=bb-drift
 readonly TARGET_RE='^[a-z_][a-z0-9_-]{0,31}@[A-Za-z0-9.:-]+$'
 HERE=$(cd "$(dirname "$0")" && pwd)
 KILN_SCAN=$HERE/../kiln/kiln-scan
-HOST_FILES=(bb-build bb-tickets bb-queue-lib.sh bb-queue bb-hold bb-wait bb-await bb-netns-run bb-portgroup.py kiln-scan kiln-ingest bb-checkout bb-probe-reap bb-mutate bb-jbct-bootstrap bb-cp-record bb-test bb-testcount bb-result)
+HOST_FILES=(bb-build bb-tickets bb-queue-lib.sh bb-queue bb-hold bb-wait bb-await bb-netns-run bb-portgroup.py bb-modules.py kiln-scan kiln-ingest bb-checkout bb-probe-reap bb-mutate bb-jbct-bootstrap bb-cp-record bb-test bb-testcount bb-result)
 
 vendor_pin() {  # vendor_pin <file>: the pinned md5 of a host-only tool; fails for any other name
   case $1 in
