@@ -566,7 +566,7 @@ class BbTestLaunchIT {
         assertThat(BbFixtures.run(List.of("mkfifo", fifo.toString()), Map.of(), null, null).rc()).isZero();
         var java = BbFixtures.executable(dir.resolve("stub/second-hangs-java"),
                                          "#!/usr/bin/env bash\nn=$(( $(cat '" + dir + "/java.n' 2>/dev/null || echo 0) + 1 ))\necho $n > '" + dir
-                                        + "/java.n'\necho $$ > '" + dir + "/java$n.pid'\n[ \"$n\" -lt 2 ] || read -r _ < '" + fifo + "'\nexit 0\n");
+                                        + "/java.n'\necho $$ > '" + dir + "'/java$n.pid\n[ \"$n\" -lt 2 ] || read -r _ < '" + fifo + "'\nexit 0\n");
         var started = System.nanoTime();
         var run = timedBbTest(Map.of("BB_TEST_REPEAT_TIMEOUT", "8", "BB_TEST_OVERHEAD_TIMEOUT", "60", "BB_TEST_JAVA", java.toString()),
                               "fx.CalcTest#passes", "--repeat", "2");
