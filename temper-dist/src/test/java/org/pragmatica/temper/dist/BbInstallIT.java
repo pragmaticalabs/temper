@@ -896,7 +896,7 @@ class BbInstallIT {
     }
 
     /// The md5s every host held on 2026-11-21 (read by ssh md5sum on cloudbb-5 and bigboy-aether) are each accepted: the files that
-    /// equal a NEW are unchanged, the two that differ (bb-build, bb-portgroup.py) are PRESINCE and are replaced.
+    /// equal a NEW are unchanged, the ones that differ (bb-build, bb-portgroup.py; with #70 also bb-result, bb-queue-lib.sh, bb-queue) are replaced.
     /// Mutation: drop BB_BUILD_PRESINCE from accepted_of -> the live host is refused, exit 65, red.
     @Test
     void aHostHoldingTheLive20261121Files_isAcceptedForEveryFile() throws Exception {
@@ -912,6 +912,36 @@ class BbInstallIT {
         assertThat(install("builder@h1").rc()).isZero();
         Files.write(tools.resolve("bb-build"), prev("bb-build.presince"));
         Files.write(tools.resolve("bb-portgroup.py"), prev("bb-portgroup.py.presince"));
+        Files.write(tools.resolve("bb-result"), prev("bb-result.precp"));                // #70 changes these three too:
+        Files.write(tools.resolve("bb-queue-lib.sh"), prev("bb-queue-lib.sh.preledger")); // the host holds their live versions
+        Files.write(tools.resolve("bb-queue"), prev("bb-queue.preledger"));
+        for (var e : live.entrySet()) {
+            assertThat(BbFixtures.md5(Files.readAllBytes(tools.resolve(e.getKey())))).as(e.getKey()).isEqualTo(e.getValue());
+        }
+        var run = install("builder@h1");
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        assertThat(run.stdout()).doesNotContain("refused");
+    }
+
+    /// A host after the owner's install-bb-79.sh (#63 + #79: bb-build 2810f93c, bb-portgroup.py and bb-modules.py at main's
+    /// values) and still on the pre-#70 bb-result, bb-queue-lib.sh, bb-queue is accepted for every file and is updated.
+    /// Mutation: drop BB_BUILD_PRESESSION from accepted_of -> the post-install host is refused, red.
+    @Test
+    void aHostAfterTheInstallOf79_isAcceptedForEveryFile() throws Exception {
+        var live = java.util.Map.of("bb-build", "2810f93c875ad9a106c2cda284babb81",
+                                    "bb-queue-lib.sh", "2569b8af2cf8acc063024e553be66a93",
+                                    "bb-queue", "9cb677b671867eecdf90c9514bbd0732",
+                                    "bb-result", "2b99dd5c414175c4fd40a9836da76298",
+                                    "bb-portgroup.py", "8ad1c6dbe2044f984814c2b19645c48b",
+                                    "bb-modules.py", "9c668381f2a161c24a9b5d55cccc4945");
+        var tools = host("h1");
+
+        assertThat(install("builder@h1").rc()).isZero();
+        Files.write(tools.resolve("bb-build"), prev("bb-build.presession"));
+        Files.write(tools.resolve("bb-result"), prev("bb-result.precp"));
+        Files.write(tools.resolve("bb-queue-lib.sh"), prev("bb-queue-lib.sh.preledger"));
+        Files.write(tools.resolve("bb-queue"), prev("bb-queue.preledger"));
         for (var e : live.entrySet()) {
             assertThat(BbFixtures.md5(Files.readAllBytes(tools.resolve(e.getKey())))).as(e.getKey()).isEqualTo(e.getValue());
         }
