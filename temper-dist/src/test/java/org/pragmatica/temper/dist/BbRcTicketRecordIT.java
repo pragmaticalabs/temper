@@ -115,6 +115,10 @@ class BbRcTicketRecordIT {
     }
 
     private Path ticket(String state, String id, Path co, int cap, int limit) throws IOException {
+        return ticket(state, id, co, cap, limit, "-B test");
+    }
+
+    private Path ticket(String state, String id, Path co, int cap, int limit, String args) throws IOException {
         return Files.writeString(queue.resolve(state).resolve(id),
                                  "id=" + id
                                 + "\nowner=" + ME
@@ -122,7 +126,7 @@ class BbRcTicketRecordIT {
                                 + "\nsha=abc\nkey=\ncap=" + cap
                                 + "\nlimit=" + limit
                                 + "\ncreated=" + (System.currentTimeMillis() * 1_000_000L)
-                                + "\ngroup=0\nargs=-B test \n");
+                                + "\ngroup=0\nargs=" + args + " \n");
     }
 
     private String field(String state, String id, String key) throws IOException {
@@ -669,13 +673,26 @@ class BbRcTicketRecordIT {
 
     // ---- launch fields (#76, CTO ruling 2026-11-21): the container writes .bb/fields.<id>; the waiter copies only the grammar ------------
 
-    /// A ticket whose job is `body` run in its checkout, waited to done/. `launch`: a BB_LAUNCH ticket (what bb-test enqueues).
+    /// The launch a bb-test ticket runs (`__launch <module> <repeat> <Class>`), and the one passing report it writes into the ticket's
+    /// report dir: since #86 the waiter counts a launch's executed testcases, and a launch that executed none is refused rc 19, so the
+    /// rows below that test field recording at rc 0 must have run one testcase.
+    private static final String LAUNCH_ARGS = "__launch m 1 LfIT";
+    private static final String ONE_PASSING_REPORT = "mkdir -p m/target/bb-test-reports/$BB_TICKET"
+                                                     + " && printf '<testsuite><testcase classname=\"LfIT\" name=\"t\"/></testsuite>\\n'"
+                                                     + " > m/target/bb-test-reports/$BB_TICKET/TEST-LfIT.xml; ";
+
+    /// A ticket whose job is `body` run in its checkout, waited to done/. `launch`: a BB_LAUNCH ticket (what bb-test enqueues), whose
+    /// job first writes one passing report.
     private String launched(String id, Path co, String body, boolean launch) throws Exception {
         return launched(id, co, body, launch, Map.of());
     }
 
     private String launched(String id, Path co, String body, boolean launch, Map<String, String> extra) throws Exception {
-        ticket("waiting", id, co, 5, 0);
+        return launched(id, co, launch ? ONE_PASSING_REPORT + body : body, launch, extra, launch ? LAUNCH_ARGS : "-B test");
+    }
+
+    private String launched(String id, Path co, String body, boolean launch, Map<String, String> extra, String args) throws Exception {
+        ticket("waiting", id, co, 5, 0, args);
         var more = new HashMap<>(extra);
 
         if (launch) {
@@ -714,6 +731,19 @@ class BbRcTicketRecordIT {
                                "printf 'refused=" + max + "\\nverdict_source=guard\\n' > .bb/fields.$BB_TICKET; exit 15", true);
 
         assertThat(refused).contains("\nrefused=" + max + "\nverdict_source=guard\nstate=finished\nrc=15\n").doesNotContain("fields_rejected");
+    }
+
+    /// The zero-testcase gate's effect on the record (#86): the same in-grammar launch as above, but it writes no report, so its
+    /// selected class executed 0 testcases. The fields are still copied, and the ticket records rc 19, never java's 0.
+    /// Mutation: drop the launch count from bb-build's job tail -> rc=0 recorded, red.
+    @Test
+    void launchFields_aLaunchThatExecutedNoTestcase_recordsRc19_withItsFieldsCopied() throws Exception {
+        var co = checkout("lf-zero");
+        var id = "515-" + BbFixtures.RUN;
+        var text = launched(id, co, "printf 'verdict_source=java\\n' > .bb/fields.$BB_TICKET; exit 0", true, Map.of(), LAUNCH_ARGS);
+
+        assertThat(text).contains("\nverdict_source=java\nstate=finished\nrc=19\n").doesNotContain("fields_rejected");
+        assertThat(Files.readString(co.resolve(".bb/build.log"))).contains("[ERROR] bb-build: refused rc 0 -> 19: ");
     }
 
     @Test
