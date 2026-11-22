@@ -204,12 +204,42 @@ class BbZeroTestcaseIT {
         assertThat(run.log()).doesNotContain("selected testcases");
     }
 
+    // ---- -Dtest=none with NO -Dit.test: failsafe runs every IT, i.e. select all; run-level count (CTO ruling 2026-11-22) ----
+
+    private static final String ONE = "<testsuite><testcase classname='x' name='a'/></testsuite>";
+
     @Test
-    void onlyExclusionsAndNone_selectNothing_andAreUnchanged() throws Exception {
-        var run = run("exit 0", "-Dtest=none", "-Dit.test=!StreamPublishReshuffleTest");
+    void testNone_noItTest_oneExecutedFailsafeTestcase_isRc0() throws Exception {
+        var run = run(report("m/target/failsafe-reports", "org.x.BbFooIT", ONE), "-B", "install", "-Dtest=none");
 
         assertThat(run.rc()).as(run.log()).isEqualTo("0");
-        assertThat(run.log()).doesNotContain("selected testcases");
+        assertThat(run.fileRc()).isEqualTo("0");
+        assertThat(run.log()).contains("bb-build: selected testcases: failsafe(all)=1\n");
+    }
+
+    @Test
+    void testNone_noItTest_zeroFailsafeTestcases_isRefusedWith19_surefireDoesNotCount() throws Exception {
+        var run = run(report("m/target/surefire-reports", "org.x.FooTest", TWO) + " && " + report("m/target/failsafe-reports", "org.x.BbFooIT", EMPTY),
+                      "-B", "install", "-Dtest=none");
+
+        assertRefused(run, "failsafe(all)=0", "failsafe(all)");
+    }
+
+    @Test
+    void testNone_noItTest_onlySkippedFailsafeTestcases_isRefusedWith19() throws Exception {
+        var run = run(report("m/target/failsafe-reports", "org.x.BbFooIT", SKIPPED), "-Dtest=none");
+
+        assertRefused(run, "failsafe(all)=0(+2 skipped)", "failsafe(all)");
+    }
+
+    @Test
+    void testNone_itTestOfExclusionsOnly_alsoSelectsAllIts_andIsCountedRunLevel() throws Exception {
+        assertRefused(run("exit 0", "-Dtest=none", "-Dit.test=!StreamPublishReshuffleTest"), "failsafe(all)=0", "failsafe(all)");
+
+        var run = run(report("m/target/failsafe-reports", "org.x.BbFooIT", TWO), "-Dtest=none", "-Dit.test=!StreamPublishReshuffleTest");
+
+        assertThat(run.rc()).as(run.log()).isEqualTo("0");
+        assertThat(run.log()).contains("bb-build: selected testcases: failsafe(all)=2\n");
     }
 
     @Test
@@ -335,6 +365,7 @@ class BbZeroTestcaseIT {
     @Test
     void queueOff_aCountedSelector_isRefusedWith19_andNothingRuns() throws Exception {
         for (var args : List.of(List.of(co.toString(), "-Dtest=FooTest"), List.of(co.toString(), "-Dtest=none", "-Dit.test=none"),
+                                List.of(co.toString(), "-Dtest=none"), List.of(co.toString(), "-Dtest=none", "-Dit.test=!X"),
                                 List.of("--since", "abc", co.toString(), "-Dit.test=BbFooIT"))) {
             var out = direct(args.toArray(String[]::new));
 
@@ -346,7 +377,7 @@ class BbZeroTestcaseIT {
 
     @Test
     void queueOff_noCountedSelector_runsBbBuildDirectUnchanged() throws Exception {
-        for (var args : List.of(List.of(co.toString(), "-B", "install"), List.of(co.toString(), "-Dtest=none", "-Dit.test=!X"))) {
+        for (var args : List.of(List.of(co.toString(), "-B", "install"), List.of(co.toString(), "-Dit.test=none"))) {
             var out = direct(args.toArray(String[]::new));
 
             assertThat(out.rc()).as(args + out.stderr()).isZero();

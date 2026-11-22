@@ -74,7 +74,9 @@
 # ZERO-TESTCASE REFUSAL (#86, CTO rulings 2026-11-22): ONE counter (selected_testcases) for EVERY ticket whose job ended 0, a build's and a
 # bb-test launch's (BB_LAUNCH) alike. Selectors: for a build, the last -Dtest=... and the last -Dit.test=..., comma-separated tokens (`!X`
 # exclusions select nothing); `none` selects nothing ONLY as a property's exact whole value (case-sensitive: `None` and `none,X` are class
-# tokens like any other), and -Dtest=none with -Dit.test=none selects no class at all, which is 19 too. For a launch, every Class[#method]
+# tokens like any other), and -Dtest=none with -Dit.test=none selects no class at all, which is 19 too. -Dtest=none with NO -Dit.test
+# (or one of `!` exclusions only) selects ALL (failsafe runs every IT; CTO ruling 2026-11-22): run-level, the executed failsafe testcases of the run must be > 0, logged
+# `failsafe(all)=<n>`, else 19 (under BB_QUEUE=0 it is a counted run, so refused there like a class token). For a launch, every Class[#method]
 # selector of the ticket. Reports: for a build, the TEST-<fqcn>.xml files under any <module>/target/{surefire,failsafe}-reports (nothing
 # else: fixture XML under src/ never counts); for a launch, the TEST-*.xml of the ticket's own <module>/target/bb-test-reports/<ticket>/
 # (with --repeat N>1, each run<i>/ is a run of its own, and every selector must be > 0 in EVERY run). Only reports whose mtime is newer
@@ -86,7 +88,7 @@
 # `[ERROR] bb-build: refused rc 0 -> 19 ...` line naming the empty tokens. A non-zero job rc is kept as it is. Limit: a %regex containing ','
 # is split like any value. EXECUTED only: a <testcase> with a <skipped> child does not count (an all-skipped class is 19; the log line shows
 # `<token>=<n>(+<k> skipped)`). BB_QUEUE=0: bb-build-direct writes .bb/rc from its own detached job, so nothing could count it before a
-# poller reads rc 0; a run the counter would count (a class token, or -Dtest=none with -Dit.test=none) is refused at the call (call rc 19,
+# poller reads rc 0; a run the counter would count (a class token, -Dtest=none with -Dit.test=none, or -Dtest=none alone) is refused at the call (call rc 19,
 # nothing run); any other run goes to bb-build-direct unchanged.
 set -euo pipefail
 SELF=$(readlink -f "$0")
@@ -110,6 +112,7 @@ import fnmatch, os, re, sys, xml.etree.ElementTree as ET
 co, marker, kind, args = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4:]
 JAVA_NAME = re.compile(r'[A-Za-z_$][\w$]*(\.[A-Za-z_$][\w$]*)*\Z')
 none_only = False
+failsafe_all = False
 tokens = []
 if kind in ('mvn', 'select'):                    # selectors: the last -Dtest= / -Dit.test= (maven keeps the last -D of a property)
     values = {}
@@ -125,13 +128,14 @@ if kind in ('mvn', 'select'):                    # selectors: the last -Dtest= /
             if t and not t.startswith('!') and t not in tokens:
                 tokens.append(t)
     none_only = values.get('test') == 'none' and values.get('it.test') == 'none'
+    failsafe_all = values.get('test') == 'none' and values.get('it.test') != 'none' and not tokens   # no -Dit.test class: failsafe runs every IT, select all (header)
 else:                                            # launch:<ticket>, args `__launch <module> <repeat> <Class[#method]>...`: every selector
     for t in args[3:]:
         if not t.startswith('-') and t not in tokens:
             tokens.append(t)
 if kind == 'select':                             # BB_QUEUE=0 (header): would this run be counted? 19 = yes, so it is refused there
-    sys.exit(19 if tokens or none_only else 0)
-if not tokens:
+    sys.exit(19 if tokens or none_only or failsafe_all else 0)
+if not tokens and not failsafe_all:
     if none_only:
         print('[ERROR] bb-build: refused rc 0 -> 19: -Dtest=none and -Dit.test=none select no class')
         sys.exit(19)
@@ -152,13 +156,16 @@ def reports_in(d):
             for c in cases(os.path.join(d, f))]
 runs = []                                        # (label, cases) of each run whose every selector must be > 0
 if kind == 'mvn':                                # only */target/{surefire,failsafe}-reports: fixture XML under src/ never counts
-    found = []
+    found, failsafe = [], []
     base = co.rstrip('/').count('/')
     for root, dirs, files in os.walk(co):
         name = os.path.basename(root)
         if name in ('surefire-reports', 'failsafe-reports') and os.path.basename(os.path.dirname(root)) == 'target':
             dirs[:] = []
-            found.extend(reports_in(root))
+            got = reports_in(root)
+            found.extend(got)
+            if name == 'failsafe-reports':
+                failsafe.extend(got)
             continue
         dirs[:] = [d for d in dirs if d in ('surefire-reports', 'failsafe-reports')] if name == 'target' else \
                   [d for d in dirs if d not in ('.git', '.m2-local', '.bb', 'node_modules', 'src')]
@@ -189,6 +196,8 @@ def hit(token, fqcn):                            # a nested Outer$Inner counts f
     return bool(fqcn) and (matches(token, fqcn) or ('$' in fqcn and matches(token, fqcn.split('$', 1)[0])))
 counts = [(label + t, sum(1 for fq, sk in found if not sk and hit(t, fq)), sum(1 for fq, sk in found if sk and hit(t, fq)))
           for label, found in runs for t in tokens]   # EXECUTED testcases: a <testcase> with a <skipped> child does not count
+if failsafe_all:                                 # -Dtest=none, no -Dit.test: run-level, every executed failsafe testcase
+    counts.append(('failsafe(all)', sum(1 for fq, sk in failsafe if not sk), sum(1 for fq, sk in failsafe if sk)))
 print('bb-build: selected testcases: ' + ' '.join('%s=%d' % (t, n) + ('(+%d skipped)' % k if k else '') for t, n, k in counts))
 empty = [t for t, n, k in counts if n == 0]
 if empty:
