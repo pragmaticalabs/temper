@@ -139,6 +139,17 @@ class BbZeroTestcaseIT {
         assertThat(run.log()).contains("bb-build: selected testcases: BbFooIT=2\n").doesNotContain("refused");
     }
 
+    /// CTO 2026-11-22: a bare `Outer` counts its @Nested classes. Surefire reports a @Nested class in its own TEST-Outer$Inner.xml with
+    /// classname Outer$Inner; an Outer whose only tests are nested must not be a false 19.
+    @Test
+    void aBareOuterSelector_countsItsNestedClassReports() throws Exception {
+        var run = run(report("m/target/surefire-reports", "org.x.OuterTest\\$Inner", cases("org.x.OuterTest$Inner")), "-Dtest=OuterTest",
+                      "-Dsurefire.failIfNoSpecifiedTests=false");
+
+        assertThat(run.rc()).as(run.log()).isEqualTo("0");
+        assertThat(run.log()).contains("bb-build: selected testcases: OuterTest=1\n").doesNotContain("refused");
+    }
+
     @Test
     void aSelectedClassWithNoReport_isRefusedWith19() throws Exception {
         assertRefused(run("exit 0", "-Dit.test=NoSuchClassIT", "-Dfailsafe.failIfNoSpecifiedTests=false"), "NoSuchClassIT=0", "NoSuchClassIT");
