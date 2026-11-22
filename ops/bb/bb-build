@@ -112,8 +112,8 @@ if [ "${1:-}" = __run ]; then
   while :; do
     flock 8
     [ -f "$T" ] || exit 0   # cancelled or reaped while we slept
-    reap
-    if [ "$(pick "$ID")" = "$ID" ]; then break; fi   # backfill + starvation bound, see pick() in bb-queue-lib.sh
+    RL=$(reap)   # reap's launch count, passed to pick within this lock hold (#90)
+    if [ "$(pick "$RL" "$ID")" = "$ID" ]; then break; fi   # backfill + starvation bound, see pick() in bb-queue-lib.sh
     if [ "$LIMIT" -gt 0 ] && [ "$WAITED" -ge "$LIMIT" ]; then
       never_started "$CO" 5 "queue wait expired after ${WAITED}s (BB_CAP_WAIT_SECS=$LIMIT)"
       printf 'state=expired\nended=%s\n' "$(date +%s)" >> "$T"; to_done "$T"; exit 0
@@ -289,7 +289,7 @@ else
 fi
 
 exec 8> "$Q/.lock"; flock 8
-reap
+reap >/dev/null   # its stdout is the launch count, for pick only (#90)
 QD=$(cat "$B/queued" 2>/dev/null || true)
 if [ -n "$QD" ] && [ -f "$Q/waiting/$QD" ]; then echo "refusing: $CO already has queued ticket $QD" >&2; exit 3; fi
 if [ -n "$KEY" ] && [ "${BB_DEDUP:-1}" != 0 ]; then

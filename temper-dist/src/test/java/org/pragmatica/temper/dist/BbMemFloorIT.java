@@ -273,7 +273,7 @@ class BbMemFloorIT {
 
     /// pick as the waiter of ticket `caller` calls it; only the oldest ticket's own call may write an override record.
     private String pick(String caller) throws Exception {
-        var run = lib("pick " + caller);
+        var run = lib("pick \"$(ledger_count)\" " + caller);
 
         assertThat(run.rc()).as(run.stderr()).isZero();
 

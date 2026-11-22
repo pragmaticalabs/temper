@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# bb-wait <ticket-id>  (2026-11-11) -- block until that queue ticket is FINISHED (in done/), print ONE line (a REFUSED ticket, bb-test rc 15, adds `refused: <reason>`) and exit with its rc:
+#   ticket=<id> state=<state> rc=<rc> wall=<s>s wait=<s>s run=<s>s log=<build log>
+# For agent lanes: one call replaces polling bb-queue / .bb/rc. It checks every BB_WAIT_INTERVAL seconds (default 30; values below
+# 15 are raised to 15), and each check runs reap() under the queue lock, so a ticket whose waiter died is finalized instead of
+# waited on forever. Exit: the ticket's maven rc when state=finished; 9 cancelled/abandoned and 5 expired (the codes bb-build
+# writes to .bb/rc for those); 70 orphaned or no numeric rc; 4 UNKNOWN ticket (in none of waiting/running/done); 2 usage;
+# 71 RC-MISMATCH (below).
+# VERDICT SOURCE (2026-11-12): the rc comes from the ticket record in done/<id>, which bb-build's waiter fills from the build
+# process's exit status, never from the checkout. The checkout's .bb/rc is a read-only copy; when a FINISHED ticket's numeric rc and that
+# file disagree, or the file is gone, bb-wait prints `RC-MISMATCH ticket=<rc> file=<rc|absent>: the ticket record is the verdict; re-run the build in a fresh checkout; never edit or restore .bb/rc` on stderr and exits 71 instead of
+# the rc. Compared only while .bb/ticket still names THIS ticket (a later build in the same checkout owns the file then; two runs granted in one second share a start, so .bb/start cannot tell them apart, #80). A checkout with no .bb/ticket (a pre-#80 run) is not compared: the verdict is the ticket's rc either way, so only the tamper check is lost, and never for
+# orphaned/cancelled/expired/abandoned tickets (a ticket finalized by reap or a too-late cancel is orphaned: no rc, exit 70).
+# GUARANTEE: the verdict comes from mvn's exit status, never from the checkout; any later disagreement in the checkout is detected (RC-MISMATCH, exit 71); deliberate tampering with queue/done by the same uid stays possible.
+# The log path is the ticket's .bb/build.log: a later build in the same checkout overwrites it.
+set -uo pipefail
+SELF=$(readlink -f "$0")
+. "$(dirname "$SELF")/bb-queue-lib.sh"
+ID=${1:-}
+[[ $ID =~ ^[0-9]+-[0-9]+$ ]] && [ $# -eq 1 ] || { echo "usage: bb-wait <ticket-id>   (the ticket= value bb-build printed)" >&2; exit 2; }
+IV=${BB_WAIT_INTERVAL:-30}; case "$IV" in ''|*[!0-9]*) IV=30;; esac; [ "$IV" -ge 15 ] || IV=15
+exec 8> "$Q/.lock"
+while :; do
+  # under the lock no ticket is between directories, and reap finalizes a dead waiter's ticket
+  flock 8; reap; where=none; for d in done waiting running; do [ -f "$Q/$d/$ID" ] && { where=$d; break; }; done; flock -u 8
+  [ "$where" != none ] || { echo "bb-wait: unknown ticket $ID (not in $Q/{waiting,running,done})" >&2; exit 4; }
+  f=$Q/done/$ID
+  if [ "$where" = done ]; then
+    st=$(field "$f" state); rc=$(field "$f" rc); cr=$(created_s "$f"); s=$(field "$f" started); e=$(field "$f" ended)
+    n() { case "$1" in ''|*[!0-9]*) return 1;; esac; }
+    wall=-; wt=-; rn=-
+    n "$e" && [ "$cr" != 0 ] && wall=$((e - cr))
+    n "$s" && [ "$cr" != 0 ] && wt=$((s - cr))
+    n "$s" && n "$e" && rn=$((e - s))
+    log=$(field "$f" output); [ -n "$log" ] || log=$(field "$f" co)/.bb/build.log
+    echo "ticket=$ID state=${st:-?} rc=${rc:--} wall=${wall}s wait=${wt}s run=${rn}s log=$log"
+    ref=$(field "$f" refused); [ -z "$ref" ] || echo "refused: $ref"   # CTO ruling R3: the refusal replaces the verdict on every surface
+    case "$st" in
+      finished)
+        co=$(field "$f" co)
+        if n "$rc" && run_current "$co" "$ID"; then   # not current or unknown (no .bb/ticket) skips the check
+          fr=$(cat "$co/.bb/rc" 2>/dev/null || echo absent)
+          [ "$fr" = "$rc" ] || { echo "RC-MISMATCH ticket=$rc file=$fr: the ticket record is the verdict; re-run the build in a fresh checkout; never edit or restore .bb/rc" >&2; exit 71; }
+        fi
+        n "$rc" && exit "$rc"; exit 70;;
+      cancelled|abandoned) exit 9;;
+      expired) exit 5;;
+      *) exit 70;;
+    esac
+  fi
+  sleep "$IV"
+done

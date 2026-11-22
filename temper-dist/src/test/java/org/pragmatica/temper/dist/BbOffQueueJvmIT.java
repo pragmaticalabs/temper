@@ -269,7 +269,7 @@ class BbOffQueueJvmIT {
     }
 
     private String pick() throws Exception {
-        var run = lib("pick");
+        var run = lib("pick \"$(ledger_count)\"");
 
         assertThat(run.rc()).as(run.stderr()).isZero();
 

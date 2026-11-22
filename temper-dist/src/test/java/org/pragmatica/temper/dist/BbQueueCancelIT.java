@@ -180,7 +180,7 @@ class BbQueueCancelIT {
     private String pick() throws Exception {
         var run = BbFixtures.run(List.of("bash",
                                          "-c",
-                                         ". \"$1\"; pick",
+                                         ". \"$1\"; pick \"$(ledger_count)\"",
                                          "_",
                                          tools.resolve("bb-queue-lib.sh").toString()),
                                  env(ME, Map.of()),

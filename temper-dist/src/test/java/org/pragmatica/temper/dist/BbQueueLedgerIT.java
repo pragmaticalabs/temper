@@ -289,7 +289,7 @@ class BbQueueLedgerIT {
     @Test
     void aWaiterSigkilledBetweenSpawnAndLedgerWrite_neverLetsASecondTicketPastTheCap() throws Exception {
         var src = Files.readString(BbFixtures.OPS_BB.resolve("bb-build"));
-        var grant = "if [ \"$(pick \"$ID\")\" = \"$ID\" ]; then break; fi";
+        var grant = "if [ \"$(pick \"$RL\" \"$ID\")\" = \"$ID\" ]; then break; fi";
         // #88: once race.arm names the first ticket, the next waiter poll releases that launch AFTER its reap kept the ticket and BEFORE
         // its pick reads the ledger, and waits until the launch is gone: the ordering CI hit by chance, forced on every run.
         var releaseBetweenReapAndPick = "if [ -f \"$HOLD_DIR/race.arm\" ]; then F=$(cat \"$HOLD_DIR/race.arm\"); rm -f \"$HOLD_DIR/race.arm\";"
@@ -362,11 +362,11 @@ class BbQueueLedgerIT {
                                            + "\nco=" + dir
                                            + "\nargs=-B install\n");
 
-            assertThat(lib("pick w-" + BbFixtures.RUN,
+            assertThat(lib("pick \"$(ledger_count)\" w-" + BbFixtures.RUN,
                            Map.of()).stdout().strip()).as("host cap 1 is free: the recycled pid holds no slot")
                       .isEqualTo(waiting.getFileName().toString());
             BbFixtures.recordLaunch(queue, "t-live", pid);
-            assertThat(lib("pick w-" + BbFixtures.RUN,
+            assertThat(lib("pick \"$(ledger_count)\" w-" + BbFixtures.RUN,
                            Map.of()).stdout().strip()).as("the real launch holds the only slot")
                       .isEmpty();
             assertThat(lib("ledger_write",
@@ -375,6 +375,37 @@ class BbQueueLedgerIT {
                       .isEmpty();
         } finally {
             live.destroyForcibly();
+        }
+    }
+
+    /// #90: pick takes the launch count reap printed in the same lock hold as its argument; without one (no reap ran, or a value that is
+    /// not a count) it fails closed: nothing granted, the ticket stays waiting, stderr names why. The control grants the same ticket
+    /// through the normal path (`r=$(reap); pick "$r" <id>`) with its waiter alive, so the refusal is the missing count, not the setup.
+    /// Mutation: pick falls back to ledger_count when the argument is missing -> the refusal assertions are red.
+    @Test
+    void aPickWithoutAReapCount_refuses_andTheNormalPathStillGrants() throws Exception {
+        var id = "w-" + BbFixtures.RUN;
+        var waiting = Files.writeString(queue.resolve("waiting").resolve(id),
+                                        "owner=" + ME
+                                       + "\ncap=5\ncreated=" + (System.currentTimeMillis() * 1_000_000L)
+                                       + "\nco=" + dir
+                                       + "\nargs=-B install\n");
+        var waiter = BbFixtures.process("bash", "-c", "sleep 600; :", "bb-build __run " + id).start();
+
+        try {
+            for (var call : List.of("pick", "pick \"\" " + id, "pick " + id, "pick 0x1 " + id)) {
+                var run = lib(call, Map.of());
+
+                assertThat(run.stdout().strip()).as(call + ": nothing granted without a reap count").isEmpty();
+                assertThat(run.stderr()).as(call + ": the refusal names why").contains("pick: refused: no reap count from this lock hold");
+                assertThat(waiting).as(call + ": the ticket still waits").exists();
+            }
+            var reaped = lib("r=$(reap); echo \"reap=$r\"; pick \"$r\" " + id, Map.of());
+
+            assertThat(reaped.stdout().strip()).as(reaped.stderr()).isEqualTo("reap=0\n" + id);
+            assertThat(waiting).as("reap kept the ticket of a live waiter").exists();
+        } finally {
+            waiter.destroyForcibly();
         }
     }
 
