@@ -241,14 +241,18 @@ class BbJbctBootstrapIT {
         assertThat(r.mains()).hasSize(1);
     }
 
+    /// The CTO ruling (2026-11-22, #86): a run with no -Dtest/-Dit.test selector is not gated, but bb-build appends both whole counts to
+    /// build.log, a zero included; the stub mvn writes no reports, so both are 0.
+    private static final String NOSEL = "bb-build: testcases (no selector, not gated): surefire(all)=0 failsafe(all)=0\n";
+
     @Test
-    void aNonJbctGoal_noBootstrap_andTheLogHoldsOnlyMaven() throws Exception {
+    void aNonJbctGoal_noBootstrap_andTheLogHoldsOnlyMavenAndTheCountLine() throws Exception {
         var r = run(checkout(false), "-B", "clean", "install");
 
         assertThat(r.rc()).isZero();
         assertThat(r.installs()).isEmpty();
         assertThat(r.log()).doesNotContain("bootstrap:");
-        assertThat(r.log()).isEqualTo("stub mvn -B clean install -Daether.requireDocker=true\n");
+        assertThat(r.log()).isEqualTo("stub mvn -B clean install -Daether.requireDocker=true\n" + NOSEL);
         assertThat(r.ticket()).noneMatch(l -> l.startsWith("jbct_bootstrap="));
     }
 
@@ -503,7 +507,8 @@ class BbJbctBootstrapIT {
     }
 
     /// Pre-#64 behaviour for a ticket that is not a jbct run, on a host where the helper was never installed (the state of every host
-    /// until its operator runs install-bb-fields.sh): the same mvn argv, a build.log holding only maven's output, no bootstrap ticket line.
+    /// until its operator runs install-bb-fields.sh): the same mvn argv, a build.log holding only maven's output
+    /// and, since #86, bb-build's no-selector count line, no bootstrap ticket line.
     /// Mutation: call the helper unconditionally in bb-build -> "No such file or directory" in the log, rc != 0, red.
     @Test
     void plainVerify_withNoHelperInstalled_isUnaffected_sameArgvSameLogNoBootstrapLine() throws Exception {
@@ -512,7 +517,7 @@ class BbJbctBootstrapIT {
 
         assertThat(r.rc()).as(r.log()).isZero();
         assertThat(r.mvn()).containsExactly("-B verify -Daether.requireDocker=true");
-        assertThat(r.log()).isEqualTo("stub mvn -B verify -Daether.requireDocker=true\n");
+        assertThat(r.log()).isEqualTo("stub mvn -B verify -Daether.requireDocker=true\n" + NOSEL);
         assertThat(r.ticket()).noneMatch(l -> l.contains("bootstrap"));
     }
 

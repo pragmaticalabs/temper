@@ -154,38 +154,41 @@ class BbRequireDockerIT {
         return Files.readString(dir.resolve("q/done").resolve(run.ticket()));
     }
 
+    /// The CTO ruling (2026-11-22, #86): a run with no -Dtest/-Dit.test selector is not gated, but bb-build logs both whole counts as the
+    /// last log line, a zero included; these stub builds write no reports, so both are 0.
+    private static final String NOSEL = "\nbb-build: testcases (no selector, not gated): surefire(all)=0 failsafe(all)=0";
     private static final Map<String, String> OPT_OUT = Map.of("BB_REQUIRE_DOCKER", "0");
 
     @Test
     void theHostLaunch_endsWithRequireDocker_afterTheCallersArgs() throws Exception {
-        assertThat(build("0", Map.of(), "-B", "verify", "-Dfoo=1").log()).isEqualTo("HOST -B verify -Dfoo=1 -Daether.requireDocker=true");
+        assertThat(build("0", Map.of(), "-B", "verify", "-Dfoo=1").log()).isEqualTo("HOST -B verify -Dfoo=1 -Daether.requireDocker=true" + NOSEL);
     }
 
     @Test
     void theNetnsLaunch_endsWithRequireDocker_afterTheCallersArgs() throws Exception {
         var log = build("1", Map.of(), "-B", "verify", "-Dfoo=1").log();
 
-        assertThat(log).startsWith("NETNS ").endsWith(" -B verify -Dfoo=1 -Daether.requireDocker=true");
+        assertThat(log).startsWith("NETNS ").endsWith(" -B verify -Dfoo=1 -Daether.requireDocker=true" + NOSEL);
     }
 
     @Test
     void explicitOne_isTheDefault_andLeavesTheTicketWithoutTheField() throws Exception {
         var run = build("0", Map.of("BB_REQUIRE_DOCKER", "1"), "-B", "verify");
 
-        assertThat(run.log()).isEqualTo("HOST -B verify -Daether.requireDocker=true");
+        assertThat(run.log()).isEqualTo("HOST -B verify -Daether.requireDocker=true" + NOSEL);
         assertThat(doneTicket(run)).doesNotContain("requireDocker");
     }
 
     @Test
     void optOut_omitsTheFlag_onTheHostLaunch() throws Exception {
-        assertThat(build("0", OPT_OUT, "-B", "verify", "-Dfoo=1").log()).isEqualTo("HOST -B verify -Dfoo=1");
+        assertThat(build("0", OPT_OUT, "-B", "verify", "-Dfoo=1").log()).isEqualTo("HOST -B verify -Dfoo=1" + NOSEL);
     }
 
     @Test
     void optOut_omitsTheFlag_onTheNetnsLaunch() throws Exception {
         var log = build("1", OPT_OUT, "-B", "verify", "-Dfoo=1").log();
 
-        assertThat(log).startsWith("NETNS ").endsWith(" -B verify -Dfoo=1").doesNotContain("requireDocker");
+        assertThat(log).startsWith("NETNS ").endsWith(" -B verify -Dfoo=1" + NOSEL).doesNotContain("requireDocker");
     }
 
     @Test
@@ -235,11 +238,11 @@ class BbRequireDockerIT {
     void optOut_isNotDedupedAgainstAFinishedGuardedBuild() throws Exception {
         var guarded = build("0", Map.of(), "-B", "verify");
 
-        assertThat(guarded.log()).endsWith("-Daether.requireDocker=true");
+        assertThat(guarded.log()).endsWith("-Daether.requireDocker=true" + NOSEL);
         var optOut = build("0", OPT_OUT, "-B", "verify");
 
         assertThat(optOut.outcome().rc()).as(optOut.outcome().stdout() + optOut.outcome().stderr()).isZero();
-        assertThat(optOut.log()).isEqualTo("HOST -B verify");
+        assertThat(optOut.log()).isEqualTo("HOST -B verify" + NOSEL);
     }
 
     @Test
