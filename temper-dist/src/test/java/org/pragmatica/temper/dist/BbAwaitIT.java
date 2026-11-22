@@ -158,6 +158,19 @@ class BbAwaitIT {
         assertThat(run.stdout()).contains("ticket=" + id + " state=finished rc=0 ");
     }
 
+    /// reap prints its launch count for pick (#90); bb-await calls it only for its effects, so nothing precedes the
+    /// ticket= line that callers parse as line 1 (v91: a stray `0` line came first).
+    @Test
+    void theTicketLine_isTheFirstStdoutLine_reapPrintsNothingToTheCaller() throws Exception {
+        var id = id();
+
+        ticket("done", id, TICKET_DONE + "0\n");
+        var run = await("--ticket", id);
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        assertThat(run.stdout().lines().findFirst()).as(run.stdout()).hasValueSatisfying(line -> assertThat(line).startsWith("ticket=" + id + " state=finished rc=0 "));
+    }
+
     /// vbt8 L2 (CTO ruling R3, the refusal replaces the verdict everywhere). Probe: drop the `refused:` echo in bb-await -> red.
     @Test
     void aRefusedTicket_isReportedAsRefusedWithItsReason_notAsAPlainRc15() throws Exception {

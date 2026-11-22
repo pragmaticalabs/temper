@@ -272,6 +272,8 @@ class BbRcTicketRecordIT {
 
         assertThat(wait.rc()).as(wait.stdout() + wait.stderr()).isEqualTo(3);
         assertThat(wait.stderr()).doesNotContain("RC-MISMATCH");
+        assertThat(wait.stdout().lines().findFirst()).as("reap's launch count (#90) never precedes the ticket= line: " + wait.stdout())
+                                                    .hasValueSatisfying(line -> assertThat(line).startsWith("ticket=" + id + " "));
         assertThat(mode(co.resolve(".bb/rc"))).isEqualTo("r--r--r--");
     }
 

@@ -22,7 +22,7 @@ IV=${BB_WAIT_INTERVAL:-30}; case "$IV" in ''|*[!0-9]*) IV=30;; esac; [ "$IV" -ge
 exec 8> "$Q/.lock"
 while :; do
   # under the lock no ticket is between directories, and reap finalizes a dead waiter's ticket
-  flock 8; reap; where=none; for d in done waiting running; do [ -f "$Q/$d/$ID" ] && { where=$d; break; }; done; flock -u 8
+  flock 8; reap >/dev/null; where=none; for d in done waiting running; do [ -f "$Q/$d/$ID" ] && { where=$d; break; }; done; flock -u 8
   [ "$where" != none ] || { echo "bb-wait: unknown ticket $ID (not in $Q/{waiting,running,done})" >&2; exit 4; }
   f=$Q/done/$ID
   if [ "$where" = done ]; then

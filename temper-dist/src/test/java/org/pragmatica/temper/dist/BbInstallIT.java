@@ -234,12 +234,19 @@ class BbInstallIT {
         assertThat(pin("BB_QUEUE_PRE80")).isEqualTo(BbFixtures.md5(prev("bb-queue.pre80")));
         assertThat(pin("BB_LIB_PRE80")).isEqualTo(BbFixtures.md5(prev("bb-queue-lib.sh.pre80")));
         assertThat(pin("BB_LIB_PRE88")).isEqualTo(BbFixtures.md5(prev("bb-queue-lib.sh.pre88")));
+        assertThat(pin("BB_LIB_PRE90")).isEqualTo(BbFixtures.md5(prev("bb-queue-lib.sh.pre90")));
+        assertThat(pin("BB_BUILD_PRE90")).isEqualTo(BbFixtures.md5(prev("bb-build.pre90")));
+        assertThat(pin("BB_HOLD_PRE90")).isEqualTo(BbFixtures.md5(prev("bb-hold.pre90")));
+        assertThat(pin("BB_QUEUE_PRE90")).isEqualTo(BbFixtures.md5(prev("bb-queue.pre90")));
+        assertThat(pin("BB_WAIT_PRE90")).isEqualTo(BbFixtures.md5(prev("bb-wait.pre90")));
+        assertThat(pin("BB_AWAIT_PRE90")).isEqualTo(BbFixtures.md5(prev("bb-await.pre90")));
         assertThat(pin("BB_RESULT_PRE80")).isEqualTo(BbFixtures.md5(prev("bb-result.pre80")));
         assertThat(pin("BB_WAIT_PRE80")).isEqualTo(BbFixtures.md5(prev("bb-wait.pre80")));
         assertThat(pin("BB_BUILD_PRE76")).isEqualTo(BbFixtures.md5(prev("bb-build.pre76")));
         assertThat(pin("BB_TEST_PRE76")).isEqualTo(BbFixtures.md5(prev("bb-test.pre76")));
         assertThat(pin("BB_BUILD_PRE86")).isEqualTo(BbFixtures.md5(prev("bb-build.pre86")));
         assertThat(pin("BB_TEST_PRE86")).isEqualTo(BbFixtures.md5(prev("bb-test.pre86")));
+        assertThat(pin("BB_BUILD_PRE91")).isEqualTo(BbFixtures.md5(prev("bb-build.pre91")));
     }
 
     /// The bb-test lane helpers go in before bb-build (which calls bb-cp-record); a host holding a stranger's bb-test is refused, naming the one pin and
@@ -977,6 +984,8 @@ class BbInstallIT {
         Files.write(tools.resolve("bb-result"), prev("bb-result.pre80"));
         Files.write(tools.resolve("bb-wait"), prev("bb-wait.pre80"));
         Files.write(tools.resolve("bb-test"), prev("bb-test.pre76"));
+        Files.write(tools.resolve("bb-hold"), prev("bb-hold.pre90"));
+        Files.write(tools.resolve("bb-await"), prev("bb-await.pre90"));
         for (var e : live.entrySet()) {
             assertThat(BbFixtures.md5(Files.readAllBytes(tools.resolve(e.getKey())))).as(e.getKey()).isEqualTo(e.getValue());
         }
@@ -1031,6 +1040,28 @@ class BbInstallIT {
         assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
         assertThat(run.stdout()).doesNotContain("refused")
                                 .contains("installed builder@h1 bb-build before=" + pin("BB_BUILD_PRE86") + " after=" + pin("BB_BUILD_NEW"),
+                                          "installed builder@h1 bb-test before=" + pin("BB_TEST_PRE86") + " after=" + pin("BB_TEST_NEW"));
+        assertThat(BbFixtures.md5(Files.readAllBytes(tools.resolve("bb-build")))).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-build")));
+        assertThat(BbFixtures.md5(Files.readAllBytes(tools.resolve("bb-test")))).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-test")));
+    }
+
+    /// A host at main's install set after #91 (bb-build 12f2c9b5: the waiter passes reap's count to pick, still no zero-testcase refusal;
+    /// bb-test 13f8e8c9; every other file at its pin) is accepted and upgraded to this change's zero-testcase refusal (#86).
+    /// Mutation: drop BB_BUILD_PRE91 from accepted_of -> the host is refused, exit 65, red.
+    @Test
+    void aHostAtTheMain91InstallSet_isAcceptedAndUpgraded() throws Exception {
+        var tools = host("h1");
+
+        assertThat(install("builder@h1").rc()).isZero();
+        Files.write(tools.resolve("bb-build"), prev("bb-build.pre91"));
+        Files.write(tools.resolve("bb-test"), prev("bb-test.pre86"));
+        assertThat(BbFixtures.md5(Files.readAllBytes(tools.resolve("bb-build")))).isEqualTo("12f2c9b52c09724be2a07e8058bc6a43");
+        assertThat(BbFixtures.md5(Files.readAllBytes(tools.resolve("bb-test")))).isEqualTo("13f8e8c9a2e098dbf67cc478cf4e8928");
+        var run = install("builder@h1");
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        assertThat(run.stdout()).doesNotContain("refused")
+                                .contains("installed builder@h1 bb-build before=" + pin("BB_BUILD_PRE91") + " after=" + pin("BB_BUILD_NEW"),
                                           "installed builder@h1 bb-test before=" + pin("BB_TEST_PRE86") + " after=" + pin("BB_TEST_NEW"));
         assertThat(BbFixtures.md5(Files.readAllBytes(tools.resolve("bb-build")))).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-build")));
         assertThat(BbFixtures.md5(Files.readAllBytes(tools.resolve("bb-test")))).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-test")));
@@ -1117,6 +1148,8 @@ class BbInstallIT {
                                                                  + "|" + pin("BB_BUILD_PRE80")
                                                                  + "|" + pin("BB_BUILD_PRE76")
                                                                  + "|" + pin("BB_BUILD_PRE86")
+                                                                 + "|" + pin("BB_BUILD_PRE90")
+                                                                 + "|" + pin("BB_BUILD_PRE91")
                                                                  + "|" + pin("BB_BUILD_NEW"));
         assertThat(listing(good)).isEqualTo(goodBefore);
         assertThat(listing(diverged)).isEqualTo(divergedBefore);
@@ -1158,6 +1191,7 @@ class BbInstallIT {
                            + "|" + pin("BB_LIB_PRELEDGER")
                            + "|" + pin("BB_LIB_PRE80")
                            + "|" + pin("BB_LIB_PRE88")
+                           + "|" + pin("BB_LIB_PRE90")
                            + "|" + pin("BB_LIB_NEW"))
                   .contains("bb-queue installed=" + BbFixtures.md5("unrelated tool\n".getBytes())
                            + " expected=" + BbFixtures.BB_QUEUE_OLD
@@ -1170,6 +1204,7 @@ class BbInstallIT {
                            + "|" + pin("BB_QUEUE_PREOFFQ")
                            + "|" + pin("BB_QUEUE_PRELEDGER")
                            + "|" + pin("BB_QUEUE_PRE80")
+                           + "|" + pin("BB_QUEUE_PRE90")
                            + "|" + pin("BB_QUEUE_NEW"));
     }
 

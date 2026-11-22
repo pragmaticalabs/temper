@@ -117,7 +117,7 @@ if [ "${1:-}" = offq ]; then echo "offq v1"; offqueue_reactors; exit 0; fi
 if [ "${1:-}" = reap ]; then
   exec 8> "$Q/.lock"; flock 8
   before=$(ls "$Q/waiting" "$Q/running" 2>/dev/null | grep -v ':$' | grep . | sort)
-  reap
+  reap > /dev/null   # its stdout is the launch count, for pick only
   after=$(ls "$Q/waiting" "$Q/running" 2>/dev/null | grep -v ':$' | grep . | sort)
   moved=$(comm -23 <(printf '%s\n' "$before") <(printf '%s\n' "$after") | grep .)
   if [ -n "$moved" ]; then for id in $moved; do echo "reaped $id: $(sed -n 's/^state=//p' "$Q/done/$id" | tail -1)"; done

@@ -161,7 +161,7 @@ class BbHostCapIT {
         var id = ticket("five", 0, 5);
 
         Files.writeString(capFile, "99999999999999999999\n");
-        var run = lib("pick");
+        var run = lib("pick \"$(ledger_count)\"");
 
         assertThat(run.stderr()).as("no 'integer expression expected'").isEmpty();
         assertThat(run.stdout().strip()).as("0 reactors < the default cap 3: granted").isEqualTo(id);
@@ -250,7 +250,7 @@ class BbHostCapIT {
     }
 
     private String pick(String caller) throws Exception {
-        var run = lib("pick " + caller);
+        var run = lib("pick \"$(ledger_count)\" " + caller);
 
         assertThat(run.rc()).as(run.stderr()).isZero();
 
