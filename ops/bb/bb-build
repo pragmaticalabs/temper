@@ -81,7 +81,7 @@
 # else: fixture XML under src/ never counts); for a launch, the TEST-*.xml of the ticket's own <module>/target/bb-test-reports/<ticket>/
 # (with --repeat N>1, each run<i>/ is a run of its own, and every selector must be > 0 in EVERY run). Only reports whose mtime is newer
 # than .bb/run.marker count. A <testcase> belongs to the class its file names (TEST-<fqcn>.xml), else (the launcher's TEST-junit-jupiter.xml)
-# to its classname; a nested Outer$Inner counts for Outer too. A token matches by its class part (before '#'): a bare name or glob against
+# to its classname; a nested Outer$Inner$Deeper counts for Outer and Outer$Inner too. A token matches by its class part (before '#'): a bare name or glob against
 # the simple name (`Bb*IT` is ONE token and must be > 0), a dotted or slashed name or glob against the package path, %regex[...] against the
 # class path. Any token at 0 turns rc 0 into 19 (.bb/rc and the ticket's rc=; no bb-cp-record); a count that cannot be made (timeout 120 s,
 # missing marker) is 19 too, never a pass. build.log gets `bb-build: selected testcases: [run<i>:]<token>=<n> ...` and, on refusal, an
@@ -192,8 +192,9 @@ def matches(token, fqcn):
         pat = cls.replace('.', '/')
         return fnmatch.fnmatchcase(path, pat) or fnmatch.fnmatchcase(path, '*/' + pat)
     return fnmatch.fnmatchcase(fqcn.rsplit('.', 1)[-1], cls)
-def hit(token, fqcn):                            # a nested Outer$Inner counts for its Outer
-    return bool(fqcn) and (matches(token, fqcn) or ('$' in fqcn and matches(token, fqcn.split('$', 1)[0])))
+def hit(token, fqcn):                            # a nested Outer$Inner$Deeper counts for every '$'-prefix: Outer, Outer$Inner
+    parts = fqcn.split('$')
+    return bool(fqcn) and any(matches(token, '$'.join(parts[:i])) for i in range(len(parts), 0, -1))
 counts = [(label + t, sum(1 for fq, sk in found if not sk and hit(t, fq)), sum(1 for fq, sk in found if sk and hit(t, fq)))
           for label, found in runs for t in tokens]   # EXECUTED testcases: a <testcase> with a <skipped> child does not count
 if failsafe_all:                                 # -Dtest=none, no -Dit.test: run-level, every executed failsafe testcase

@@ -151,6 +151,18 @@ class BbZeroTestcaseIT {
     }
 
     @Test
+    void aDoublyNestedReport_countsForEveryDollarPrefix_OuterAndOuterInner() throws Exception {
+        var deeper = report("m/target/surefire-reports", "org.x.OuterTest\\$Inner\\$Deeper", cases("org.x.OuterTest$Inner$Deeper"));
+
+        for (var selector : List.of("OuterTest$Inner", "OuterTest")) {
+            var run = run(deeper, "-Dtest=" + selector, "-Dsurefire.failIfNoSpecifiedTests=false");
+
+            assertThat(run.rc()).as(selector + run.log()).isEqualTo("0");
+            assertThat(run.log()).contains("bb-build: selected testcases: " + selector + "=1\n").doesNotContain("refused");
+        }
+    }
+
+    @Test
     void aSelectedClassWithNoReport_isRefusedWith19() throws Exception {
         assertRefused(run("exit 0", "-Dit.test=NoSuchClassIT", "-Dfailsafe.failIfNoSpecifiedTests=false"), "NoSuchClassIT=0", "NoSuchClassIT");
     }
