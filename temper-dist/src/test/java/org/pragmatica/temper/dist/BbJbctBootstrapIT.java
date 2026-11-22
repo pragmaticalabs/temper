@@ -245,9 +245,8 @@ class BbJbctBootstrapIT {
     /// build.log, a zero included; the stub mvn writes no reports, so both are 0.
     private static final String NOSEL = "bb-build: testcases (no selector, not gated): surefire(all)=0 failsafe(all)=0\n";
 
-    /// Property (since #86): build.log holds only maven's output plus bb-build's own `bb-build: `-prefixed lines, and the no-selector
-    /// count line among them is exactly the ruled one. (Before #86: build.log held only maven's output.) A stray line of any other
-    /// shape, or a changed count line, is red.
+    /// Property (since #86): on this path build.log holds exactly maven's output and the one ruled no-selector count line, in that order.
+    /// (Before #86: build.log held only maven's output.) Any other line, a `bb-build: ` one included, or a changed count line, is red (#92).
     @Test
     void aNonJbctGoal_noBootstrap_andTheLogHoldsOnlyMavenPlusBbBuildLines() throws Exception {
         var r = run(checkout(false), "-B", "clean", "install");
@@ -256,10 +255,7 @@ class BbJbctBootstrapIT {
         assertThat(r.rc()).isZero();
         assertThat(r.installs()).isEmpty();
         assertThat(r.log()).doesNotContain("bootstrap:");
-        assertThat(r.log().lines().toList()).startsWith(maven)
-                                            .contains(NOSEL.strip())
-                                            .allSatisfy(l -> assertThat(l.equals(maven) || l.startsWith("bb-build: ")).as("a non-maven line: " + l)
-                                                                                                                       .isTrue());
+        assertThat(r.log().lines().toList()).containsExactly(maven, NOSEL.strip());
         assertThat(r.ticket()).noneMatch(l -> l.startsWith("jbct_bootstrap="));
     }
 
