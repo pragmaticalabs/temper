@@ -26,7 +26,8 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 ///
 /// Probes (lane93, 2026-11-22, each on a throwaway branch, never pushed): the whole class run against a bash port of the zsh
 /// mechanism it replaces (owner-cmds install-bb-91: one sequential heartbeat loop, unbounded ssh, no pre-install check) ->
-/// [#aStalledHeartbeatToOneHost_keepsEveryOtherHostHeld_andTheLapseIsReported] and
+/// [#aStalledHeartbeatToOneHost_keepsEveryOtherHostHeld_andTheLapseIsReported],
+/// [#aFailedHeartbeatCall_doesNotEndTheLoop_andNoHoldEnds] and
 /// [#aHoldGoneBeforeTheInstall_runsNothing_andReleasesEveryHold] red; drop the per-call wall limit ->
 /// [#aStalledCall_isCutAtTheWallLimit_soTheRefusalComesInBoundedTime] red; drop the pre-install HOLDF check ->
 /// [#aHoldGoneBeforeTheInstall_runsNothing_andReleasesEveryHold] red.
@@ -62,6 +63,11 @@ class BbInstallHoldIT {
             printf '%s|%s|%s\\n' "$target" "${opts# }" "$cmd" >> "@LOG@"
             if [ "${SHIM_STALL_HOST:-}" = "$h" ] && [[ $cmd == $SHIM_STALL_MATCH ]] && { [ -z "${SHIM_STALL_FLAG:-}" ] || [ -e "$SHIM_STALL_FLAG" ]; }; then
               exec sleep "${SHIM_STALL_SECS:-60}"
+            fi
+            if [ "${SHIM_FAIL_HOST:-}" = "$h" ] && [[ $cmd == $SHIM_FAIL_MATCH ]]; then
+              # the first SHIM_FAIL_COUNT matching calls fail at once (rc 255), the way an ssh does when its connection drops
+              n=$(cat "$HOME_BASE/$h.fails" 2> /dev/null || echo 0)
+              if [ "$n" -lt "${SHIM_FAIL_COUNT:-1}" ]; then echo $((n + 1)) > "$HOME_BASE/$h.fails"; exit 255; fi
             fi
             if [ "${SHIM_TICKET_HOST:-}" = "$h" ] && [[ $cmd == *nohup* ]] && [ ! -e "$HOME_BASE/$h.ticketed" ]; then
               # a ticket enqueued while the holder starts: present for 3 s, then it finishes on its own
@@ -238,6 +244,27 @@ class BbInstallHoldIT {
         assertThat(outcome.stderr()).contains("WARNING: aether@h2's hold ended before the install finished")
                   .doesNotContain("aether@h1's hold")
                   .doesNotContain("aether@h3's hold");
+        assertNoTokensAnywhere();
+    }
+
+    /// h2's first two heartbeat calls FAIL at once (rc 255; not a hang). The loop goes on, the third call succeeds, and no hold ends:
+    /// the zsh loop this replaces ran under `set -e` in a subshell and died at the first failed call, so every host went stale.
+    @Test
+    void aFailedHeartbeatCall_doesNotEndTheLoop_andNoHoldEnds() throws Exception {
+        var outcome = hold(Map.of("SHIM_FAIL_HOST",
+                                  "h2",
+                                  "SHIM_FAIL_MATCH",
+                                  HB_CALL,
+                                  "SHIM_FAIL_COUNT",
+                                  "2",
+                                  "SAMPLE_SECS",
+                                  "14"));
+
+        assertThat(samples()).as(outcome.stderr())
+                  .hasSize(14)
+                  .allSatisfy(sample -> assertThat(sample).isEqualTo("h1=held h2=held h3=held"));
+        assertThat(outcome.rc()).as(outcome.stderr()).isZero();
+        assertThat(outcome.stderr()).contains("heartbeat: aether@h2: refresh failed (rc 255)").doesNotContain("WARNING");
         assertNoTokensAnywhere();
     }
 
