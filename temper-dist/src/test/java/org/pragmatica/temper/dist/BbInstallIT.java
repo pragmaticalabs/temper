@@ -233,6 +233,7 @@ class BbInstallIT {
         assertThat(pin("BB_BUILD_PRE80")).isEqualTo(BbFixtures.md5(prev("bb-build.pre80")));
         assertThat(pin("BB_QUEUE_PRE80")).isEqualTo(BbFixtures.md5(prev("bb-queue.pre80")));
         assertThat(pin("BB_LIB_PRE80")).isEqualTo(BbFixtures.md5(prev("bb-queue-lib.sh.pre80")));
+        assertThat(pin("BB_LIB_PRE88")).isEqualTo(BbFixtures.md5(prev("bb-queue-lib.sh.pre88")));
         assertThat(pin("BB_RESULT_PRE80")).isEqualTo(BbFixtures.md5(prev("bb-result.pre80")));
         assertThat(pin("BB_WAIT_PRE80")).isEqualTo(BbFixtures.md5(prev("bb-wait.pre80")));
         assertThat(pin("BB_BUILD_PRE76")).isEqualTo(BbFixtures.md5(prev("bb-build.pre76")));
@@ -1156,6 +1157,7 @@ class BbInstallIT {
                            + "|" + pin("BB_LIB_PREOFFQ")
                            + "|" + pin("BB_LIB_PRELEDGER")
                            + "|" + pin("BB_LIB_PRE80")
+                           + "|" + pin("BB_LIB_PRE88")
                            + "|" + pin("BB_LIB_NEW"))
                   .contains("bb-queue installed=" + BbFixtures.md5("unrelated tool\n".getBytes())
                            + " expected=" + BbFixtures.BB_QUEUE_OLD
