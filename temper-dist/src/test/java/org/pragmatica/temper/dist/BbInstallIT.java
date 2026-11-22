@@ -982,6 +982,7 @@ class BbInstallIT {
         Files.write(tools.resolve("bb-wait"), prev("bb-wait.pre80"));
         Files.write(tools.resolve("bb-test"), prev("bb-test.pre76"));
         Files.write(tools.resolve("bb-hold"), prev("bb-hold.pre90"));
+        Files.write(tools.resolve("bb-await"), prev("bb-await.pre90"));
         for (var e : live.entrySet()) {
             assertThat(BbFixtures.md5(Files.readAllBytes(tools.resolve(e.getKey())))).as(e.getKey()).isEqualTo(e.getValue());
         }
