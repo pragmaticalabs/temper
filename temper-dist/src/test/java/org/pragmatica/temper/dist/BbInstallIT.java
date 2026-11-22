@@ -183,6 +183,7 @@ class BbInstallIT {
         assertThat(pin("BB_PORTGROUP_PREV")).isEqualTo(BbFixtures.md5(prev("bb-portgroup.py")));
         assertThat(pin("BB_BUILD_LIVE")).isEqualTo(BbFixtures.md5(prev("bb-build.live")));
         assertThat(pin("BB_NETNS_PREV")).isEqualTo(BbFixtures.md5(prev("bb-netns-run")));
+        assertThat(pin("BB_NETNS_PREMOUNTS")).isEqualTo(BbFixtures.md5(prev("bb-netns-run.premounts")));
         assertThat(pin("BB_BUILD_PRE31")).isEqualTo(BbFixtures.md5(prev("bb-build.pre31")));
         assertThat(pin("BB_QUEUE_PRE31")).isEqualTo(BbFixtures.md5(prev("bb-queue.pre31")));
         assertThat(pin("BB_TICKETS_PRE31")).isEqualTo(BbFixtures.md5(prev("bb-tickets.pre31")));
@@ -234,6 +235,8 @@ class BbInstallIT {
         assertThat(pin("BB_LIB_PRE80")).isEqualTo(BbFixtures.md5(prev("bb-queue-lib.sh.pre80")));
         assertThat(pin("BB_RESULT_PRE80")).isEqualTo(BbFixtures.md5(prev("bb-result.pre80")));
         assertThat(pin("BB_WAIT_PRE80")).isEqualTo(BbFixtures.md5(prev("bb-wait.pre80")));
+        assertThat(pin("BB_BUILD_PRE76")).isEqualTo(BbFixtures.md5(prev("bb-build.pre76")));
+        assertThat(pin("BB_TEST_PRE76")).isEqualTo(BbFixtures.md5(prev("bb-test.pre76")));
     }
 
     /// The bb-test lane helpers go in before bb-build (which calls bb-cp-record); a host holding a stranger's bb-test is refused, naming the one pin and
@@ -254,7 +257,7 @@ class BbInstallIT {
 
         assertThat(refused.rc()).isEqualTo(65);
         assertThat(refused.stdout().trim()).isEqualTo("refused builder@h1 bb-test installed=" + BbFixtures.md5("a stranger's bb-test\n".getBytes())
-                                                     + " expected=" + pin("BB_TEST_NEW"));
+                                                     + " expected=" + pin("BB_TEST_PRE76") + "|" + pin("BB_TEST_NEW"));
         assertThat(listing(tools)).isEqualTo(before);
     }
 
@@ -677,6 +680,22 @@ class BbInstallIT {
         assertThat(tools.resolve("bb-netns-run.bak-" + pin("BB_NETNS_PREV"))).hasBinaryContent(prev("bb-netns-run"));
     }
 
+    /// The bb-netns-run live since 2026-11-12 (BB_NETNS_PREMOUNTS: docker socket, whole $HOME mounted rw; #76) is an accepted source and is replaced, backed up under its md5.
+    @Test
+    void aHostRunningTheNetnsRunWithTheWholeHomeMounted_isUpdatedToTheNarrowMounts() throws Exception {
+        var tools = host("h1");
+
+        assertThat(install("builder@h1").rc()).isZero();
+        Files.write(tools.resolve("bb-netns-run"), prev("bb-netns-run.premounts"));
+        var run = install("builder@h1");
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        assertThat(run.stdout()).contains("installed builder@h1 bb-netns-run before=" + pin("BB_NETNS_PREMOUNTS")
+                                         + " after=" + pin("BB_NETNS_NEW"));
+        assertThat(tools.resolve("bb-netns-run")).hasBinaryContent(Files.readAllBytes(OPS_BB.resolve("bb-netns-run")));
+        assertThat(tools.resolve("bb-netns-run.bak-" + pin("BB_NETNS_PREMOUNTS"))).hasBinaryContent(prev("bb-netns-run.premounts"));
+    }
+
     /// The bb-queue the 2026-11-11 hosts run (BB_QUEUE_LIVE) printed a header the worker could not parse; it is an accepted source and is replaced.
     @Test
     void aHostRunningTheLiveBbQueue_isUpdatedToTheCompatibleOne() throws Exception {
@@ -954,6 +973,7 @@ class BbInstallIT {
         Files.write(tools.resolve("bb-queue-lib.sh"), prev("bb-queue-lib.sh.pre80"));
         Files.write(tools.resolve("bb-result"), prev("bb-result.pre80"));
         Files.write(tools.resolve("bb-wait"), prev("bb-wait.pre80"));
+        Files.write(tools.resolve("bb-test"), prev("bb-test.pre76"));
         for (var e : live.entrySet()) {
             assertThat(BbFixtures.md5(Files.readAllBytes(tools.resolve(e.getKey())))).as(e.getKey()).isEqualTo(e.getValue());
         }
@@ -961,7 +981,32 @@ class BbInstallIT {
 
         assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
         assertThat(run.stdout()).doesNotContain("refused");
-        for (var f : List.of("bb-build", "bb-queue", "bb-queue-lib.sh", "bb-result", "bb-wait")) {
+        for (var f : List.of("bb-build", "bb-queue", "bb-queue-lib.sh", "bb-result", "bb-wait", "bb-test")) {
+            assertThat(BbFixtures.md5(Files.readAllBytes(tools.resolve(f)))).as(f).isEqualTo(BbFixtures.md5(OPS_BB.resolve(f)));
+        }
+    }
+
+    /// A host at main's install set after #81 (bb-build 2f349b86 and bb-test 4a302287, whose launch writes its fields into the queue;
+    /// bb-netns-run bf05b7c5, the whole $HOME rw; every other file at its pin) is accepted for every file and upgraded to this change's
+    /// launch-fields set (#76). Mutation: drop BB_BUILD_PRE76 or BB_TEST_PRE76 from accepted_of -> the host is refused, exit 65, red.
+    @Test
+    void aHostAtTheMain81InstallSet_isAcceptedAndUpgraded() throws Exception {
+        var tools = host("h1");
+
+        assertThat(install("builder@h1").rc()).isZero();
+        Files.write(tools.resolve("bb-build"), prev("bb-build.pre76"));
+        Files.write(tools.resolve("bb-test"), prev("bb-test.pre76"));
+        Files.write(tools.resolve("bb-netns-run"), prev("bb-netns-run.premounts"));
+        assertThat(BbFixtures.md5(Files.readAllBytes(tools.resolve("bb-build")))).isEqualTo("2f349b869a02dcfec552ab0b8b1f972c");
+        assertThat(BbFixtures.md5(Files.readAllBytes(tools.resolve("bb-test")))).isEqualTo("4a3022874afe57bbaea792a53c063f7e");
+        assertThat(BbFixtures.md5(Files.readAllBytes(tools.resolve("bb-netns-run")))).isEqualTo("bf05b7c51c2f7863ee685a195273e195");
+        var run = install("builder@h1");
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        assertThat(run.stdout()).doesNotContain("refused")
+                                .contains("installed builder@h1 bb-build before=" + pin("BB_BUILD_PRE76") + " after=" + pin("BB_BUILD_NEW"),
+                                          "installed builder@h1 bb-test before=" + pin("BB_TEST_PRE76") + " after=" + pin("BB_TEST_NEW"));
+        for (var f : List.of("bb-build", "bb-test", "bb-netns-run")) {
             assertThat(BbFixtures.md5(Files.readAllBytes(tools.resolve(f)))).as(f).isEqualTo(BbFixtures.md5(OPS_BB.resolve(f)));
         }
     }
@@ -1045,6 +1090,7 @@ class BbInstallIT {
                                                                  + "|" + pin("BB_BUILD_PREFIELDS")
                                                                  + "|" + pin("BB_BUILD_PRESESSION")
                                                                  + "|" + pin("BB_BUILD_PRE80")
+                                                                 + "|" + pin("BB_BUILD_PRE76")
                                                                  + "|" + pin("BB_BUILD_NEW"));
         assertThat(listing(good)).isEqualTo(goodBefore);
         assertThat(listing(diverged)).isEqualTo(divergedBefore);

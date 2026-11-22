@@ -229,14 +229,11 @@ class BbTestGuardIT {
 
     private BbFixtures.Outcome launchDirect(String pom, String... extra) throws Exception {
         // what the queue's waiter runs for a bb-test ticket, with the enqueue-time check out of the way: __launch in the checkout,
-        // with one running ticket naming it
+        // its ticket named by BB_TICKET (the launch never reads the queue, #76)
         Files.writeString(co.resolve("pom.xml"), pom);
         git("add", "-A");
         git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "pom");
         recorded();
-        var running = Files.createDirectories(tmp.resolve("q").resolve("running"));
-
-        Files.writeString(running.resolve("T1"), "id=T1\nco=" + co + "\n");
         var cmd = new java.util.ArrayList<>(List.of(BbFixtures.OPS_BB.resolve("bb-test").toString(),
                                                     "__launch",
                                                     "app",
@@ -246,8 +243,8 @@ class BbTestGuardIT {
         cmd.addAll(List.of(extra));
 
         return BbFixtures.run(cmd,
-                              Map.of("BB_TEST_QUEUE_ROOT",
-                                     tmp.resolve("q").toString(),
+                              Map.of("BB_TICKET",
+                                     "T1",
                                      "BB_TEST_LAUNCHER_JAR",
                                      tmp.resolve("no-launcher.jar").toString()),
                               co,
@@ -425,7 +422,7 @@ class BbTestGuardIT {
         var run = launchDirect(ROOT_POM);
 
         assertThat(run.rc()).as("the launcher jar is absent: a launch-time guard, rc 14 " + run.stderr()).isEqualTo(14);
-        assertThat(Files.readString(tmp.resolve("q").resolve("running").resolve("T1"))).contains("\nverdict_source=guard\n")
+        assertThat(ticket()).startsWith("verdict_source=guard\n")
                   .doesNotContain("verdict_source=java");
     }
 
@@ -541,9 +538,6 @@ class BbTestGuardIT {
         var record = record(appExtra);
 
         assertThat(record.rc()).as(record.stdout() + record.stderr()).isZero();
-        var running = Files.createDirectories(tmp.resolve("q").resolve("running"));
-
-        Files.writeString(running.resolve("T1"), "id=T1\nco=" + co + "\n");
         var launcher = Files.writeString(tmp.resolve("launcher.jar"), "stand-in launcher");
         var sha = java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(launcher)));
         var fakeJava = BbFixtures.executable(tmp.resolve("bin").resolve("java"),
@@ -553,7 +547,7 @@ class BbTestGuardIT {
                                         + "echo STAND-IN-JAVA-RAN; exit 0\n");
 
         return BbFixtures.run(List.of(BbFixtures.OPS_BB.resolve("bb-test").toString(), "__launch", "app", "1", "a.ATest"),
-                              Map.of("BB_TEST_QUEUE_ROOT", tmp.resolve("q").toString(),
+                              Map.of("BB_TICKET", "T1",
                                      "BB_TEST_LAUNCHER_JAR", launcher.toString(),
                                      "BB_TEST_LAUNCHER_SHA", sha,
                                      "BB_TEST_JAVA", fakeJava.toString()),
@@ -561,15 +555,16 @@ class BbTestGuardIT {
                               null);
     }
 
+    /// The launch's own ticket fields: what the waiter copies into ticket T1 (bb-build: LAUNCH FIELDS, #76).
     private String ticket() throws Exception {
-        return Files.readString(tmp.resolve("q").resolve("running").resolve("T1"));
+        return Files.readString(co.resolve(".bb").resolve("fields.T1"));
     }
 
     private void assertRefused(BbFixtures.Outcome run, String reason) throws Exception {
         assertThat(run.rc()).as("refused, replacing java's exit 0: " + run.stdout() + run.stderr()).isEqualTo(15);
         assertThat(run.stdout()).contains("bb-test: REFUSED (rc 15)", reason)
                                 .as("the run's console is not printed as a result").doesNotContain("STAND-IN-JAVA-RAN", "java exit 0");
-        assertThat(ticket()).contains("\nrefused=junit version: ", reason, "\nverdict_source=guard\n").doesNotContain("verdict_source=java");
+        assertThat(ticket()).startsWith("refused=junit version: ").contains(reason, "\nverdict_source=guard\n").doesNotContain("verdict_source=java");
         assertThat(Files.readString(co.resolve(".bb/refused"))).contains(reason);
         assertThat(co.resolve("app/target/bb-test-reports/T1")).as("no report dir that a count could read as this run's").doesNotExist();
         assertThat(co.resolve("app/target/bb-test-reports/T1.refused/console.txt")).exists();
@@ -668,7 +663,7 @@ class BbTestGuardIT {
         assertThat(run.stdout()).contains("bb-test: REFUSED (rc 15): unreadable classpath entry: " + path + " is a ",
                                           "not a regular file or directory; java was not run")
                                 .doesNotContain("STAND-IN-JAVA-RAN");
-        assertThat(ticket()).contains("\nrefused=unreadable classpath entry: " + path, "\nverdict_source=guard\n").doesNotContain("verdict_source=java");
+        assertThat(ticket()).startsWith("refused=unreadable classpath entry: " + path).contains("\nverdict_source=guard\n").doesNotContain("verdict_source=java");
         assertThat(Files.readString(co.resolve(".bb/refused"))).contains("unreadable classpath entry: " + path);
         assertThat(co.resolve("app/target/bb-test-reports/T1")).as("java never ran: no report dir").doesNotExist();
     }

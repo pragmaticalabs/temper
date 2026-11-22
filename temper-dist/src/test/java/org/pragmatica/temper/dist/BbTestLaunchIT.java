@@ -36,13 +36,13 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 class BbTestLaunchIT {
     private static final Pattern QUEUED = Pattern.compile("queued ticket=(\\S+)");
 
-    private static final String SEED = "work/temper-m2-seed/org/junit/platform/junit-platform-console-standalone/1.13.4/junit-platform-console-standalone-1.13.4.jar";
+    static final String SEED = "work/temper-m2-seed/org/junit/platform/junit-platform-console-standalone/1.13.4/junit-platform-console-standalone-1.13.4.jar";
 
-    private static final String ROOT_POM = "<project><modelVersion>4.0.0</modelVersion><groupId>g</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><properties><junit.version>5.13.4</junit.version></properties></project>";
+    static final String ROOT_POM = "<project><modelVersion>4.0.0</modelVersion><groupId>g</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><properties><junit.version>5.13.4</junit.version></properties></project>";
 
-    private static final String CALC = "package fx;\npublic class Calc { public static int add(int a, int b) { return a + b; } }\n";
+    static final String CALC = "package fx;\npublic class Calc { public static int add(int a, int b) { return a + b; } }\n";
 
-    private static final String CALC_TEST = """
+    static final String CALC_TEST = """
         package fx;
         import org.junit.jupiter.api.Test;
         import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -62,13 +62,22 @@ class BbTestLaunchIT {
     private Path launcher;
     private Map<String, String> env;
 
+    /// Outside a build container a missing seed jar is a skip (CI runners and workstations have none). Inside a bb-netns-run container
+    /// (BB_NETNS=1, exported by the script) it is a FAILURE naming the path: the narrowed mounts hid the seed once and 63 rows skipped silently (#76).
+    private static void seededOrSkip(Path jar, String skipReason) {
+        if (!Files.exists(jar) && System.getenv("BB_NETNS") != null) {
+            throw new AssertionError("the seed jar is missing inside the bb-netns-run container: " + jar + " (bb-netns-run must mount ~/work/temper-m2-seed)");
+        }
+        assumeTrue(Files.exists(jar), skipReason);
+    }
+
     private record Done(String id, int rc, String doneText) {}
 
     @BeforeEach
     void fixture() throws Exception {
         assumeTrue(BbFixtures.linux(), "bb-build needs GNU tools, flock and pgrep");
         launcher = Path.of(System.getProperty("user.home")).resolve(SEED);
-        assumeTrue(Files.exists(launcher), "the seeded console launcher is on build hosts only (CI runners have no ~/work/temper-m2-seed)");
+        seededOrSkip(launcher, "the seeded console launcher is on build hosts only (CI runners have no ~/work/temper-m2-seed)");
         tools = dir.resolve("tools");
         for (var f : List.of("bb-build", "bb-test", "bb-cp-record", "bb-testcount")) {
             BbFixtures.executable(tools.resolve(f),
@@ -368,7 +377,7 @@ class BbTestLaunchIT {
     void aRunWhoseTestsPassed_onAnotherResolvedJupiter_isRefusedOnEverySurface() throws Exception {
         var old = Path.of(System.getProperty("user.home")).resolve(OLD_API);
 
-        assumeTrue(Files.exists(old), "the seeded junit-jupiter-api 5.11.4 is on build hosts only");
+        seededOrSkip(old, "the seeded junit-jupiter-api 5.11.4 is on build hosts only");
         var extra = Map.of("RECORD_EXTRA", old.toString(), "BB_TEST_TICKET_LOG", dir.resolve("ticket-log.tsv").toString());
 
         assertThat(build(extra).rc()).as(log()).isZero();
@@ -651,13 +660,13 @@ class BbTestLaunchIT {
         assertThat(bbTest(Map.of(), "fx.CalcTest#passes").rc()).as(log()).isZero();
     }
 
-    /// D4: every vbt11 escape form E1-E9 (vbt11-report.md, vbt11a), inserted into a fixture copy of bb-test so that it reads a FIFO under the
+    /// D4: every vbt11 escape form E1-E8 (E9 read a FIFO through `$tco`, the queue-scan loop variable; the launch no longer scans the queue (#76), so its carrier is gone) (vbt11-report.md, vbt11a), inserted into a fixture copy of bb-test so that it reads a FIFO under the
     /// fixture checkout (E8: under /tmp, where the form moved it). The forms escaped the deleted static audits; here each must END within
-    /// the 5 s overall bound with an rc 17 refusal, never hang. E1-E4 and E7-E9 sit after `guard launcher_ok` in the walled launch (the
+    /// the 5 s overall bound with an rc 17 refusal, never hang. E1-E4 and E7-E8 sit after `guard launcher_ok` in the walled launch (the
     /// report's harness point); E5 before the walled launch's `cd /` (its cwd is the checkout there); E6's `$1` carrier is re-created with
     /// `set --`, since its own place (enqueue, before `CO=$1`) is outside W: W bounds the launch, not the enqueue. Probe p4: this run.
     @ParameterizedTest(name = "{0}")
-    @ValueSource(strings = {"E1", "E2", "E3", "E4", "E5", "E6", "E7", "E8", "E9"})
+    @ValueSource(strings = {"E1", "E2", "E3", "E4", "E5", "E6", "E7", "E8"})
     @Timeout(value = 120, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
     void everyVbt11EscapeForm_readingAFifo_endsWithinW_withRc17(String id) throws Exception {
         var fifo = "[ -p \"$CO/f\" ] || mkfifo \"$CO/f\"; ";
@@ -669,7 +678,6 @@ class BbTestLaunchIT {
             case "E6" -> "set -- \"$CO\"; sed -n 1p \"$1/f\"";
             case "E7" -> "for g in \"$CO\"/[f]; do sed -n 1p \"$g\"; done";
             case "E8" -> "R=$(mktemp); echo \"$R\" > '" + dir.resolve("e8.path") + "'; mv \"$CO/f\" \"$R\"; sed -n 1p \"$R\"";
-            case "E9" -> "sed -n 1p \"$tco/f\"";
             default -> null;
         };
         if (form == null) {

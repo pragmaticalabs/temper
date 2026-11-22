@@ -59,6 +59,13 @@
 # prints it; the run's console output and per-run count lines are not printed, and its report dir is renamed <ticket>.refused.
 # VERDICT SOURCE (vbt4 L2): the launch writes verdict_source=guard (a launch-time guard refused: rc 12/14/15) or verdict_source=java (java
 # ran and the resolved check passed; rc = its exit status) on the ticket, so a java System.exit(12|14|15) never reads as a guard.
+# NO QUEUE IN THE LAUNCH (#76): __launch runs inside bb-netns-run's container for a port-group ticket, where ~/work/queue is not mounted, so it
+# never reads or writes the queue (nor sources bb-queue-lib.sh). Its ticket id is BB_TICKET (the waiter sets it, bb-netns-run passes it in);
+# its ticket fields (verdict_source=, refused=) go to <checkout>/.bb/fields.<ticket-id>, each write bounded (a FIFO planted there by test code
+# must not hang the launch), and the waiter copies them into the ticket, under the queue lock just before rc=, keeping only
+# the lines of its grammar (bb-build: LAUNCH FIELDS; put_refused writes refused= to it: control bytes to spaces, at most 1024 bytes). A launch
+# that ends without verdict_source= reads as verdict_source=missing, never a pass. Test code can write that file too: it can then set only
+# those two fields of its own ticket (the same trust as java's exit status, which is the verdict), never rc=, co= or any other field.
 # Call rc: 0 queued (as bb-build); 2 usage, --repeat above 5, a module starting with '-' (N5), or a relative BB_TEST_LAUNCHER_JAR / BB_TEST_QUEUE_ROOT / BB_TEST_JAVA; 12 stale-jar guard; 14 launcher jar absent/not the pin; others from bb-build (3, 4).
 # Ticket rc 15: the run's resolved junit is not the launcher's (refused, above); rc 17: a W bound expired, `repeat` or `overall` named (refused, above).
 # REQUIRE DOCKER (CTO ruling 2026-11-19): the launch runs with -Daether.requireDocker=true (bb-build appends it to every ticket's args) unless
@@ -193,17 +200,21 @@ if [ "${1:-}" = __launch ]; then
   # ---- the queue ticket's job: runs where maven would, in the checkout. args: <module> <repeat> <selector>... [-D...] ----
   shift
   CO=$(pwd); cd /; unset OLDPWD; MOD=$1; REPEAT=$2; shift 2   # leave the checkout cwd, so a bare relative word never names checkout content
-  . "$HERE/bb-queue-lib.sh"
-  TICKET=""; N=0
-  for f in "$Q"/running/*; do [ -f "$f" ] || continue; tco=$(field "$f" co); [ "$tco" != "$CO" ] || { TICKET=${f##*/}; N=$((N + 1)); }; done
-  [ "$N" = 1 ] || { echo "bb-test: cannot name this run's ticket ($N running tickets for $CO)" >&2; exit 1; }
+  TICKET=${BB_TICKET:-}   # NO QUEUE IN THE LAUNCH (header): the id comes from the waiter, never from a queue scan
+  [[ $TICKET =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$ ]] || { echo "bb-test: cannot name this run's ticket (BB_TICKET '$TICKET' is not a ticket id; the queue's waiter sets it)" >&2; exit 1; }
+  FIELDS=$CO/.bb/fields.$TICKET
+  put_fields() { bounded 10 "$CO" /dev/null sh -c 'printf "%s" "$1" >> "$2"' sh "$1" "$FIELDS" || true; }   # BOUNDS: a FIFO planted as the file must not hang
   # verdict_source (vbt4 L2): rc 12/14/15 from a guard and the same number from java are told apart on the ticket, not by the number.
-  source_is() { ( flock 9; [ ! -f "$Q/running/$TICKET" ] || echo "verdict_source=$1" >> "$Q/running/$TICKET" ) 9> "$Q/.lock"; }
+  source_is() { put_fields "verdict_source=$1"$'\n'; }
+  put_refused() {   # the waiter's refused= grammar (bb-build: LAUNCH FIELDS): 1..1024 bytes, no control byte, not '='-leading
+    local LC_ALL=C; local w=${1//[[:cntrl:]]/ }; w=${w:-unknown}; [ "${w#=}" = "$w" ] || w=" $w"
+    put_fields "refused=${w:0:1024}"$'\n'"verdict_source=guard"$'\n'
+  }
   guard() { "$@" && return 0; local r=$?; source_is guard; exit "$r"; }
   refuse() {   # rc 15: the refusal replaces the verdict on every surface (header: RESOLVED JUNIT CHECK)
     local why=${1//[$'\r\n']/ } rc=${2:-15}   # rc 17: a W bound (header: W)
     [ -z "${RD:-}" ] || rm -f "$RD"
-    ( flock 9; [ ! -f "$Q/running/$TICKET" ] || printf 'refused=%s\nverdict_source=guard\n' "$why" >> "$Q/running/$TICKET" ) 9> "$Q/.lock"
+    put_refused "$why"
     bounded 10 "$CO" /dev/null sh -c 'printf "%s\n" "$1" > .bb/refused' sh "$why" || true   # BOUNDS: a FIFO planted as .bb/refused must not hang a refusal
     if [ -z "$OUT" ]; then echo "bb-test: REFUSED (rc $rc): $why; java was not run"; exit "$rc"; fi
     rm -rf "$BASE.refused"; mv "$BASE" "$BASE.refused" || true; mv "$OUT" "$BASE.refused/console.txt" || true
@@ -231,7 +242,7 @@ if [ "${1:-}" = __launch ]; then
     r=0; bounded "$ALL_T" "$CO" - env BB_TEST_WALLED=1 "$SELF" __launch "$MOD" "$REPEAT" "$@" || r=$?
     [ -n "$TIMED_OUT" ] || exit "$r"
     why="overall: the launch did not finish within ${ALL_T}s (--repeat $REPEAT x BB_TEST_REPEAT_TIMEOUT=${REP_T}s + BB_TEST_OVERHEAD_TIMEOUT=${OVH_T}s); its process group was killed"
-    ( flock 9; [ ! -f "$Q/running/$TICKET" ] || printf 'refused=%s\nverdict_source=guard\n' "$why" >> "$Q/running/$TICKET" ) 9> "$Q/.lock"
+    put_refused "$why"
     bounded 10 "$CO" /dev/null sh -c 'printf "%s\n" "$1" > .bb/refused' sh "$why" || true
     B=$CO/$MOD/target/bb-test-reports/$TICKET
     [ ! -d "$B" ] || { rm -rf "$B.refused"; mv "$B" "$B.refused"; }
@@ -292,7 +303,7 @@ if [ "${1:-}" = __launch ]; then
     i=$((i + 1)); r=0
     bounded "$REP_T" "$CO" - env BB_TEST_RUN="$i" BB_TEST_CP="$CP" BB_TEST_OUT="$OUT" "$SELF" __launch "$MOD" "$REPEAT" "$@" || r=$?
     [ -z "$TIMED_OUT" ] || refuse "repeat: run $i/$REPEAT did not finish within BB_TEST_REPEAT_TIMEOUT=${REP_T}s; its process group was killed" 17
-    [ "$r" != 15 ] || ! grep -q '^refused=' "$Q/running/$TICKET" || exit 15   # the re-run refused (every surface written): java's own 15 has no refused=
+    [ "$r" != 15 ] || ! bounded 10 "$CO" /dev/null grep -q '^refused=' "$FIELDS" || exit 15   # the re-run refused (every surface written): java's own 15 has no refused=
     [ "$r" -le "$RC" ] || RC=$r
   done
   RD=$(mktemp "$CO/.bb/bb-test-read.XXXXXX"); r=0
