@@ -259,6 +259,10 @@ never_started() {
 reap() {
   local f id co p
   ledger_write
+  # #88: the launch count pick uses in this lock hold, read BEFORE any running ticket is kept for a live launch. Read later, a launch
+  # that exits between this reap keeping its ticket and pick's count would grant the next ticket and leave the kept one in running/ with
+  # no waiter left to reap it. A process dead at this read stays dead, so pick never counts as gone a launch reap counted as live.
+  REAP_LAUNCHES=$(ledger_count)
   for f in "$Q"/waiting/*; do
     [ -f "$f" ] || continue; id=${f##*/}; co=$(field "$f" co)
     # checkout removed under a live waiter (bb-temper rm, a deleted tree): nothing can ever be built; stop the waiter by PID.
@@ -290,7 +294,7 @@ reap() {
 # (first time only); once any skipped ticket has been blocked for STARVE seconds, nothing behind it is granted, so the
 # host drains and it runs.
 pick() {
-  local me=${1-${ID-}} r id f c hc bs now lh mh cand="" oldest="" ocr=0 cr; r=$(ledger_count); now=$(date +%s)   # r: live queue launches (LEDGER)
+  local me=${1-${ID-}} r id f c hc bs now lh mh cand="" oldest="" ocr=0 cr; r=${REAP_LAUNCHES:-$(ledger_count)}; now=$(date +%s)   # r: live queue launches (LEDGER), as reap counted them in this lock hold (#88)
   hc=$(host_cap)
   for id in $(grantable); do
     f=$Q/waiting/$id; c=$(field "$f" cap); case "$c" in ''|*[!0-9]*) c=3;; esac; [ "$c" -le "$hc" ] || c=$hc

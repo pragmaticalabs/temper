@@ -289,9 +289,15 @@ class BbQueueLedgerIT {
     @Test
     void aWaiterSigkilledBetweenSpawnAndLedgerWrite_neverLetsASecondTicketPastTheCap() throws Exception {
         var src = Files.readString(BbFixtures.OPS_BB.resolve("bb-build"));
-        var widened = src.replace("ledger_add \"$ID\"", "sleep 6; ledger_add \"$ID\"");
+        var grant = "if [ \"$(pick \"$ID\")\" = \"$ID\" ]; then break; fi";
+        // #88: once race.arm names the first ticket, the next waiter poll releases that launch AFTER its reap kept the ticket and BEFORE
+        // its pick reads the ledger, and waits until the launch is gone: the ordering CI hit by chance, forced on every run.
+        var releaseBetweenReapAndPick = "if [ -f \"$HOLD_DIR/race.arm\" ]; then F=$(cat \"$HOLD_DIR/race.arm\"); rm -f \"$HOLD_DIR/race.arm\";"
+                                        + " : > \"$HOLD_DIR/hold-a.go\"; for _ in $(seq 300); do waiter_alive \"$F\" || break; sleep 0.1; done; fi; ";
+        var widened = src.replace("ledger_add \"$ID\"", "sleep 6; ledger_add \"$ID\"").replace(grant, releaseBetweenReapAndPick + grant);
 
         assertThat(widened.split("sleep 6; ledger_add", -1)).as("exactly one ledger_add widened").hasSize(2);
+        assertThat(widened.split("race.arm\" \\]", -1)).as("exactly one grant check gets the reap/pick release").hasSize(2);
         BbFixtures.executable(tools.resolve("bb-build"), widened);
         var first = enqueue("hold-a");
         var waiter = new AtomicReference<List<Long>>(List.of());
@@ -316,7 +322,7 @@ class BbQueueLedgerIT {
         var overGranted = within(15_000, () -> in("done", second));
         var ledger = ledgerCount(Map.of());
 
-        Files.writeString(dir.resolve("hold-a.go"), "");
+        Files.writeString(dir.resolve("race.arm"), first);
         assertThat(overGranted).as("no over-grant: the second ticket finished while the first launch held host cap 1 (ledger count then: "
                                    + ledger + ")")
                   .isFalse();
