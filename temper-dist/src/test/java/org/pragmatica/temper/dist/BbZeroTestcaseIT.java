@@ -424,8 +424,14 @@ class BbZeroTestcaseIT {
                              .doesNotContain("selected testcases");
     }
 
-    private static final String NO_TESTS_GOAL = "[ERROR] Failed to execute goal org.apache.maven.plugins:maven-surefire-plugin:3.2.5:test (default-test) on project m:"
-                                                + " No tests matching pattern \"FooTest#nope\" were executed! (Set -Dsurefire.failIfNoSpecifiedTests=false to ignore this error.) -> [Help 1]";
+    /// The two REAL lines maven 3 prints when a selector matches nothing, copied verbatim from build.log of 2026-11-22 (#92): surefire from
+    /// `-pl temper-dist -am -Dtest='NoSuchTest#nope'` (ticket 1795380035733014647-2776658), failsafe from
+    /// `-pl temper-dist -am -Dit.test=NoSuchIT -Dtest=none -Dsurefire.failIfNoSpecifiedTests=false` (ticket 1795380028515472824-2768577).
+    /// Both with surefire/failsafe 3.5.4; bb-build's REJECT regex must keep matching them.
+    private static final String NO_TESTS_GOAL = "[ERROR] Failed to execute goal org.apache.maven.plugins:maven-surefire-plugin:3.5.4:test (default-test) on project temper-test-support:"
+                                                + " No tests matching pattern \"NoSuchTest#nope\" were executed! (Set -Dsurefire.failIfNoSpecifiedTests=false to ignore this error.) -> [Help 1]";
+    private static final String NO_TESTS_FAILSAFE = "[ERROR] Failed to execute goal org.apache.maven.plugins:maven-failsafe-plugin:3.5.4:integration-test (default) on project temper-dist:"
+                                                    + " No tests matching pattern \"NoSuchIT\" were executed! (Set -Dfailsafe.failIfNoSpecifiedTests=false to ignore this error.) -> [Help 1]";
     private static final String CAUSE = "Caused by: org.junit.platform.commons.PreconditionViolationException: Could not find method with name [nope] in class [fx.ATest].";
     private static final String FIELDS = "echo verdict_source=java > .bb/fields.$BB_TICKET; ";
 
@@ -436,6 +442,11 @@ class BbZeroTestcaseIT {
         assertThat(build.rc()).as(build.log()).isEqualTo("19");
         assertThat(build.fileRc()).isEqualTo("19");
         assertThat(build.log()).contains("[ERROR] bb-build: refused rc 1 -> 19: the runner rejected the selection: " + NO_TESTS_GOAL.substring(8) + "\n");
+
+        var failsafe = run("echo '" + NO_TESTS_FAILSAFE + "'; exit 1", "-Dit.test=NoSuchIT");
+
+        assertThat(failsafe.rc()).as(failsafe.log()).isEqualTo("19");
+        assertThat(failsafe.log()).contains("[ERROR] bb-build: refused rc 1 -> 19: the runner rejected the selection: " + NO_TESTS_FAILSAFE.substring(8) + "\n");
 
         var launch = launch(FIELDS + "echo 'org.junit.platform.commons.JUnitException: TestEngine with ID x failed to discover tests'; echo '" + CAUSE
                             + "'; echo 'bb-test: run 1/1 java exit 255; requireDocker=true; bb-testcount: no testcase'; exit 255", "1", "fx.ATest#nope");
