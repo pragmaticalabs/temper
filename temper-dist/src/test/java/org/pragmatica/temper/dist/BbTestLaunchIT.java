@@ -246,6 +246,23 @@ class BbTestLaunchIT {
         assertThat(bbTest(Map.of(), "fx.NoSuchTest").rc()).as("a selection that matches nothing is red").isNotZero();
     }
 
+    /// ZERO TESTCASES (#86, CTO ruling 2026-11-22): the real launcher exits 0 for a selected class that holds no test (java runs without
+    /// --fail-if-no-tests); bb-build's one counter makes the ticket 19, alone or beside a class that ran. Probe: skip the counter for
+    /// BB_LAUNCH tickets -> both rc 0, red.
+    @Test
+    void aLaunchOfAClassWithNoTest_isRc19_byBbBuildsCounter_aloneOrBesideARunningClass() throws Exception {
+        green();
+        var both = bbTest(Map.of(), "fx.CalcTest#passes", "fx.Calc");
+
+        assertThat(both.rc()).as(both.doneText() + log()).isEqualTo(19);
+        assertThat(log()).contains("bb-build: selected testcases: fx.CalcTest#passes=1 fx.Calc=0\n",
+                                   "[ERROR] bb-build: refused rc 0 -> 19: selected class(es) ran 0 testcases: fx.Calc\n");
+        var alone = bbTest(Map.of(), "fx.Calc");
+
+        assertThat(alone.rc()).as(alone.doneText() + log()).isEqualTo(19);
+        assertThat(log()).contains("bb-build: selected testcases: fx.Calc=0\n");
+    }
+
     @Test
     void aLaunchThatReachesJava_writesVerdictSourceJava_soItsRcIsNeverReadAsAGuard() throws Exception {
         green();
@@ -900,6 +917,8 @@ class BbTestLaunchIT {
         var log = dir.resolve("ticket-log.tsv").toString();
         var java = BbFixtures.executable(dir.resolve("stub/big-java"),
                                          "#!/usr/bin/env bash\n"
+                                        + "while [ $# -gt 0 ]; do [ \"$1\" != --reports-dir ] || d=$2; shift; done\n"   // #86: the control's selection ran one testcase
+                                        + "printf \"<testsuite><testcase classname='fx.CalcTest' name='passes'/></testsuite>\" > \"$d/TEST-junit-jupiter.xml\"\n"
                                         + (form.equals("grown") ? "head -c 10000 /dev/zero | tr '\\0' x\n"
                                                                 : "o=$(readlink /proc/$$/fd/1); rm -f \"$o\"; ln -s /dev/zero \"$o\"\n")
                                         + "exit 0\n");

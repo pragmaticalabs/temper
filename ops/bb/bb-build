@@ -5,8 +5,9 @@
 # ~/work/priorities, FIFO among equals, under the reactor cap). Poll for .bb/rc exactly as before.
 # Writes in <checkout>/.bb/: queued (ticket id, while waiting), run.marker (at launch), ticket (the granted run's ticket id, written with start), build.log, start/end
 # epochs, rc (a 444 convenience copy of maven's exit code, written INSIDE the job; 5 = queue wait expired, 9 = cancelled/abandoned
-# before maven started). Call rc: 0 queued; 2 usage; 3 already running/queued here; 4 owner; 6 #1553 guard;
-# 7 identical build running/queued elsewhere; 8 identical build already finished (paths printed); 10 -Dtest without
+# before maven started; 19 = maven ended 0 but a selected test class ran 0 testcases, see ZERO-TESTCASE REFUSAL). Call rc: 0 queued; 2 usage; 3 already running/queued here; 4 owner; 6 #1553 guard;
+# 7 identical build running/queued elsewhere; 8 identical build already finished (paths printed); 19 BB_QUEUE=0 with a counted selector
+# (ZERO-TESTCASE REFUSAL); 10 -Dtest without
 # -Dit.test on forge-tests (failsafe ignores -Dtest). BB_DEDUP=0
 # skips dedup. DEDUP IDENTITY (#80, 2026-11-21): a finished identical build is still the checkout's result only while .bb/ticket names ITS ticket (not while
 # .bb/start equals its started=: two runs granted in one second shared a start, and dedup answered with the newer run's result). A checkout with no
@@ -70,6 +71,39 @@
 # (bb-jbct-bootstrap holds the rules and its exit codes: failure -> the ticket's rc is the bootstrap's and the main maven does not run;
 # 82-87 are refusals; 88 = the helper itself is missing or not executable on a jbct run, refused before any maven). build.log carries `bootstrap: jbct plugin <ver> installed into .m2-local|present|FAILED rc=<n>`; the ticket carries
 # jbct_bootstrap=<ver> after an install. The jbct-run test lives here (wants_jbct) and only here; any other run never execs or even looks for the helper and is unchanged. Not part of the dedup key.
+# ZERO-TESTCASE REFUSAL (#86; CTO ruling 2026-11-22: ONE invariant, ONE table): selected_testcases, the one counter of EVERY ticket, a
+# build's and a bb-test launch's (BB_LAUNCH) alike, run in the job tail on the job's rc. PLUGINS: surefire (selector: the last -Dtest=),
+# failsafe (the last -Dit.test=); a launch has one, its Class[#method] args. S(P) = P's POSITIVE selector set: the comma-separated
+# tokens minus `!` exclusions. `none` is special ONLY as a property's exact whole value (case-sensitive: `None`, `none,X` are tokens).
+# THE TABLE (a cell's name is its row prefix in BbZeroTestcaseIT and the CELLS name a mutant deletes):
+#   cell        when                                                     outcome
+#   NOSEL       neither -Dtest nor -Dit.test given (a build)             NOT GATED, rc kept (any rc), but logged (CTO ruling 2026-11-22):
+#                                                                        `bb-build: testcases (no selector, not gated): surefire(all)=n failsafe(all)=m`
+#   POS         S(P) non-empty                                           every token of S(P) has executed testcases > 0 in P's reports, else 19
+#   ALL         S(P) empty (no selector, only `!`), P not `none`, P RAN  P(all) executed > 0, logged `surefire(all)=n` / `failsafe(all)=n`, else 19
+#   NONE        P's selector is exactly `none`                           P is not counted
+#   IDLE        a selector given, but no cell above counted anything     19 (both `none`, or no selected plugin ran)
+#   REJECT      job rc != 0 because the runner rejected the selection    19, the runner's line passed through (below)
+#   UNCOUNTABLE job rc 0, the count cannot be made (no marker, 120 s)   19, never a pass
+#   QUEUEOFF    BB_QUEUE=0 and any -Dtest/-Dit.test (`none` included)    19 at the call, nothing run (bb-build-direct writes .bb/rc from its
+#                                                                        own detached job, so nothing could count it before a poller reads 0)
+# Any other non-zero job rc is kept (a genuine failure stays 1). One exit code means one test: 19 = the selection executed nothing.
+# P RAN (a build): build.log has P's test goal execution (`--- [maven-]surefire[-plugin]:<v>:test` / `failsafe...:integration-test`) not
+# followed, before the next `--- `, by `Tests are skipped.`; or P wrote a report newer than the marker. (A module set that binds no failsafe
+# does not run it, so `-Dtest=X -pl core` is not judged on ITs; limit: a `-q` log shows no execution, and -T interleaving can misplace a skip.)
+# REJECT tells a rejection from a failure by the runner's own words: a build, when EVERY `[ERROR] Failed to execute goal` line of build.log
+# is a surefire/failsafe goal failing with `No tests matching pattern` / `No tests were executed` (a test failure, compile error or any
+# other goal keeps its rc); a launch, when java exited 255 (`bb-test: run i/N java exit 255`) and no testcase of the ticket's reports
+# failed or errored. The passed-through line: the goal's message, or java's first `Caused by: ` line (else its first exception line).
+# REPORTS: a build reads TEST-<fqcn>.xml under any <module>/target/surefire-reports (surefire) or failsafe-reports (failsafe), nothing else
+# (fixture XML under src/ never counts); a launch, its own <module>/target/bb-test-reports/<ticket>/ (--repeat N>1: each run<i>/ is a run of
+# its own and every token must be > 0 in EVERY run). Only reports with an mtime newer than .bb/run.marker count. A <testcase> belongs to the
+# class its file names, else (the launcher's TEST-junit-jupiter.xml) to its classname. EXECUTED = testcases minus those with a <skipped>
+# child (logged `<token>=<n>(+<k> skipped)`). MATCHING: a token's class part (before '#') matches a class or any of its '$'-prefixes (a
+# nested Outer$Inner$Deeper counts for Outer and Outer$Inner); a bare name or glob against the simple name, in any module (`Bb*IT` is ONE
+# token), a dotted or slashed one against the package path, %regex[...] against the class path (limit: a %regex holding ',' is split).
+# build.log: `bb-build: selected testcases: [run<i>:]<token>=<n> ... [surefire(all)=n] [failsafe(all)=n]`, then on refusal
+# `[ERROR] bb-build: refused rc <job rc> -> 19: <cell's reason>`; 19 lands in .bb/rc and the ticket's rc= (no bb-cp-record).
 set -euo pipefail
 SELF=$(readlink -f "$0")
 # --help / -h as the only argument: print this header (the usage and the rules above) to stdout, exit 0, touch nothing
@@ -86,6 +120,139 @@ wants_jbct() {  # the ONE copy of the jbct-run test (the helper trusts it): a jb
   done
   return $w
 }
+selected_testcases() {  # selected_testcases <co> <marker> mvn|launch:<ticket>|select <job rc> <job args...>: ZERO-TESTCASE REFUSAL (header), THE TABLE. Prints the count line; exit 0 = keep the job rc, 19 = refused, other = the count failed
+  timeout -k 5 120 python3 - "$@" <<'PY'
+import fnmatch, os, re, sys, xml.etree.ElementTree as ET
+co, marker, kind, job_rc, args = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4]), sys.argv[5:]
+CELLS = ('NOSEL', 'POS', 'ALL', 'NONE', 'IDLE', 'REJECT', 'QUEUEOFF')   # THE TABLE (header); UNCOUNTABLE is the caller's; a mutant deletes one name
+JAVA_NAME = re.compile(r'[A-Za-z_$][\w$]*(\.[A-Za-z_$][\w$]*)*\Z')
+def refuse(why):
+    print('[ERROR] bb-build: refused rc %d -> 19: %s' % (job_rc, why))
+    sys.exit(19)
+def positive(v):                                 # S(P): the tokens minus `!` exclusions; `none` (exact whole value) is the NONE cell's
+    return [] if v is None or (v == 'none' and 'NONE' in CELLS) else [t.strip() for t in v.split(',') if t.strip() and not t.strip().startswith('!')]
+values = {}                                      # a build: the last -Dtest= / -Dit.test= (maven keeps the last -D of a property)
+if kind in ('mvn', 'select'):
+    for a in args:
+        for prop in ('test', 'it.test'):
+            if a.startswith('-D' + prop + '='):
+                values[prop] = a[len(prop) + 3:]
+if kind == 'select':                             # QUEUEOFF
+    sys.exit(19 if values and 'QUEUEOFF' in CELLS else 0)
+nosel = kind == 'mvn' and not values and 'NOSEL' in CELLS
+log_path = os.path.join(os.path.dirname(marker), 'build.log')
+log = open(log_path, errors='replace').read().split('\n') if os.path.isfile(log_path) else []
+def cases(p, since):                             # (class, skipped, failed) per <testcase> of one report newer than the marker
+    if not (os.path.isfile(p) and os.stat(p).st_mtime_ns > since):
+        return []
+    try:
+        root = ET.parse(p).getroot()
+    except Exception:
+        print('bb-build: selected testcases: unparseable report %s counts 0' % p)
+        return []
+    name = os.path.basename(p)[5:-4]             # TEST-<fqcn>.xml (surefire/failsafe); else (the launcher's TEST-junit-jupiter.xml) the classname
+    return [(name if JAVA_NAME.match(name) else (c.get('classname') or ''), any(x.tag == 'skipped' for x in c),
+             any(x.tag in ('failure', 'error') for x in c)) for c in root.iter('testcase')]
+def reports_in(d, since):
+    return [c for f in (sorted(os.listdir(d)) if os.path.isdir(d) else []) if f.startswith('TEST-') and f.endswith('.xml')
+            for c in cases(os.path.join(d, f), since)]
+if job_rc != 0 and not nosel:                    # REJECT, else the job's rc is kept
+    if 'REJECT' not in CELLS:
+        sys.exit(0)
+    if kind == 'mvn':
+        goals = [l for l in log if l.startswith('[ERROR] Failed to execute goal')]
+        if goals and all(re.search(r'(surefire|failsafe)[^ ]*:(test|integration-test|verify) ', l)
+                         and re.search(r'No tests matching pattern|No tests were executed', l) for l in goals):
+            refuse('the runner rejected the selection: ' + goals[0][len('[ERROR] '):])
+    else:
+        d = os.path.join(co, args[1], 'target', 'bb-test-reports', kind.split(':', 1)[1])
+        failed = any(f for r, ds, fs in os.walk(d) for _, _, f in reports_in(r, 0))
+        if job_rc == 255 and not failed and any(re.match(r'bb-test: run \d+/\d+ java exit 255;', l) for l in log):
+            why = next((l.strip() for l in log if l.startswith('Caused by: ')), None) \
+                  or next((l.strip() for l in log if re.match(r'[\w.$]+(Exception|Error)\b', l)), 'java exit 255')   # the root cause JUnit printed
+            refuse('the runner rejected the selection: ' + why)
+    sys.exit(0)
+if nosel and not os.path.isfile(marker):
+    print('bb-build: testcases (no selector, not gated): uncountable, no run marker')
+    sys.exit(0)
+since = os.stat(marker).st_mtime_ns              # no marker: the count fails (UNCOUNTABLE, the caller's)
+plugins = []                                     # (P, S(P), runs [(label, cases)], P ran?)
+if kind == 'mvn':                                # only */target/{surefire,failsafe}-reports: fixture XML under src/ never counts
+    found, wrote = {'surefire': [], 'failsafe': []}, {'surefire': False, 'failsafe': False}
+    base = co.rstrip('/').count('/')
+    for root, dirs, files in os.walk(co):
+        name = os.path.basename(root)
+        if name in ('surefire-reports', 'failsafe-reports') and os.path.basename(os.path.dirname(root)) == 'target':
+            dirs[:] = []
+            found[name[:-8]].extend(reports_in(root, since))
+            wrote[name[:-8]] |= any(f.startswith('TEST-') and f.endswith('.xml') and os.stat(os.path.join(root, f)).st_mtime_ns > since for f in files)
+            continue
+        dirs[:] = [d for d in dirs if d in ('surefire-reports', 'failsafe-reports')] if name == 'target' else \
+                  [d for d in dirs if d not in ('.git', '.m2-local', '.bb', 'node_modules', 'src')]
+        if root.rstrip('/').count('/') - base >= 8:
+            dirs[:] = []
+    def ran(p):                                  # P RAN (header): its test goal executed without `Tests are skipped.`, or it wrote a report
+        goal = re.compile(r'--- (maven-)?%s(-plugin)?:[^: ]+:%s ' % (p, 'test' if p == 'surefire' else 'integration-test'))
+        for i, l in enumerate(log):
+            if goal.search(l):
+                block = []
+                for m in log[i + 1:]:
+                    if re.search(r'\] --- ', m):
+                        break
+                    block.append(m)
+                if not any('Tests are skipped.' in m for m in block):
+                    return True
+        return wrote[p]
+    if nosel:                                    # NOSEL (CTO ruling 2026-11-22): never gating, both whole counts logged, a zero included
+        print('bb-build: testcases (no selector, not gated): ' + ' '.join('%s(all)=%d' % (p, sum(1 for _, sk, _ in found[p] if not sk))
+              + ('(+%d skipped)' % k if k else '') for p, k in ((p, sum(1 for _, sk, _ in found[p] if sk)) for p in ('surefire', 'failsafe'))))
+        sys.exit(0)
+    for p, prop in (('surefire', 'test'), ('failsafe', 'it.test')):
+        if values.get(prop) == 'none' and 'NONE' in CELLS:
+            continue
+        plugins.append((p, positive(values.get(prop)), [('', found[p])], ran))
+else:                                            # launch:<ticket>, args `__launch <module> <repeat> <Class[#method]>...`: one plugin
+    rep, d = int(args[2]), os.path.join(co, args[1], 'target', 'bb-test-reports', kind.split(':', 1)[1])
+    runs = [('', reports_in(d, since))] if rep == 1 else [('run%d:' % i, reports_in(os.path.join(d, 'run%d' % i), since)) for i in range(1, rep + 1)]
+    plugins.append(('launch', [t for t in args[3:] if not t.startswith('-')], runs, lambda p: True))
+def matches(token, fqcn):
+    cls = token.split('#', 1)[0]
+    path = fqcn.replace('.', '/')
+    m = re.fullmatch(r'%(regex|ant)\[(.*)\]', token)
+    if m:
+        inner = m.group(2).split('#', 1)[0]
+        if m.group(1) == 'regex':
+            try:
+                return any(re.fullmatch(inner, s) for s in (path, path + '.class', path + '.java'))
+            except re.error:
+                return False
+        cls = inner
+    cls = re.sub(r'\.(java|class)$', '', cls)
+    if '/' in cls or '.' in cls:
+        pat = cls.replace('.', '/')
+        return fnmatch.fnmatchcase(path, pat) or fnmatch.fnmatchcase(path, '*/' + pat)
+    return fnmatch.fnmatchcase(fqcn.rsplit('.', 1)[-1], cls)
+def hit(token, fqcn):                            # a nested Outer$Inner$Deeper counts for every '$'-prefix: Outer, Outer$Inner
+    parts = fqcn.split('$')
+    return bool(fqcn) and any(matches(token, '$'.join(parts[:i])) for i in range(len(parts), 0, -1))
+def count(label, sel, found):                    # EXECUTED testcases: a <testcase> with a <skipped> child does not count
+    return (label, sum(1 for fq, sk, _ in found if not sk and sel(fq)), sum(1 for fq, sk, _ in found if sk and sel(fq)))
+counts = []
+for p, s, runs, ran in plugins:
+    if s and 'POS' in CELLS:
+        counts += [count(label + t, lambda fq, t=t: hit(t, fq), found) for label, found in runs for t in s]
+    elif not s and 'ALL' in CELLS and ran(p):
+        counts += [count(label + p + '(all)', lambda fq: True, found) for label, found in runs]
+if counts:
+    print('bb-build: selected testcases: ' + ' '.join('%s=%d' % (t, n) + ('(+%d skipped)' % k if k else '') for t, n, k in counts))
+empty = [t for t, n, k in counts if n == 0]
+if empty:
+    refuse('selected class(es) ran 0 testcases: ' + ','.join(empty))
+if not counts and 'IDLE' in CELLS:
+    refuse('-Dtest=none and -Dit.test=none select no class' if values.get('test') == values.get('it.test') == 'none'
+           else 'the selection counted nothing: no plugin it selects ran')
+PY
+}
 DETACHED_READER=""
 if [ "${1:-}" = --detached ]; then
   [ "${BB_QUEUE:-1}" != 0 ] || { echo "refusing: --detached needs the queue" >&2; exit 2; }
@@ -97,6 +264,9 @@ if [ "${1:-}" != __run ] && [ "${BB_QUEUE:-1}" = 0 ]; then
   # the legacy run rewrites .bb/start but never .bb/ticket: drop the ticket first, so an older queued run stops being "current" (#80; none = unknown, the safe direction)
   B=${1:-}; [ "$B" != --since ] || B=${3:-}; B=${B%/}/.bb
   [ ! -d "$B" ] || rm -f "$B/ticket"
+  A=("$@"); if [ "${A[0]:-}" = --since ]; then A=("${A[@]:3}"); else A=("${A[@]:1}"); fi   # the maven args after [--since <sha>] <checkout>
+  selected_testcases / / select 0 ${A[@]+"${A[@]}"} \
+    || { echo "refusing (rc 19): BB_QUEUE=0 cannot count a -Dtest/-Dit.test selection (bb-build-direct writes .bb/rc from its own detached job; ZERO-TESTCASE REFUSAL, #86); run it through the queue" >&2; exit 19; }
   exec "$(dirname "$SELF")/bb-build-direct" "$@"
 fi
 . "$(dirname "$SELF")/bb-queue-lib.sh"
@@ -143,7 +313,15 @@ if [ "${1:-}" = __run ]; then
     else
       env -u HCLOUD_TOKEN BB_TICKET="$ID" JAVA_HOME=/usr/lib/jvm/java-25-openjdk-amd64 "$MVN" "$@" ${RDF[@]+"${RDF[@]}"} >> "$B/build.log" 2>&1
     fi
-    rc=$?; date +%s > "$B/end"
+    rc=$?
+    c=0   # ZERO-TESTCASE REFUSAL (header, #86): THE TABLE on every job rc, a build's or a bb-test launch's; 19 replaces rc, 0 keeps it
+    selected_testcases "$CO" "$B/run.marker" "$([ -z "${BB_LAUNCH:-}" ] && echo mvn || echo "launch:$ID")" "$rc" "$@" >> "$B/build.log" 2>&1 || c=$?
+    case $c in
+      0) ;;
+      19) rc=19 ;;
+      *) [ "$rc" != 0 ] || { echo "[ERROR] bb-build: refused rc 0 -> 19: the selected-testcase count failed (rc $c)" >> "$B/build.log"; rc=19; } ;;   # UNCOUNTABLE
+    esac
+    date +%s > "$B/end"
     if [ "$rc" = 0 ]; then   # bb-test lane: classpath + manifest of a GREEN build; bounded, and never changes rc
       timeout -k 10 "${BB_CP_RECORD_TIMEOUT:-300}" "$(dirname "$SELF")/bb-cp-record" record "$CO" "$@" >> "$B/build.log" 2>&1
       case $? in

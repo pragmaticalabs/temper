@@ -241,14 +241,25 @@ class BbJbctBootstrapIT {
         assertThat(r.mains()).hasSize(1);
     }
 
+    /// The CTO ruling (2026-11-22, #86): a run with no -Dtest/-Dit.test selector is not gated, but bb-build appends both whole counts to
+    /// build.log, a zero included; the stub mvn writes no reports, so both are 0.
+    private static final String NOSEL = "bb-build: testcases (no selector, not gated): surefire(all)=0 failsafe(all)=0\n";
+
+    /// Property (since #86): build.log holds only maven's output plus bb-build's own `bb-build: `-prefixed lines, and the no-selector
+    /// count line among them is exactly the ruled one. (Before #86: build.log held only maven's output.) A stray line of any other
+    /// shape, or a changed count line, is red.
     @Test
-    void aNonJbctGoal_noBootstrap_andTheLogHoldsOnlyMaven() throws Exception {
+    void aNonJbctGoal_noBootstrap_andTheLogHoldsOnlyMavenPlusBbBuildLines() throws Exception {
         var r = run(checkout(false), "-B", "clean", "install");
+        var maven = "stub mvn -B clean install -Daether.requireDocker=true";
 
         assertThat(r.rc()).isZero();
         assertThat(r.installs()).isEmpty();
         assertThat(r.log()).doesNotContain("bootstrap:");
-        assertThat(r.log()).isEqualTo("stub mvn -B clean install -Daether.requireDocker=true\n");
+        assertThat(r.log().lines().toList()).startsWith(maven)
+                                            .contains(NOSEL.strip())
+                                            .allSatisfy(l -> assertThat(l.equals(maven) || l.startsWith("bb-build: ")).as("a non-maven line: " + l)
+                                                                                                                       .isTrue());
         assertThat(r.ticket()).noneMatch(l -> l.startsWith("jbct_bootstrap="));
     }
 
@@ -503,7 +514,8 @@ class BbJbctBootstrapIT {
     }
 
     /// Pre-#64 behaviour for a ticket that is not a jbct run, on a host where the helper was never installed (the state of every host
-    /// until its operator runs install-bb-fields.sh): the same mvn argv, a build.log holding only maven's output, no bootstrap ticket line.
+    /// until its operator runs install-bb-fields.sh): the same mvn argv, a build.log holding only maven's output
+    /// and, since #86, bb-build's no-selector count line, no bootstrap ticket line.
     /// Mutation: call the helper unconditionally in bb-build -> "No such file or directory" in the log, rc != 0, red.
     @Test
     void plainVerify_withNoHelperInstalled_isUnaffected_sameArgvSameLogNoBootstrapLine() throws Exception {
@@ -512,7 +524,7 @@ class BbJbctBootstrapIT {
 
         assertThat(r.rc()).as(r.log()).isZero();
         assertThat(r.mvn()).containsExactly("-B verify -Daether.requireDocker=true");
-        assertThat(r.log()).isEqualTo("stub mvn -B verify -Daether.requireDocker=true\n");
+        assertThat(r.log()).isEqualTo("stub mvn -B verify -Daether.requireDocker=true\n" + NOSEL);
         assertThat(r.ticket()).noneMatch(l -> l.contains("bootstrap"));
     }
 
