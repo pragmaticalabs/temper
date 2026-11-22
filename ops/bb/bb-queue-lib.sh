@@ -256,13 +256,15 @@ never_started() {
 # reap (under lock): tickets whose waiter is gone, or (waiting) whose checkout directory is gone. Waiting -> abandoned (rc 9 written for the poller).
 # Running -> orphaned (no rc, whatever .bb/rc holds). A running ticket whose waiter died but whose maven still runs in
 # its checkout stays running (it still holds its reactor slot and, if group=1, the port group) until maven exits.
+# Prints ONE line on stdout: the live launch count, which the caller passes to pick in the same lock hold (`r=$(reap); pick "$r" ..`).
 reap() {
-  local f id co p
+  local f id co p r
   ledger_write
   # #88: the launch count pick uses in this lock hold, read BEFORE any running ticket is kept for a live launch. Read later, a launch
   # that exits between this reap keeping its ticket and pick's count would grant the next ticket and leave the kept one in running/ with
   # no waiter left to reap it. A process dead at this read stays dead, so pick never counts as gone a launch reap counted as live.
-  REAP_LAUNCHES=$(ledger_count)
+  # #90: printed, not a global: a global outlives its lock hold, so a pick without a reap there would read a stale count.
+  r=$(ledger_count)
   for f in "$Q"/waiting/*; do
     [ -f "$f" ] || continue; id=${f##*/}; co=$(field "$f" co)
     # checkout removed under a live waiter (bb-temper rm, a deleted tree): nothing can ever be built; stop the waiter by PID.
@@ -284,17 +286,20 @@ reap() {
     printf 'state=orphaned\nended=%s\n' "$(date +%s)" >> "$f"
     to_done "$f"
   done
+  echo "$r"
 }
 
-# pick [<caller id>] (under lock, after reap; caller defaults to the global $ID of bb-build/bb-hold): the ONE waiting ticket to
-# grant now, or nothing. BACKFILL (2026-09-29): walk the
+# pick <reap count> [<caller id>] (under lock, after reap; <reap count> is what reap printed in THIS lock hold; caller defaults to the
+# global $ID of bb-build/bb-hold): the ONE waiting ticket to grant now, or nothing. A missing or non-numeric count grants nothing (#90:
+# fail closed; a count from no reap, or from another lock hold, is the #88 leak). BACKFILL (2026-09-29): walk the
 # grantable order (priority desc, FIFO; port-group tickets already filtered while the group is held) and grant the
 # first ticket whose OWN cap (bounded by the HOST CAP, issue #56) is satisfied, so a head that cannot start (e.g. BB_MAX_REACTORS=1 waiting for an empty
 # host) no longer blocks everything behind it. STARVATION BOUND: each ticket skipped for its cap gets blocked_since=
 # (first time only); once any skipped ticket has been blocked for STARVE seconds, nothing behind it is granted, so the
 # host drains and it runs.
 pick() {
-  local me=${1-${ID-}} r id f c hc bs now lh mh cand="" oldest="" ocr=0 cr; r=${REAP_LAUNCHES:-$(ledger_count)}; now=$(date +%s)   # r: live queue launches (LEDGER), as reap counted them in this lock hold (#88)
+  local r=${1-} me=${2-${ID-}} id f c hc bs now lh mh cand="" oldest="" ocr=0 cr; now=$(date +%s)   # r: live queue launches (LEDGER), as reap counted them in this lock hold (#88)
+  case "$r" in ''|*[!0-9]*) echo "pick: refused: no reap count from this lock hold (got '$r'), nothing granted (#90)" >&2; return 0;; esac
   hc=$(host_cap)
   for id in $(grantable); do
     f=$Q/waiting/$id; c=$(field "$f" cap); case "$c" in ''|*[!0-9]*) c=3;; esac; [ "$c" -le "$hc" ] || c=$hc

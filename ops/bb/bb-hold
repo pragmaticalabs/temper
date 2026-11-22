@@ -107,8 +107,8 @@ WAITED=0
 while :; do
   flock 8
   [ -f "$T" ] || { flock -u 8; echo "bb-hold: ticket $ID left the queue while waiting ($(field "$Q/done/$ID" state))" >&2; finish 9; }
-  reap
-  [ "$(pick)" = "$ID" ] && break
+  RL=$(reap)   # reap's launch count, passed to pick within this lock hold (#90)
+  [ "$(pick "$RL")" = "$ID" ] && break
   flock -u 8
   sleep 5 8>&- 7>&- & CHILD=$!; wait "$CHILD"; CHILD=""; WAITED=$((WAITED + 5))
 done

@@ -250,7 +250,7 @@ class BbHostCapIT {
     }
 
     private String pick(String caller) throws Exception {
-        var run = lib("pick " + caller);
+        var run = lib("pick \"$(ledger_count)\" " + caller);
 
         assertThat(run.rc()).as(run.stderr()).isZero();
 
