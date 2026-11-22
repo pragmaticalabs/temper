@@ -143,6 +143,11 @@ class BbRcTicketRecordIT {
     }
 
     private Process waiter(String id, String mvnBody, Map<String, String> more, Path go) throws Exception {
+        return waiter(id, mvnBody, more, go, List.of());
+    }
+
+    /// `jobArgs`: the job's args after `__run <id>`, as bb-build's enqueue passes them to the waiter (the ticket's args= line is a record only).
+    private Process waiter(String id, String mvnBody, Map<String, String> more, Path go, List<String> jobArgs) throws Exception {
         BbFixtures.executable(dir.resolve("stubmvn"), "#!/bin/sh\n" + mvnBody + "\n");
         var env = env(more);
 
@@ -158,11 +163,13 @@ class BbRcTicketRecordIT {
                       .orElseThrow()
                       .toString());
         env.put("PATH", shim + ":" + env.get("PATH"));
-        var builder = BbFixtures.processClean(List.of("bash",
-                                                      tools.resolve("bb-build").toString(),
-                                                      "__run",
-                                                      id),
-                                              env);
+        var command = new ArrayList<>(List.of("bash",
+                                              tools.resolve("bb-build").toString(),
+                                              "__run",
+                                              id));
+
+        command.addAll(jobArgs);
+        var builder = BbFixtures.processClean(command, env);
 
         builder.redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.DISCARD);
         var process = builder.start();
@@ -698,7 +705,7 @@ class BbRcTicketRecordIT {
         if (launch) {
             more.put("BB_LAUNCH", dir.resolve("stubmvn").toString());
         }
-        var waiter = waiter(id, body, more, dir.resolve("go-" + id));
+        var waiter = waiter(id, body, more, dir.resolve("go-" + id), List.of(args.split(" ")));
 
         assertThat(waiter.waitFor(30, TimeUnit.SECONDS)).as("waiter exits").isTrue();
         assertThat(co.resolve(".bb/fields." + id)).as("the fields file is removed after the read").doesNotExist();
