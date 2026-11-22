@@ -237,6 +237,7 @@ class BbInstallIT {
         assertThat(pin("BB_WAIT_PRE80")).isEqualTo(BbFixtures.md5(prev("bb-wait.pre80")));
         assertThat(pin("BB_BUILD_PRE76")).isEqualTo(BbFixtures.md5(prev("bb-build.pre76")));
         assertThat(pin("BB_TEST_PRE76")).isEqualTo(BbFixtures.md5(prev("bb-test.pre76")));
+        assertThat(pin("BB_BUILD_PRE86")).isEqualTo(BbFixtures.md5(prev("bb-build.pre86")));
     }
 
     /// The bb-test lane helpers go in before bb-build (which calls bb-cp-record); a host holding a stranger's bb-test is refused, naming the one pin and
@@ -1011,6 +1012,24 @@ class BbInstallIT {
         }
     }
 
+    /// A host at main's install set after #85 (bb-build ad84d8ec: an rc-0 run whose selected class ran 0 testcases stays rc 0; every other
+    /// file at its pin) is accepted and upgraded to this change's zero-testcase refusal (#86). Mutation: drop BB_BUILD_PRE86 from accepted_of
+    /// -> the host is refused, exit 65, red.
+    @Test
+    void aHostAtTheMain85InstallSet_isAcceptedAndUpgraded() throws Exception {
+        var tools = host("h1");
+
+        assertThat(install("builder@h1").rc()).isZero();
+        Files.write(tools.resolve("bb-build"), prev("bb-build.pre86"));
+        assertThat(BbFixtures.md5(Files.readAllBytes(tools.resolve("bb-build")))).isEqualTo("ad84d8ec0f36096b0de9b4f29142f730");
+        var run = install("builder@h1");
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        assertThat(run.stdout()).doesNotContain("refused")
+                                .contains("installed builder@h1 bb-build before=" + pin("BB_BUILD_PRE86") + " after=" + pin("BB_BUILD_NEW"));
+        assertThat(BbFixtures.md5(Files.readAllBytes(tools.resolve("bb-build")))).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-build")));
+    }
+
     /// A host after the owner's install-bb-79.sh (#63 + #79: bb-build 2810f93c, bb-portgroup.py and bb-modules.py at main's
     /// values) and still on the pre-#70 bb-result, bb-queue-lib.sh, bb-queue is accepted for every file and is updated.
     /// Mutation: drop BB_BUILD_PRESESSION from accepted_of -> the post-install host is refused, red.
@@ -1091,6 +1110,7 @@ class BbInstallIT {
                                                                  + "|" + pin("BB_BUILD_PRESESSION")
                                                                  + "|" + pin("BB_BUILD_PRE80")
                                                                  + "|" + pin("BB_BUILD_PRE76")
+                                                                 + "|" + pin("BB_BUILD_PRE86")
                                                                  + "|" + pin("BB_BUILD_NEW"));
         assertThat(listing(good)).isEqualTo(goodBefore);
         assertThat(listing(diverged)).isEqualTo(divergedBefore);
