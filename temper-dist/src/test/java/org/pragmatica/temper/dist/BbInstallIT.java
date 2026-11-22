@@ -1132,6 +1132,7 @@ class BbInstallIT {
                            + "|" + pin("BB_LIB_PREOFFQ")
                            + "|" + pin("BB_LIB_PRELEDGER")
                            + "|" + pin("BB_LIB_PRE80")
+                           + "|" + pin("BB_LIB_PRE88")
                            + "|" + pin("BB_LIB_NEW"))
                   .contains("bb-queue installed=" + BbFixtures.md5("unrelated tool\n".getBytes())
                            + " expected=" + BbFixtures.BB_QUEUE_OLD
