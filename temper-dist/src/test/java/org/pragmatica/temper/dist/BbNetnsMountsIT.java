@@ -56,6 +56,8 @@ class BbNetnsMountsIT {
 
     // Why this host cannot run the class, or null. Checked per test (not by an assume in @BeforeAll): a class-level abort writes a
     // report with no testcase, which CI's docker canary rejects as a silent zero; a per-test skip keeps every row in the report.
+    // On a bb build host (BbFixtures.buildHost, #84) an unmet condition FAILS every test instead: there the class can never be
+    // all-skipped, so a green build-host run has executed all its rows.
     private static String unmet;
 
     @BeforeAll
@@ -99,6 +101,9 @@ class BbNetnsMountsIT {
 
     @BeforeEach
     void hostCanRunTheContainer() {
+        if (BbFixtures.buildHost()) {
+            assertThat(unmet).as("a bb build host must run bb-netns-run against real docker (#84: no skip on a build host)").isNull();
+        }
         assumeTrue(unmet == null, unmet);
     }
 
