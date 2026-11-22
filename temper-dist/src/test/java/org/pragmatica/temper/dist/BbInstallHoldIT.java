@@ -212,7 +212,7 @@ class BbInstallHoldIT {
                                                          "every hold lasted");
         assertThat(Files.readString(dir.resolve("install.args")).strip()).isEqualTo("a b c");
         assertThat(samples()).containsExactly("h1=held h2=held h3=held");
-        assertThat(outcome.stderr()).doesNotContain("WARNING");
+        assertThat(outcome.stderr()).doesNotContain("WARNING", "install-rc=");
         assertNoTokensAnywhere();
         assertEveryLockFreeWithin(5);
     }
@@ -598,6 +598,7 @@ class BbInstallHoldIT {
         assertThat(installRan()).as("reached: the install ran").isTrue();
         assertThat(outcome.rc()).as(outcome.stderr()).isEqualTo(11);
         assertThat(outcome.stderr()).contains("install command exited 9; every hold released");
+        assertThat(outcome.stderr().lines()).contains("install-rc=9");
         assertNoTokensAnywhere();
     }
 
@@ -617,6 +618,7 @@ class BbInstallHoldIT {
                                      null);
 
         assertThat(outcome.rc()).as(outcome.stderr()).isEqualTo(11);
+        assertThat(outcome.stderr().lines()).contains("install-rc=3");
         assertThat(outcome.stderr()).contains("install command exited 3; every hold released",
                                               "WARNING: aether@h2's hold ended before the install finished")
                   .doesNotContain("aether@h1's hold")

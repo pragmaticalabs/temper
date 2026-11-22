@@ -31,8 +31,8 @@
 #   A drain timeout, a holder that did not take the lock in TAKE_SECS, or a hold gone before the install: every hold is released and
 #   the install command is not run (exit 9).
 # Exit: 0 installed and every hold lasted; 2 usage (before any ssh); 9 refused, the install command not run; 10 installed, but a hold
-#   ended during the install (named on stderr); 11 the install command ran and exited nonzero (its status is on stderr, `install
-#   command exited <rc>`; the lapse check still runs and names lapses); 129/130/143 HUP/INT/TERM, after every hold is released (bash
+#   ended during the install (named on stderr); 11 the install command ran and exited nonzero (its status is on stderr as the line `install-rc=<n>`, exactly,
+#   after a prose line `install command exited <n>...`; the lapse check still runs and names lapses); 129/130/143 HUP/INT/TERM, after every hold is released (bash
 #   runs the trap once the foreground install command ends, so the install is not cut short; the lapse check is skipped on that path).
 #   The script's own codes 0/2/9/10/11 never mean what the install command's status would (its status is never passed through).
 # Environment (seconds): DRAIN_SECS 1800, POLL_SECS 15, TAKE_SECS 120, HB_EVERY 20, HB_STALE 120, SSH_WALL 30, CONNECT_SECS 10,
@@ -140,6 +140,6 @@ rc=0; "$@" || rc=$?
 lapsed=
 for h in $(spawned); do held "$h" || { lapsed="$lapsed $h"; echo "WARNING: $h's hold ended before the install finished" >&2; }; done
 release_all; trap - EXIT
-[ "$rc" = 0 ] || { echo "install command exited $rc; every hold released" >&2; exit 11; }
+[ "$rc" = 0 ] || { echo "install command exited $rc; every hold released" >&2; echo "install-rc=$rc" >&2; exit 11; }
 [ -z "$lapsed" ] || { echo "installed, but the hold on${lapsed} ended during the install; every hold released" >&2; exit 10; }
 echo "installed; every hold lasted; every hold released"
