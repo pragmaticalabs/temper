@@ -99,12 +99,20 @@ final class BbFixtures {
         return System.getProperty("os.name").startsWith("Linux");
     }
 
-    /// True on a bb build host: the REAL user home (the passwd entry, not a HOME a fixture sets) holds an executable
-    /// `tools/bb-build`, installed by ops/bb/install-bb-fields.sh and mounted ro inside the bb-netns-run container; absent on
-    /// GitHub CI runners and the Mac. Issue #84, CTO ruling 2026-11-22: "a skip is evidence only where a skip is legitimate" -
-    /// on a build host a class's unmet precondition is a failure, off-host it may skip. The one place the marker is defined.
+    /// True on a bb build host: the REAL user home (`user.home`, the passwd entry; never getenv("HOME"), which a fixture sets)
+    /// holds an executable `tools/bb-build`, installed by ops/bb/install-bb-fields.sh and mounted ro inside the bb-netns-run
+    /// container; absent on GitHub CI runners and the Mac. Issue #84, CTO ruling 2026-11-22: "a skip is evidence only where a
+    /// skip is legitimate" - on a build host a class's unmet precondition is a failure, off-host it may skip. The marker is the
+    /// mechanism that launched the run (CTO, 2026-11-22), so it cannot drift. The one place the marker is defined.
     static boolean buildHost() {
-        return Files.isExecutable(Path.of(System.getProperty("user.home"), "tools", "bb-build"));
+        return buildHost(Path.of(System.getProperty("user.home")));
+    }
+
+    /// The marker test against `home`: `home/tools/bb-build` is an executable regular file.
+    static boolean buildHost(Path home) {
+        var marker = home.resolve("tools/bb-build");
+
+        return Files.isRegularFile(marker) && Files.isExecutable(marker);
     }
 
     static String md5(byte[] bytes) {
