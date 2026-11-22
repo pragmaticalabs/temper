@@ -76,7 +76,7 @@ ticket_check() {
   local where=none d f st rc cr s e wall wt rn log
   rem_us; [ "$REM" -gt 1000 ] || REM=1000
   flock -w "$(secs "$REM")" 8 || deadline_hit
-  reap; for d in done waiting running; do [ -f "$Q/$d/$ARG" ] && { where=$d; break; }; done; flock -u 8
+  reap >/dev/null; for d in done waiting running; do [ -f "$Q/$d/$ARG" ] && { where=$d; break; }; done; flock -u 8
   [ "$where" != none ] || { echo "bb-await: unknown ticket $ARG (not in $Q/{waiting,running,done})" >&2; exit 4; }
   [ "$where" = done ] || return 0
   f=$Q/done/$ARG

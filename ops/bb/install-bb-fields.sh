@@ -14,7 +14,7 @@
 #   with no ssh made.
 # Phase 1, read-only, EVERY target first: installed bb-build is one of BB_BUILD_OLD|MID|PREV|LIVE|PRE31|PRERC|PREVIA|PREMEM|PRECAP|PREJBCT|PREHELP|PRESINCE|PREFIELDS|PRESESSION|PRE80|PRE76|PRE90|NEW, bb-queue-lib.sh one of BB_LIB_OLD|PREV|PRERC|PREMEM|PRECAP|PREOFFQ|PRELEDGER|PRE80|PRE88|PRE90|NEW,
 #   bb-queue one of BB_QUEUE_OLD|PREV|LIVE|PRE31|PRERC|PREVIA|PREMEM|PRECAP|PREOFFQ|PRELEDGER|PRE80|PRE90|NEW, bb-tickets is absent, BB_TICKETS_OLD|PRE31|PREOFFQ|NEW, bb-hold is absent, BB_HOLD_OLD (the 2026-11-09
-#   host snapshot), BB_HOLD_PRELEDGER, BB_HOLD_PRE90 or BB_HOLD_NEW, bb-wait is absent, BB_WAIT_PRERC, BB_WAIT_PREREFUSED, BB_WAIT_PRE80 or its NEW, bb-await is absent or BB_AWAIT_NEW, bb-netns-run is absent, BB_NETNS_PREV, BB_NETNS_PREMOUNTS or BB_NETNS_NEW, bb-portgroup.py is absent, BB_PORTGROUP_PREV, BB_PORTGROUP_PRESINCE or BB_PORTGROUP_NEW, bb-modules.py is absent or BB_MODULES_NEW, bb-mutate is absent, BB_MUTATE_OLD, BB_MUTATE_PREVIA or BB_MUTATE_NEW, bb-jbct-bootstrap is absent or BB_JBCTBOOT_NEW, bb-result is absent, BB_RESULT_PRECP, BB_RESULT_PRE80 or BB_RESULT_NEW, bb-test is absent, BB_TEST_PRE76 or BB_TEST_NEW, and bb-cp-record and bb-testcount (the bb-test lane) are absent or their NEW pin. Any mismatch prints `refused <target> <file> installed=<md5|absent>
+#   host snapshot), BB_HOLD_PRELEDGER, BB_HOLD_PRE90 or BB_HOLD_NEW, bb-wait is absent, BB_WAIT_PRERC, BB_WAIT_PREREFUSED, BB_WAIT_PRE80, BB_WAIT_PRE90 or its NEW, bb-await is absent, BB_AWAIT_PREREFUSED, BB_AWAIT_PRE90 or BB_AWAIT_NEW, bb-netns-run is absent, BB_NETNS_PREV, BB_NETNS_PREMOUNTS or BB_NETNS_NEW, bb-portgroup.py is absent, BB_PORTGROUP_PREV, BB_PORTGROUP_PRESINCE or BB_PORTGROUP_NEW, bb-modules.py is absent or BB_MODULES_NEW, bb-mutate is absent, BB_MUTATE_OLD, BB_MUTATE_PREVIA or BB_MUTATE_NEW, bb-jbct-bootstrap is absent or BB_JBCTBOOT_NEW, bb-result is absent, BB_RESULT_PRECP, BB_RESULT_PRE80 or BB_RESULT_NEW, bb-test is absent, BB_TEST_PRE76 or BB_TEST_NEW, and bb-cp-record and bb-testcount (the bb-test lane) are absent or their NEW pin. Any mismatch prints `refused <target> <file> installed=<md5|absent>
 #   expected=<pin>[|<pin>...]` (every accepted pin except `absent`, in the order above) for every mismatch on every target and exits 65 having written nothing anywhere; an unreachable target is 69.
 # Phase 2, per target and per file to change (bb-cp-record, bb-test, bb-testcount, bb-mutate, bb-tickets, bb-hold, bb-wait, bb-await, bb-netns-run, bb-portgroup.py, bb-modules.py, bb-jbct-bootstrap, bb-result, bb-queue-lib.sh, bb-queue,
 #   then bb-build: the helpers and the lib before the tools that call or source them; bb-build calls bb-cp-record), one remote `bash -s` script: receive the file as
@@ -73,7 +73,7 @@ readonly BB_BUILD_PRESESSION=2810f93c875ad9a106c2cda284babb81   # the #79 versio
 readonly BB_BUILD_PRE80=dafd74a3ea2fec81b1a3d39067422f6a   # the #70 version: dedup identifies a run by its start second (issue #80)
 readonly BB_BUILD_PRE76=2f349b869a02dcfec552ab0b8b1f972c   # the #80/#81 version: bb-test's launch writes its ticket fields into the queue (issue #76)
 readonly BB_BUILD_PRE90=ad84d8ec0f36096b0de9b4f29142f730   # the #88 version: the waiter calls pick without the reap count (issue #90)
-readonly BB_BUILD_NEW=ad2f9aa51194ee73dfb351b4a465bd87
+readonly BB_BUILD_NEW=12f2c9b52c09724be2a07e8058bc6a43
 # bb-jbct-bootstrap: absent on every host before its first install; bb-build calls it, so it is installed first.
 readonly BB_JBCTBOOT_NEW=3e5396ecee48b99949456cf805df1e60
 # bb-result: absent on every host before its first install. No trailing comment on a pin line: bb-drift reads it by pattern.
@@ -88,15 +88,18 @@ readonly BB_TICKETS_NEW=8d34d9dc9ab2a4f867af863ec21be77e
 readonly BB_HOLD_OLD=0bc2401b6e94fd05b66e1df04387e2ac   # the 2026-11-09 host snapshot
 readonly BB_HOLD_PRELEDGER=3561bb8e22fc2f7f3e98dc795f31eecb   # the #56 version: its slot was counted by pattern, not recorded in the launch ledger
 readonly BB_HOLD_PRE90=c8c6947d1de945e38c5cf08f8448dae9   # the #88 version: bb-hold calls pick without the reap count (issue #90)
-readonly BB_HOLD_NEW=86b2b9108b7a375acad8f201990a1d2d
+readonly BB_HOLD_NEW=57e7a424652a5b547b4671d267c34a6f
 readonly BB_WAIT_PRERC=da248f0b4f9248f2bfed64330b3ca66e   # live on all four hosts from 2026-11-12: the ticket rc= is read from .bb/rc (replaced by the exit-status record)
 readonly BB_WAIT_PREREFUSED=d5b0ff8d43994a78cd188b4a41fcd995
 # the #70 bb-wait: the RC-MISMATCH check compares .bb/start with the ticket's started= (issue #80)
 readonly BB_WAIT_PRE80=d742e51de2f05b57a422143d0ef0ab01
-readonly BB_WAIT_NEW=c402db0acb3822afe2b637a130d40298
+readonly BB_WAIT_PRE90=c402db0acb3822afe2b637a130d40298   # the #88 version: its bare reap leaked reap's launch count to stdout (issue #90)
+readonly BB_WAIT_NEW=8f7903a0bd8ef3a2de4f10fdb38d0950
 # bb-await (issue #48): absent on every host before its first install. No trailing comment on a pin line: bb-drift reads it by pattern.
 readonly BB_AWAIT_PREREFUSED=56523085fccf5678eb7c208e7352c11b
-readonly BB_AWAIT_NEW=c170d09c8d379f16849fc59ea094a72d
+# the #88 bb-await: its bare reap leaked reap's launch count to stdout before the ticket= line (issue #90)
+readonly BB_AWAIT_PRE90=c170d09c8d379f16849fc59ea094a72d
+readonly BB_AWAIT_NEW=be58983d6f54fe48b144d06ae6108c5b
 readonly BB_NETNS_PREV=9661165d4ef938ea43eec5b8d2d619d9   # 2026-11-11: no docker socket in the container; live on c3/c4/d1
 readonly BB_NETNS_PREMOUNTS=bf05b7c51c2f7863ee685a195273e195   # 2026-11-12: docker socket, but the whole $HOME mounted rw (#76); live on all four hosts
 readonly BB_NETNS_NEW=5faf98d501202f9d0f705a392ce172ed
@@ -152,8 +155,8 @@ accepted_of() {  # the md5s a host may hold besides absent, in the order the ref
     bb-tickets) echo "$BB_TICKETS_OLD $BB_TICKETS_PRE31 $BB_TICKETS_PREOFFQ $BB_TICKETS_NEW" ;;
     bb-portgroup.py) echo "$BB_PORTGROUP_PREV $BB_PORTGROUP_PRESINCE $BB_PORTGROUP_NEW" ;;
     bb-netns-run) echo "$BB_NETNS_PREV $BB_NETNS_PREMOUNTS $BB_NETNS_NEW" ;;
-    bb-wait) echo "$BB_WAIT_PRERC $BB_WAIT_PREREFUSED $BB_WAIT_PRE80 $BB_WAIT_NEW" ;;
-    bb-await) echo "$BB_AWAIT_PREREFUSED $BB_AWAIT_NEW" ;;
+    bb-wait) echo "$BB_WAIT_PRERC $BB_WAIT_PREREFUSED $BB_WAIT_PRE80 $BB_WAIT_PRE90 $BB_WAIT_NEW" ;;
+    bb-await) echo "$BB_AWAIT_PREREFUSED $BB_AWAIT_PRE90 $BB_AWAIT_NEW" ;;
     bb-mutate) echo "$BB_MUTATE_OLD $BB_MUTATE_PREVIA $BB_MUTATE_NEW" ;;
     bb-result) echo "$BB_RESULT_PRECP $BB_RESULT_PRE80 $BB_RESULT_NEW" ;;
     bb-test) echo "$BB_TEST_PRE76 $BB_TEST_NEW" ;;

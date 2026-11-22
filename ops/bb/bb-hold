@@ -95,7 +95,7 @@ trap on_signal TERM INT HUP
 trap '' PIPE   # a dropped ssh pipe on stderr must not kill the holder mid-hold; writes just fail
 
 flock 8
-reap
+reap >/dev/null   # its stdout is the launch count, for pick only (#90)
 { printf 'id=%s\nowner=%s\nco=%s\nsha=%s\nkey=%s\ncap=%s\nlimit=%s\ncreated=%s\n' "$ID" "$OWNER" "$D" "" "" "$CAP" 0 "$(date +%s%N)"
   printf 'group=1\ngroup_reason=bb-hold: container %s holds the port group\n' "$NAME"
   printf 'kind=bb-hold\nrequested_prio=%s\ncontainer=%s\n' "$PRIO_ARG" "$NAME"

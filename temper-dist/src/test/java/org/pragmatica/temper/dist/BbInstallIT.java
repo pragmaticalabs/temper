@@ -238,6 +238,8 @@ class BbInstallIT {
         assertThat(pin("BB_BUILD_PRE90")).isEqualTo(BbFixtures.md5(prev("bb-build.pre90")));
         assertThat(pin("BB_HOLD_PRE90")).isEqualTo(BbFixtures.md5(prev("bb-hold.pre90")));
         assertThat(pin("BB_QUEUE_PRE90")).isEqualTo(BbFixtures.md5(prev("bb-queue.pre90")));
+        assertThat(pin("BB_WAIT_PRE90")).isEqualTo(BbFixtures.md5(prev("bb-wait.pre90")));
+        assertThat(pin("BB_AWAIT_PRE90")).isEqualTo(BbFixtures.md5(prev("bb-await.pre90")));
         assertThat(pin("BB_RESULT_PRE80")).isEqualTo(BbFixtures.md5(prev("bb-result.pre80")));
         assertThat(pin("BB_WAIT_PRE80")).isEqualTo(BbFixtures.md5(prev("bb-wait.pre80")));
         assertThat(pin("BB_BUILD_PRE76")).isEqualTo(BbFixtures.md5(prev("bb-build.pre76")));
