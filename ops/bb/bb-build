@@ -77,7 +77,8 @@
 # tokens minus `!` exclusions. `none` is special ONLY as a property's exact whole value (case-sensitive: `None`, `none,X` are tokens).
 # THE TABLE (a cell's name is its row prefix in BbZeroTestcaseIT and the CELLS name a mutant deletes):
 #   cell        when                                                     outcome
-#   NOSEL       neither -Dtest nor -Dit.test given (a build)             not counted, rc kept (GUESS for the CTO: a plain install is not judged)
+#   NOSEL       neither -Dtest nor -Dit.test given (a build)             NOT GATED, rc kept (any rc), but logged (CTO ruling 2026-11-22):
+#                                                                        `bb-build: testcases (no selector, not gated): surefire(all)=n failsafe(all)=m`
 #   POS         S(P) non-empty                                           every token of S(P) has executed testcases > 0 in P's reports, else 19
 #   ALL         S(P) empty (no selector, only `!`), P not `none`, P RAN  P(all) executed > 0, logged `surefire(all)=n` / `failsafe(all)=n`, else 19
 #   NONE        P's selector is exactly `none`                           P is not counted
@@ -138,8 +139,7 @@ if kind in ('mvn', 'select'):
                 values[prop] = a[len(prop) + 3:]
 if kind == 'select':                             # QUEUEOFF
     sys.exit(19 if values and 'QUEUEOFF' in CELLS else 0)
-if kind == 'mvn' and not values and 'NOSEL' in CELLS:
-    sys.exit(0)
+nosel = kind == 'mvn' and not values and 'NOSEL' in CELLS
 log_path = os.path.join(os.path.dirname(marker), 'build.log')
 log = open(log_path, errors='replace').read().split('\n') if os.path.isfile(log_path) else []
 def cases(p, since):                             # (class, skipped, failed) per <testcase> of one report newer than the marker
@@ -156,7 +156,7 @@ def cases(p, since):                             # (class, skipped, failed) per 
 def reports_in(d, since):
     return [c for f in (sorted(os.listdir(d)) if os.path.isdir(d) else []) if f.startswith('TEST-') and f.endswith('.xml')
             for c in cases(os.path.join(d, f), since)]
-if job_rc != 0:                                  # REJECT, else the job's rc is kept
+if job_rc != 0 and not nosel:                    # REJECT, else the job's rc is kept
     if 'REJECT' not in CELLS:
         sys.exit(0)
     if kind == 'mvn':
@@ -171,6 +171,9 @@ if job_rc != 0:                                  # REJECT, else the job's rc is 
             why = next((l.strip() for l in log if l.startswith('Caused by: ')), None) \
                   or next((l.strip() for l in log if re.match(r'[\w.$]+(Exception|Error)\b', l)), 'java exit 255')   # the root cause JUnit printed
             refuse('the runner rejected the selection: ' + why)
+    sys.exit(0)
+if nosel and not os.path.isfile(marker):
+    print('bb-build: testcases (no selector, not gated): uncountable, no run marker')
     sys.exit(0)
 since = os.stat(marker).st_mtime_ns              # no marker: the count fails (UNCOUNTABLE, the caller's)
 plugins = []                                     # (P, S(P), runs [(label, cases)], P ran?)
@@ -200,6 +203,10 @@ if kind == 'mvn':                                # only */target/{surefire,fails
                 if not any('Tests are skipped.' in m for m in block):
                     return True
         return wrote[p]
+    if nosel:                                    # NOSEL (CTO ruling 2026-11-22): never gating, both whole counts logged, a zero included
+        print('bb-build: testcases (no selector, not gated): ' + ' '.join('%s(all)=%d' % (p, sum(1 for _, sk, _ in found[p] if not sk))
+              + ('(+%d skipped)' % k if k else '') for p, k in ((p, sum(1 for _, sk, _ in found[p] if sk)) for p in ('surefire', 'failsafe'))))
+        sys.exit(0)
     for p, prop in (('surefire', 'test'), ('failsafe', 'it.test')):
         if values.get(prop) == 'none' and 'NONE' in CELLS:
             continue

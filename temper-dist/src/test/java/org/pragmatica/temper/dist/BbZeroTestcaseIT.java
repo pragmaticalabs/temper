@@ -213,12 +213,18 @@ class BbZeroTestcaseIT {
         assertRefused(run, "org.x.FooTest=2 **/y/FooTest=0", "**/y/FooTest");
     }
 
+    /// CTO ruling 2026-11-22: no selector is never gated, but both whole counts are logged, so a reader can see a zero.
     @Test
-    void nosel_noTestNorItTestSelector_isNotCounted_rcKept() throws Exception {
-        var run = run("exit 0", "-B", "install");
+    void nosel_noSelector_isNotGated_rcKept_bothWholeCountsLogged_zeroIncluded() throws Exception {
+        var some = run(report("m/target/surefire-reports", "org.x.FooTest", ONE), "-B", "install");
+        var none = run("exit 0", "-B", "install");
 
-        assertThat(run.rc()).as(run.log()).isEqualTo("0");
-        assertThat(run.log()).doesNotContain("selected testcases");
+        assertThat(some.rc()).as(some.log()).isEqualTo("0");
+        assertThat(some.fileRc()).isEqualTo("0");
+        assertThat(some.log()).contains("bb-build: testcases (no selector, not gated): surefire(all)=1 failsafe(all)=0\n").doesNotContain("refused");
+        assertThat(none.rc()).as(none.log()).isEqualTo("0");
+        assertThat(none.fileRc()).isEqualTo("0");
+        assertThat(none.log()).contains("bb-build: testcases (no selector, not gated): surefire(all)=0 failsafe(all)=0\n").doesNotContain("refused");
     }
 
     // ---- -Dtest=none with NO -Dit.test: failsafe runs every IT, i.e. select all; run-level count (CTO ruling 2026-11-22) ----
