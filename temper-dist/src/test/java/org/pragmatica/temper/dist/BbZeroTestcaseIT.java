@@ -122,6 +122,11 @@ class BbZeroTestcaseIT {
         return new Run(rc, Files.readString(co.resolve(".bb/rc")).trim(), Files.readString(co.resolve(".bb/build.log")));
     }
 
+    /// The stub maven's log line of a plugin's test goal execution (the ALL cell's "P ran" evidence, header: P RAN).
+    private static String goal(String plugin, String goal) {
+        return "echo '[INFO] --- " + plugin + ":3.2.5:" + goal + " (default) @ m ---'";
+    }
+
     private static void assertRefused(Run run, String counts, String empty) {
         assertThat(run.rc()).as(run.log()).isEqualTo("19");
         assertThat(run.fileRc()).isEqualTo("19");
@@ -209,7 +214,7 @@ class BbZeroTestcaseIT {
     }
 
     @Test
-    void noSelector_isUnchanged() throws Exception {
+    void nosel_noTestNorItTestSelector_isNotCounted_rcKept() throws Exception {
         var run = run("exit 0", "-B", "install");
 
         assertThat(run.rc()).as(run.log()).isEqualTo("0");
@@ -246,7 +251,8 @@ class BbZeroTestcaseIT {
 
     @Test
     void testNone_itTestOfExclusionsOnly_alsoSelectsAllIts_andIsCountedRunLevel() throws Exception {
-        assertRefused(run("exit 0", "-Dtest=none", "-Dit.test=!StreamPublishReshuffleTest"), "failsafe(all)=0", "failsafe(all)");
+        assertRefused(run(goal("failsafe", "integration-test") + "; echo '[INFO] No tests to run.'", "-Dtest=none", "-Dit.test=!StreamPublishReshuffleTest"),
+                      "failsafe(all)=0", "failsafe(all)");
 
         var run = run(report("m/target/failsafe-reports", "org.x.BbFooIT", TWO), "-Dtest=none", "-Dit.test=!StreamPublishReshuffleTest");
 
@@ -274,7 +280,7 @@ class BbZeroTestcaseIT {
     }
 
     @Test
-    void aMissingRunMarker_isNeverAPass() throws Exception {
+    void uncountable_aMissingRunMarker_isNeverAPass() throws Exception {
         var run = run("rm -f .bb/run.marker; " + report("m/target/surefire-reports", "org.x.FooTest", TWO), "-Dtest=FooTest");
 
         assertThat(run.rc()).as(run.log()).isEqualTo("19");
@@ -365,6 +371,91 @@ class BbZeroTestcaseIT {
         assertThat(run.log()).contains("bb-build: selected testcases: FooTest=1(+1 skipped)\n");
     }
 
+    // ---- THE TABLE (bb-build header, CTO ruling 2026-11-22): a row per cell, named after it (nosel_, uncountable_, queueoff_ are above/below) ----
+
+    @Test
+    void pos_everyTokenOfS_countsInItsOwnPluginsReports_oneEmptyIsRefused() throws Exception {
+        var run = run(report("m/target/surefire-reports", "org.x.FooTest", TWO) + " && " + report("m/target/failsafe-reports", "org.x.BbFooIT", TWO)
+                      + " && " + report("m/target/surefire-reports", "org.x.BbBarIT", TWO),
+                      "-Dtest=FooTest", "-Dit.test=BbFooIT,BbBarIT");
+
+        assertRefused(run, "FooTest=2 BbFooIT=2 BbBarIT=0", "BbBarIT");
+    }
+
+    @Test
+    void all_emptySOfAPluginThatRan_isCountedWhole_aSkippedGoalDidNotRun() throws Exception {
+        assertRefused(run(goal("surefire", "test") + "; echo '[INFO] No tests to run.'", "-Dit.test=none"), "surefire(all)=0", "surefire(all)");
+        assertRefused(run(report("m/target/surefire-reports", "org.x.FooTest", TWO) + "; " + goal("failsafe", "integration-test"), "-Dtest=FooTest"),
+                      "FooTest=2 failsafe(all)=0", "failsafe(all)");
+
+        var skipped = run(report("m/target/surefire-reports", "org.x.FooTest", TWO) + "; " + goal("failsafe", "integration-test")
+                          + "; echo '[INFO] Tests are skipped.'", "-Dtest=FooTest");
+
+        assertThat(skipped.rc()).as(skipped.log()).isEqualTo("0");
+        assertThat(skipped.log()).contains("bb-build: selected testcases: FooTest=2\n");
+
+        var ran = run(goal("surefire", "test") + "; " + report("m/target/surefire-reports", "org.x.FooTest", ONE), "-Dit.test=none");
+
+        assertThat(ran.rc()).as(ran.log()).isEqualTo("0");
+        assertThat(ran.log()).contains("bb-build: selected testcases: surefire(all)=1\n");
+    }
+
+    @Test
+    void none_exactNoneExcludesItsPlugin_evenOneThatRan() throws Exception {
+        var run = run(goal("surefire", "test") + "; " + report("m/target/failsafe-reports", "org.x.BbFooIT", TWO), "-Dtest=none", "-Dit.test=BbFooIT");
+
+        assertThat(run.rc()).as(run.log()).isEqualTo("0");
+        assertThat(run.log()).contains("bb-build: selected testcases: BbFooIT=2\n").doesNotContain("refused");
+    }
+
+    @Test
+    void idle_aSelectionThatCountedNothing_isRefusedWith19() throws Exception {
+        var run = run("exit 0", "-Dtest=!SlowTest");
+
+        assertThat(run.rc()).as(run.log()).isEqualTo("19");
+        assertThat(run.fileRc()).isEqualTo("19");
+        assertThat(run.log()).contains("[ERROR] bb-build: refused rc 0 -> 19: the selection counted nothing: no plugin it selects ran\n")
+                             .doesNotContain("selected testcases");
+    }
+
+    private static final String NO_TESTS_GOAL = "[ERROR] Failed to execute goal org.apache.maven.plugins:maven-surefire-plugin:3.2.5:test (default-test) on project m:"
+                                                + " No tests matching pattern \"FooTest#nope\" were executed! (Set -Dsurefire.failIfNoSpecifiedTests=false to ignore this error.) -> [Help 1]";
+    private static final String CAUSE = "Caused by: org.junit.platform.commons.PreconditionViolationException: Could not find method with name [nope] in class [fx.ATest].";
+    private static final String FIELDS = "echo verdict_source=java > .bb/fields.$BB_TICKET; ";
+
+    @Test
+    void reject_aSelectionTheRunnerRejected_isRc19_withTheRunnersLine() throws Exception {
+        var build = run("echo '" + NO_TESTS_GOAL + "'; exit 1", "-Dtest=FooTest#nope");
+
+        assertThat(build.rc()).as(build.log()).isEqualTo("19");
+        assertThat(build.fileRc()).isEqualTo("19");
+        assertThat(build.log()).contains("[ERROR] bb-build: refused rc 1 -> 19: the runner rejected the selection: " + NO_TESTS_GOAL.substring(8) + "\n");
+
+        var launch = launch(FIELDS + "echo 'org.junit.platform.commons.JUnitException: TestEngine with ID x failed to discover tests'; echo '" + CAUSE
+                            + "'; echo 'bb-test: run 1/1 java exit 255; requireDocker=true; bb-testcount: no testcase'; exit 255", "1", "fx.ATest#nope");
+
+        assertThat(launch.rc()).as(launch.log()).isEqualTo("19");
+        assertThat(launch.log()).contains("[ERROR] bb-build: refused rc 255 -> 19: the runner rejected the selection: " + CAUSE + "\n");
+    }
+
+    @Test
+    void reject_aGenuineFailureOrAnotherFailedGoal_keepsItsRc() throws Exception {
+        var failure = run("echo '[ERROR] Failed to execute goal org.apache.maven.plugins:maven-surefire-plugin:3.2.5:test (default-test) on project m:"
+                          + " There are test failures.'; exit 1", "-Dtest=FooTest");
+        var mixed = run("echo '" + NO_TESTS_GOAL + "'; echo '[ERROR] Failed to execute goal org.apache.maven.plugins:maven-compiler-plugin:3.13.0:compile"
+                        + " (default-compile) on project n: Compilation failure'; exit 1", "-Dtest=FooTest#nope");
+        var launch = launch(FIELDS + report("$D", "junit-jupiter", "<testsuite><testcase classname='fx.ATest' name='t'><failure/></testcase></testsuite>")
+                            + "; echo 'bb-test: run 1/1 java exit 255; x'; exit 255", "1", "fx.ATest");
+
+        for (var run : List.of(failure, mixed)) {
+            assertThat(run.rc()).as(run.log()).isEqualTo("1");
+            assertThat(run.fileRc()).isEqualTo("1");
+            assertThat(run.log()).doesNotContain("refused");
+        }
+        assertThat(launch.rc()).as(launch.log()).isEqualTo("255");
+        assertThat(launch.log()).doesNotContain("refused");
+    }
+
     // ---- (c) BB_QUEUE=0: bb-build-direct writes .bb/rc from its own detached job, so a counted selector is refused at the call ----
 
     private BbFixtures.Outcome direct(String... args) throws Exception {
@@ -375,21 +466,22 @@ class BbZeroTestcaseIT {
     }
 
     @Test
-    void queueOff_aCountedSelector_isRefusedWith19_andNothingRuns() throws Exception {
+    void queueoff_anySelector_noneIncluded_isRefusedWith19_andNothingRuns() throws Exception {
         for (var args : List.of(List.of(co.toString(), "-Dtest=FooTest"), List.of(co.toString(), "-Dtest=none", "-Dit.test=none"),
                                 List.of(co.toString(), "-Dtest=none"), List.of(co.toString(), "-Dtest=none", "-Dit.test=!X"),
-                                List.of("--since", "abc", co.toString(), "-Dit.test=BbFooIT"))) {
+                                List.of("--since", "abc", co.toString(), "-Dit.test=BbFooIT"),
+                                List.of(co.toString(), "-Dit.test=none"), List.of(co.toString(), "-Dtest=!X"))) {
             var out = direct(args.toArray(String[]::new));
 
             assertThat(out.rc()).as(args + out.stdout() + out.stderr()).isEqualTo(19);
-            assertThat(out.stderr()).contains("refusing (rc 19): BB_QUEUE=0 cannot count the selected test classes");
+            assertThat(out.stderr()).contains("refusing (rc 19): BB_QUEUE=0 cannot count a -Dtest/-Dit.test selection");
             assertThat(out.stdout()).doesNotContain("direct-ran");
         }
     }
 
     @Test
-    void queueOff_noCountedSelector_runsBbBuildDirectUnchanged() throws Exception {
-        for (var args : List.of(List.of(co.toString(), "-B", "install"), List.of(co.toString(), "-Dit.test=none"))) {
+    void queueoff_noSelector_runsBbBuildDirectUnchanged() throws Exception {
+        for (var args : List.of(List.of(co.toString(), "-B", "install"), List.of(co.toString(), "-DskipTests"))) {
             var out = direct(args.toArray(String[]::new));
 
             assertThat(out.rc()).as(args + out.stderr()).isZero();

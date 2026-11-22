@@ -71,7 +71,7 @@ readonly BB_BUILD_PRESESSION=2810f93c875ad9a106c2cda284babb81   # the #79 versio
 readonly BB_BUILD_PRE80=dafd74a3ea2fec81b1a3d39067422f6a   # the #70 version: dedup identifies a run by its start second (issue #80)
 readonly BB_BUILD_PRE76=2f349b869a02dcfec552ab0b8b1f972c   # the #80/#81 version: bb-test's launch writes its ticket fields into the queue (issue #76)
 readonly BB_BUILD_PRE86=ad84d8ec0f36096b0de9b4f29142f730   # the #83/#85 version: an rc-0 run whose selected test class ran 0 testcases stays rc 0 (issue #86)
-readonly BB_BUILD_NEW=9c1a76b790a9f160c6af4f678697683f
+readonly BB_BUILD_NEW=8f79e3632ce34c67970272d35865ee9f
 # bb-jbct-bootstrap: absent on every host before its first install; bb-build calls it, so it is installed first.
 readonly BB_JBCTBOOT_NEW=3e5396ecee48b99949456cf805df1e60
 # bb-result: absent on every host before its first install. No trailing comment on a pin line: bb-drift reads it by pattern.
@@ -107,7 +107,7 @@ readonly BB_CPRECORD_NEW=3a75a8750a940c983170a43c6c8611b0
 readonly BB_TEST_PRE76=4a3022874afe57bbaea792a53c063f7e
 # BB_TEST_PRE86: the #76 bb-test (java runs with --fail-if-no-tests; bb-build does not count a launch's testcases, issue #86)
 readonly BB_TEST_PRE86=13f8e8c9a2e098dbf67cc478cf4e8928
-readonly BB_TEST_NEW=d21ae06d22333b5de4450870ed410908
+readonly BB_TEST_NEW=8575f788316f02e0030574d4bc497a56
 readonly BB_TESTCOUNT_NEW=7ef8a4c3eba2a517146eed6d7ac31511
 readonly BB_MUTATE_OLD=f9bfbd37c5feafe67995f6716e8fecb0   # the host snapshot, identical on all four hosts: batch credit unsound for multi-module specs
 readonly BB_MUTATE_PREVIA=2c341d44d428ba445db7ea03ee90af64   # the batch-sound version (#41): does not export BB_VIA (issue #46)

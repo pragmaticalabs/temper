@@ -5,8 +5,9 @@
 # -Daether.requireDocker=true. The launch is ONE queue ticket (cap, port group, netns slot, memory floor, load gate as for a build),
 # enqueued through bb-build (BB_LAUNCH makes the waiter run this script's __launch mode instead of maven), and NEVER deduped.
 # VERDICT = the java exit status (the ticket's rc, read with bb-wait/bb-await as for a build), unless the resolved junit check below refuses
-# the run (rc 15, which replaces it). ZERO TESTCASES (#86): java's exit 0 is rc 19 when any selector ran 0 testcases (in any run),
-# counted by bb-build's one counter (bb-build: ZERO-TESTCASE REFUSAL) on this ticket's reports; java runs without --fail-if-no-tests, so an
+# the run (rc 15, which replaces it). ZERO TESTCASES (#86): java's exit 0 is rc 19 when any selector ran 0 testcases (in any run), and
+# java's exit 255 on a selection JUnit rejects (Class#noSuchMethod, no testcase failed) is rc 19 too, both by bb-build's one table
+# (bb-build: ZERO-TESTCASE REFUSAL, cells POS and REJECT) on this ticket's reports; java runs without --fail-if-no-tests, so an
 # empty selection is that counter's 19, never a second rule (java exit 2). Reports: <module>/target/bb-test-reports/<ticket>/ (with --repeat N>1: .../run<i>/), the
 # launcher's legacy XML, never surefire-reports; java's console and a count line (bb-testcount) per run are appended to .bb/build.log
 # after the last run, once the resolved junit check passed.
