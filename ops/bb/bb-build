@@ -175,13 +175,14 @@ if job_rc != 0:                                  # REJECT, else the job's rc is 
 since = os.stat(marker).st_mtime_ns              # no marker: the count fails (UNCOUNTABLE, the caller's)
 plugins = []                                     # (P, S(P), runs [(label, cases)], P ran?)
 if kind == 'mvn':                                # only */target/{surefire,failsafe}-reports: fixture XML under src/ never counts
-    found = {'surefire': [], 'failsafe': []}
+    found, wrote = {'surefire': [], 'failsafe': []}, {'surefire': False, 'failsafe': False}
     base = co.rstrip('/').count('/')
     for root, dirs, files in os.walk(co):
         name = os.path.basename(root)
         if name in ('surefire-reports', 'failsafe-reports') and os.path.basename(os.path.dirname(root)) == 'target':
             dirs[:] = []
             found[name[:-8]].extend(reports_in(root, since))
+            wrote[name[:-8]] |= any(f.startswith('TEST-') and f.endswith('.xml') and os.stat(os.path.join(root, f)).st_mtime_ns > since for f in files)
             continue
         dirs[:] = [d for d in dirs if d in ('surefire-reports', 'failsafe-reports')] if name == 'target' else \
                   [d for d in dirs if d not in ('.git', '.m2-local', '.bb', 'node_modules', 'src')]
@@ -198,7 +199,7 @@ if kind == 'mvn':                                # only */target/{surefire,fails
                     block.append(m)
                 if not any('Tests are skipped.' in m for m in block):
                     return True
-        return bool(found[p])
+        return wrote[p]
     for p, prop in (('surefire', 'test'), ('failsafe', 'it.test')):
         if values.get(prop) == 'none' and 'NONE' in CELLS:
             continue
