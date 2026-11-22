@@ -31,6 +31,10 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 /// [#aHoldGoneBeforeTheInstall_runsNothing_andReleasesEveryHold] red; drop the per-call wall limit ->
 /// [#aStalledCall_isCutAtTheWallLimit_soTheRefusalComesInBoundedTime] red; drop the pre-install HOLDF check ->
 /// [#aHoldGoneBeforeTheInstall_runsNothing_andReleasesEveryHold] red.
+///
+/// Rows added for verifier v93a's findings on #96 (lane93c, 2026-11-22; red at 99bf5b782, green at the fix; mutants on throwaway
+/// branches): held() proves the lock is held, not that HOLDF exists; no call rides a ControlMaster; the heartbeat bound is
+/// HB_EVERY + 2*SSH_WALL + 1 < HB_STALE; the install's nonzero status is exit 11; `touch -c` for an in-flight heartbeat.
 class BbInstallHoldIT {
     private static final Path SCRIPT = BbFixtures.OPS_BB.resolve("bb-install-hold.sh");
     private static final List<String> HOSTS = List.of("h1", "h2", "h3");
@@ -73,6 +77,10 @@ class BbInstallHoldIT {
               # a ticket enqueued while the holder starts: present for 3 s, then it finishes on its own
               touch "$HOME_BASE/$h.ticketed" "$HOME_BASE/$h/work/queue/running/late"
               (sleep 3; rm -f "$HOME_BASE/$h/work/queue/running/late") > /dev/null 2>&1 < /dev/null &
+            fi
+            if [ "${SHIM_DELAY_HOST:-}" = "$h" ] && [[ $cmd == $SHIM_DELAY_MATCH ]] && [ -e "${SHIM_DELAY_FLAG:-/nonexistent}" ]; then
+              # an armed, in-flight call: runs its test, then waits SHIM_DELAY_SECS before the touch (no ampersand in a replacement)
+              touch "$HOME_BASE/$h.inflight"; cmd="${cmd%%&& touch*}&& sleep ${SHIM_DELAY_SECS:-3} && touch${cmd#*&& touch}"
             fi
             HOME="$HOME_BASE/$h" exec bash -c "$cmd"
             """.replace("@LOG@", log.toString()));
@@ -117,7 +125,7 @@ class BbInstallHoldIT {
         env.put("POLL_SECS", "1");
         env.put("TAKE_SECS", "10");
         env.put("HB_EVERY", "1");
-        env.put("HB_STALE", "6");
+        env.put("HB_STALE", "8");
         env.put("SSH_WALL", "2");
         env.put("CONNECT_SECS", "2");
         env.putAll(extra);
@@ -215,7 +223,7 @@ class BbInstallHoldIT {
 
         assertThat(outcome.rc()).as(outcome.stderr()).isZero();
         assertThat(sshCalls()).isNotEmpty()
-                  .allSatisfy(call -> assertThat(call.split("\\|") [1]).isEqualTo("-n BatchMode=yes ConnectTimeout=2 ServerAliveInterval=5 ServerAliveCountMax=3"));
+                  .allSatisfy(call -> assertThat(call.split("\\|") [1]).isEqualTo("-n BatchMode=yes ConnectTimeout=2 ServerAliveInterval=5 ServerAliveCountMax=3 ControlMaster=no ControlPath=none"));
     }
 
     /// The #93 scenario: h2's heartbeat calls hang once the install has started. h1 and h3 stay held throughout; h2's hold ends and
@@ -422,8 +430,286 @@ class BbInstallHoldIT {
         var tooSlow = BbFixtures.run(command("aether@h1", "--", x), env(Map.of("HB_EVERY", "4")), null, null);
 
         assertThat(tooSlow.rc()).isEqualTo(2);
-        assertThat(tooSlow.stderr()).contains("HB_EVERY + SSH_WALL must be below HB_STALE");
+        assertThat(tooSlow.stderr()).contains("HB_EVERY + 2*SSH_WALL + 1 must be below HB_STALE");
+        // two successful calls can touch WANT HB_EVERY + 2*SSH_WALL apart: 1 + 8 + 1 = 10 is the edge, and the old bound (1 + 4 < 6) is refused
+        for (var stale : List.of("6", "10")) {
+            var edge = BbFixtures.run(command("aether@h1", "--", x),
+                                      env(Map.of("HB_EVERY", "1", "SSH_WALL", "4", "HB_STALE", stale)),
+                                      null,
+                                      null);
+
+            assertThat(edge.rc()).as("HB_STALE " + stale + ": " + edge.stderr()).isEqualTo(2);
+            assertThat(edge.stderr()).contains("HB_EVERY + 2*SSH_WALL + 1 must be below HB_STALE");
+        }
+
         assertThat(sshCalls()).isEmpty();
         assertThat(installRan()).isFalse();
+    }
+
+    /// v93a R1: the holder of h2 is SIGKILLed during the install. HOLDF stays and the lock is free; a hold that ends during the install
+    /// is reported (exit 10).
+    @Test
+    void aKilledHolderMidInstall_isReportedAsALapse() throws Exception {
+        var killer = BbFixtures.executable(dir.resolve("install-kill"),
+                                           """
+            #!/bin/bash
+            r="@DIR@/lockstate"
+            for h in h1 h2 h3; do if flock -n "$HOME_BASE/$h/work/queue/.lock" true; then echo "$h=free"; else echo "$h=busy"; fi; done >> "$r"
+            kill -9 "$(cat "$HOME_BASE/h2/work/.install-hold")"
+            sleep 2
+            if flock -n "$HOME_BASE/h2/work/queue/.lock" true; then echo "after-kill h2=free"; else echo "after-kill h2=busy"; fi >> "$r"
+            """.replace("@DIR@", dir.toString()));
+        var outcome = BbFixtures.run(command("aether@h1", "aether@h2", "aether@h3", "--", killer.toString()),
+                                     env(Map.of()),
+                                     null,
+                                     null);
+
+        assertThat(Files.readAllLines(dir.resolve("lockstate"))).as("reached: every lock busy before the kill, h2's free after it")
+                  .containsExactly("h1=busy", "h2=busy", "h3=busy", "after-kill h2=free");
+        assertThat(outcome.rc()).as(outcome.stdout() + outcome.stderr()).isEqualTo(10);
+        assertThat(outcome.stderr()).contains("WARNING: aether@h2's hold ended before the install finished")
+                  .doesNotContain("aether@h1's hold")
+                  .doesNotContain("aether@h3's hold");
+    }
+
+    /// The holder of h2 is SIGKILLed and a queue ticket's grant takes the freed lock, so the lock is busy but no longer ours: a busy lock
+    /// alone does not prove the hold, the holder's pid must be alive too.
+    @Test
+    void aKilledHolderWhoseLockIsTakenByAnotherProcess_isStillALapse() throws Exception {
+        var killer = BbFixtures.executable(dir.resolve("install-kill-retake"),
+                                           """
+            #!/bin/bash
+            kill -9 "$(cat "$HOME_BASE/h2/work/.install-hold")"
+            sleep 1
+            flock -w 5 "$HOME_BASE/h2/work/queue/.lock" sleep 4 > /dev/null 2>&1 < /dev/null &
+            sleep 1
+            if flock -n "$HOME_BASE/h2/work/queue/.lock" true; then echo "retaken=no"; else echo "retaken=yes"; fi > "@DIR@/retaken"
+            """.replace("@DIR@", dir.toString()));
+        var outcome = BbFixtures.run(command("aether@h1", "aether@h2", "aether@h3", "--", killer.toString()),
+                                     env(Map.of()),
+                                     null,
+                                     null);
+
+        assertThat(Files.readString(dir.resolve("retaken")).strip()).as("reached: the lock is busy again after the kill")
+                  .isEqualTo("retaken=yes");
+        assertThat(outcome.rc()).as(outcome.stdout() + outcome.stderr()).isEqualTo(10);
+        assertThat(outcome.stderr()).contains("WARNING: aether@h2's hold ended before the install finished");
+    }
+
+    /// HOLDF names a LIVE pid (the script, the install's parent, which outlives the install) but h2's lock is free: the holder was killed and its HOLDF's pid has been reused, say
+    /// after a reboot. The pid alone does not prove the hold, the busy lock must too.
+    @Test
+    void aHoldFileNamingALivePidWhoseLockIsFree_isALapse() throws Exception {
+        var stale = BbFixtures.executable(dir.resolve("install-stale"),
+                                          """
+            #!/bin/bash
+            kill -9 "$(cat "$HOME_BASE/h2/work/.install-hold")"
+            echo $PPID > "$HOME_BASE/h2/work/.install-hold"
+            sleep 1
+            if flock -n "$HOME_BASE/h2/work/queue/.lock" true; then echo "free=yes"; else echo "free=no"; fi > "@DIR@/freestate"
+            """.replace("@DIR@", dir.toString()));
+        var outcome = BbFixtures.run(command("aether@h1", "aether@h2", "aether@h3", "--", stale.toString()),
+                                     env(Map.of()),
+                                     null,
+                                     null);
+
+        assertThat(Files.readString(dir.resolve("freestate")).strip()).as("reached: the lock is free, HOLDF names a live pid")
+                  .isEqualTo("free=yes");
+        assertThat(outcome.rc()).as(outcome.stdout() + outcome.stderr()).isEqualTo(10);
+        assertThat(outcome.stderr()).contains("WARNING: aether@h2's hold ended before the install finished");
+    }
+
+    /// h1 is held first; its holder is SIGKILLed while h2 drains (HOLDF stays, the lock is free). The pre-install check must see that h1's
+    /// hold is gone: nothing is run, exit 9.
+    @Test
+    void aHolderKilledWhileAnotherHostDrains_runsNothing() throws Exception {
+        var ticket = Files.writeString(home("h2").resolve("work/queue/running/t1"), "ticket\n");
+        var killer = Thread.ofVirtual().start(() -> {
+            try {
+                var holdFile = home("h1").resolve("work/.install-hold");
+
+                Thread.sleep(3_000);
+                BbFixtures.run(List.of("kill",
+                                       "-9",
+                                       Files.readString(holdFile).strip()),
+                               Map.of("PATH", System.getenv("PATH")),
+                               null,
+                               null);
+                Thread.sleep(4_000);
+                Files.delete(ticket);
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+        });
+        var outcome = hold(Map.of());
+
+        killer.join();
+        assertThat(installRan()).as(outcome.stderr()).isFalse();
+        assertThat(outcome.rc()).as(outcome.stderr()).isEqualTo(9);
+        assertThat(outcome.stderr()).contains("refused: the hold on aether@h1 ended before the install started; every hold released; nothing run");
+        assertNoTokensAnywhere();
+    }
+
+    /// Two successful heartbeat calls to h2 can touch WANT HB_EVERY + 2*SSH_WALL s apart. Here every call succeeds inside SSH_WALL (4 s) and
+    /// they alternate touch-then-3s and 3s-then-touch; HB_STALE 11 is the smallest value the bound HB_EVERY + 2*SSH_WALL + 1 < HB_STALE allows.
+    @Test
+    void successfulHeartbeatsAtTheStatedBound_keepTheHold() throws Exception {
+        var slow = BbFixtures.executable(dir.resolve("slowshim"),
+                                         """
+            #!/bin/bash
+            last=${@: -1}; tgt=${@: -2:1}
+            if [ "${tgt#*@}" = h2 ] && [[ $last == *"&& touch"* ]]; then
+              n=$(cat "@DIR@/slow.n" 2> /dev/null || echo 0); echo $((n + 1)) > "@DIR@/slow.n"
+              if [ $((n % 2)) = 0 ]; then "@SHIM@" "$@"; rc=$?; sleep 3; exit $rc; else sleep 3; exec "@SHIM@" "$@"; fi
+            fi
+            exec "@SHIM@" "$@"
+            """.replace("@DIR@",
+                        dir.toString())
+               .replace("@SHIM@",
+                        shim.toString()));
+        var outcome = hold(Map.of("BB_HOLD_SSH",
+                                  slow.toString(),
+                                  "HB_EVERY",
+                                  "1",
+                                  "SSH_WALL",
+                                  "4",
+                                  "HB_STALE",
+                                  "11",
+                                  "SAMPLE_SECS",
+                                  "14"));
+
+        assertThat(Files.readString(dir.resolve("slow.n")).strip()).as("reached: h2 heartbeat calls through the slow shim")
+                  .isNotEqualTo("1");
+        assertThat(outcome.stderr()).as("every heartbeat call succeeded").doesNotContain("refresh failed");
+        assertThat(samples()).hasSize(14).allSatisfy(sample -> assertThat(sample).isEqualTo("h1=held h2=held h3=held"));
+        assertThat(outcome.rc()).as(outcome.stdout() + outcome.stderr()).isZero();
+    }
+
+    /// v93a R4: an install that exits 9 is not "refused, nothing run": the script's own codes never carry the install's status.
+    @Test
+    void anInstallThatExits9_isExit11_notARefusal() throws Exception {
+        var nine = BbFixtures.executable(dir.resolve("install9"),
+                                         "#!/bin/bash\necho ran > \"" + dir.resolve("install.args") + "\"\nexit 9\n");
+        var outcome = BbFixtures.run(command("aether@h1", "aether@h2", "aether@h3", "--", nine.toString()),
+                                     env(Map.of()),
+                                     null,
+                                     null);
+
+        assertThat(installRan()).as("reached: the install ran").isTrue();
+        assertThat(outcome.rc()).as(outcome.stderr()).isEqualTo(11);
+        assertThat(outcome.stderr()).contains("install command exited 9; every hold released");
+        assertNoTokensAnywhere();
+    }
+
+    /// An install that exits 3 while h2's holder is killed: exit 11 names rc 3, and the lapse check still runs and names h2.
+    @Test
+    void aFailedInstall_isExit11WithItsStatusNamed_andStillNamesTheLapses() throws Exception {
+        var failing = BbFixtures.executable(dir.resolve("install-fail"),
+                                            """
+            #!/bin/bash
+            kill -9 "$(cat "$HOME_BASE/h2/work/.install-hold")"
+            sleep 1
+            exit 3
+            """);
+        var outcome = BbFixtures.run(command("aether@h1", "aether@h2", "aether@h3", "--", failing.toString()),
+                                     env(Map.of()),
+                                     null,
+                                     null);
+
+        assertThat(outcome.rc()).as(outcome.stderr()).isEqualTo(11);
+        assertThat(outcome.stderr()).contains("install command exited 3; every hold released",
+                                              "WARNING: aether@h2's hold ended before the install finished")
+                  .doesNotContain("aether@h1's hold")
+                  .doesNotContain("aether@h3's hold");
+        assertNoTokensAnywhere();
+    }
+
+    /// HUP, INT and TERM to the script during the install: the install is not cut short (the trap runs when it ends), then the script exits
+    /// 128+n with every hold released.
+    @Test
+    void aSignalDuringTheInstall_exitsWith128PlusN_afterEveryHoldIsReleased() throws Exception {
+        for (var sig : List.of("HUP", "INT", "TERM")) {
+            Files.deleteIfExists(dir.resolve("install.pid"));
+            Files.deleteIfExists(dir.resolve("samples"));
+            // the build host runs the suite under nohup (HUP ignored, and bash cannot trap a signal ignored at entry): reset the dispositions first
+            var wrapped = new ArrayList<>(List.of("perl",
+                                                  "-e",
+                                                  "$SIG{HUP} = $SIG{INT} = $SIG{TERM} = 'DEFAULT'; exec @ARGV"));
+
+            wrapped.addAll(allHostsThenInstall().stream().map(String::valueOf).toList());
+            var builder = BbFixtures.process(wrapped, env(Map.of("SAMPLE_SECS", "4")));
+
+            builder.redirectOutput(dir.resolve("out.txt").toFile());
+            builder.redirectError(dir.resolve("err.txt").toFile());
+            var script = builder.start();
+            var pidFile = dir.resolve("install.pid");
+            var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+
+            while (!Files.exists(pidFile) && System.nanoTime() < deadline) {
+                Thread.sleep(200);
+            }
+
+            assertThat(pidFile).as(sig + ": " + Files.readString(dir.resolve("err.txt"))).exists();
+            Thread.sleep(1000);
+            BbFixtures.run(List.of("kill",
+                                   "-" + sig,
+                                   Long.toString(script.pid())),
+                           Map.of("PATH", System.getenv("PATH")),
+                           null,
+                           null);
+            assertThat(script.waitFor(25, TimeUnit.SECONDS)).as(sig + ": the script ended").isTrue();
+            assertThat(script.exitValue()).as(sig + ": " + Files.readString(dir.resolve("err.txt")))
+                      .isEqualTo(sig.equals("HUP")
+                                 ? 129
+                                 : sig.equals("INT")
+                                   ? 130
+                                   : 143);
+            assertThat(samples()).as(sig + ": every hold lasted while the install ran")
+                      .hasSize(4)
+                      .allSatisfy(sample -> assertThat(sample).isEqualTo("h1=held h2=held h3=held"));
+            assertNoTokensAnywhere();
+            // a holder still sleeping its last second would see the next iteration's WANT and keep the old hold: wait for every lock
+            assertEveryLockFreeWithin(5);
+        }
+    }
+
+    /// A heartbeat call to h2 is still in flight (between its WANT test and its touch) when the holds are released. Its touch must not
+    /// recreate WANT, or the holder's hold would outlive "every hold released" by up to HB_STALE: `touch -c`.
+    @Test
+    void aHeartbeatInFlightAtRelease_doesNotRecreateWant() throws Exception {
+        var flag = dir.resolve("delay.flag");
+        var armed = BbFixtures.executable(dir.resolve("install-armed"),
+                                          """
+            #!/bin/bash
+            echo "$*" > "@DIR@/install.args"
+            touch "@DIR@/delay.flag"
+            i=0
+            while [ ! -e "$HOME_BASE/h2.inflight" ] && [ $i -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+            echo "inflight=$([ -e "$HOME_BASE/h2.inflight" ] && echo yes || echo no)" > "@DIR@/inflight"
+            """.replace("@DIR@", dir.toString()));
+        var outcome = BbFixtures.run(command("aether@h1", "aether@h2", "aether@h3", "--", armed.toString()),
+                                     env(Map.of("SHIM_DELAY_HOST",
+                                                "h2",
+                                                "SHIM_DELAY_MATCH",
+                                                HB_CALL,
+                                                "SHIM_DELAY_FLAG",
+                                                flag.toString(),
+                                                "SHIM_DELAY_SECS",
+                                                "3",
+                                                "HB_EVERY",
+                                                "1",
+                                                "SSH_WALL",
+                                                "5",
+                                                "HB_STALE",
+                                                "13")),
+                                     null,
+                                     null);
+
+        assertThat(Files.readString(dir.resolve("inflight")).strip()).as("reached: a delayed heartbeat call was in flight at the release")
+                  .isEqualTo("inflight=yes");
+        assertThat(outcome.rc()).as(outcome.stderr()).isZero();
+        Thread.sleep(5000);
+        assertThat(home("h2").resolve("work/.install-want")).as("h2 WANT after the in-flight call's touch")
+                  .doesNotExist();
     }
 }

@@ -17,17 +17,24 @@
 #   4. re-count under the hold: not empty -> release that host and back to 1.
 #   When every host is held, every HOLDF is checked again: if any is gone, the install command is NOT run and every hold is released.
 #   After the install every HOLDF is checked again and each one that ended is named. Then every hold is released.
-# Bounds: every ssh is `ssh -n -o BatchMode=yes -o ConnectTimeout=CONNECT_SECS -o ServerAliveInterval=5 -o ServerAliveCountMax=3`
-#   under a wall limit of SSH_WALL s (perl alarm, SIGALRM: rc 142). A multiplexed client (ControlMaster) obeys only the wall limit;
-#   the options bound its master. Required: HB_EVERY + SSH_WALL < HB_STALE, so a host whose calls succeed is refreshed in time.
+# Bounds: every ssh is `ssh -n -o BatchMode=yes -o ConnectTimeout=CONNECT_SECS -o ServerAliveInterval=5 -o ServerAliveCountMax=3
+#   -o ControlMaster=no -o ControlPath=none` under a wall limit of SSH_WALL s (perl alarm, SIGALRM: rc 142). The last two options
+#   keep every call off a multiplexed master (a user's ~/.ssh/config ControlMaster auto), so these options apply to the call itself and
+#   a killed client cannot leave its stdout open in a master. Required: HB_EVERY + 2*SSH_WALL + 1 < HB_STALE: two successful calls
+#   can touch WANT up to HB_EVERY + 2*SSH_WALL s apart (one early in its call, the next late in its), so a host whose calls succeed
+#   is refreshed in time.
 # Guarantees: the install command starts only when every queue was drained and every HOLDF was present at the pre-install check; no
-#   ticket is cancelled or killed. NOT guaranteed: that a hold lasts through the install. A host whose heartbeat calls keep failing for
+#   ticket is cancelled or killed. A hold is "held" only while HOLDF is non-empty, the pid in it is alive and the queue lock is busy
+#   (a holder killed without removing HOLDF is a lapse, not a hold). NOT guaranteed: that a hold lasts through the install. A host whose heartbeat calls keep failing for
 #   HB_STALE s loses its hold mid-install; that is reported (WARNING, exit 10), not prevented. If this script dies, no heartbeat call
 #   starts after the death, so every holder exits within SSH_WALL + HB_STALE (+1) s of it.
 #   A drain timeout, a holder that did not take the lock in TAKE_SECS, or a hold gone before the install: every hold is released and
 #   the install command is not run (exit 9).
 # Exit: 0 installed and every hold lasted; 2 usage (before any ssh); 9 refused, the install command not run; 10 installed, but a hold
-#   ended during the install (named on stderr); otherwise the install command's own nonzero status (holds released, lapses named).
+#   ended during the install (named on stderr); 11 the install command ran and exited nonzero (its status is on stderr, `install
+#   command exited <rc>`; the lapse check still runs and names lapses); 129/130/143 HUP/INT/TERM, after every hold is released (bash
+#   runs the trap once the foreground install command ends, so the install is not cut short; the lapse check is skipped on that path).
+#   The script's own codes 0/2/9/10/11 never mean what the install command's status would (its status is never passed through).
 # Environment (seconds): DRAIN_SECS 1800, POLL_SECS 15, TAKE_SECS 120, HB_EVERY 20, HB_STALE 120, SSH_WALL 30, CONNECT_SECS 10,
 #   HOLD_SECS DRAIN_SECS * <hosts> + 900; BB_HOLD_SSH, the ssh program (tests point it at a shim).
 set -euo pipefail
@@ -48,7 +55,7 @@ HOLD_SECS=${HOLD_SECS:-$((DRAIN_SECS * ${#HOSTS[@]} + 900))}
 for v in DRAIN_SECS POLL_SECS TAKE_SECS HB_EVERY HB_STALE SSH_WALL CONNECT_SECS HOLD_SECS; do
   [[ ${!v} =~ ^[1-9][0-9]*$ ]] || usage "$v must be a positive integer, not '${!v}'"
 done
-[ $((HB_EVERY + SSH_WALL)) -lt "$HB_STALE" ] || usage "HB_EVERY + SSH_WALL must be below HB_STALE"
+[ $((HB_EVERY + 2 * SSH_WALL + 1)) -lt "$HB_STALE" ] || usage "HB_EVERY + 2*SSH_WALL + 1 must be below HB_STALE"
 SSH=${BB_HOLD_SSH:-ssh}
 WANTF='~/work/.install-want'; HOLDF='~/work/.install-hold'
 MAIN=$$
@@ -56,7 +63,7 @@ SPAWNED=(); HBPIDS=(); RELEASED=0
 
 rsh() {  # rsh <host> <remote command>: one bounded ssh call
   perl -e 'alarm shift @ARGV; exec @ARGV or exit 127' "$SSH_WALL" "$SSH" -n -o BatchMode=yes -o ConnectTimeout="$CONNECT_SECS" \
-    -o ServerAliveInterval=5 -o ServerAliveCountMax=3 "$1" "$2"
+    -o ServerAliveInterval=5 -o ServerAliveCountMax=3 -o ControlMaster=no -o ControlPath=none "$1" "$2"
 }
 qcount() {  # qcount <host>: running+waiting tickets, or "unreachable"
   rsh "$1" 'find ~/work/queue/running ~/work/queue/waiting -mindepth 1 -maxdepth 1 -type f 2> /dev/null | wc -l | tr -d " "' 2> /dev/null \
@@ -65,7 +72,7 @@ qcount() {  # qcount <host>: running+waiting tickets, or "unreachable"
 hb_loop() {  # hb_loop <host>, in the background: refresh WANT on one host until this script is gone or the loop is killed
   set +e
   while kill -0 "$MAIN" 2> /dev/null; do
-    rsh "$1" "[ -e $WANTF ] && touch $WANTF" > /dev/null || echo "heartbeat: $1: refresh failed (rc $?)" >&2
+    rsh "$1" "[ -e $WANTF ] && touch -c $WANTF" > /dev/null || echo "heartbeat: $1: refresh failed (rc $?)" >&2
     sleep "$HB_EVERY"
   done
 }
@@ -81,7 +88,9 @@ wait_taken() {  # wait_taken <host>: 0 once the holder reports the lock taken, 1
   local end=$((SECONDS + TAKE_SECS))
   until rsh "$1" "[ -s $HOLDF ]" > /dev/null 2>&1; do [ $SECONDS -lt $end ] || return 1; sleep 1; done
 }
-held() { rsh "$1" "[ -s $HOLDF ]" > /dev/null 2>&1; }
+held() {  # held <host>: HOLDF written, its pid alive, and the queue lock busy (a SIGKILLed holder leaves HOLDF behind and frees the lock)
+  rsh "$1" "[ -s $HOLDF ] && kill -0 \"\$(cat $HOLDF)\" && ! flock -n ~/work/queue/.lock true" > /dev/null 2>&1
+}
 release_host() {  # release_host <host>: remove WANT and HOLDF (its heartbeat loop is already stopped)
   rsh "$1" "rm -f $WANTF $HOLDF" > /dev/null \
     || echo "WARNING: could not release $1 (rc $?); its holder exits within ${HB_STALE}s once WANT goes stale" >&2
@@ -106,6 +115,7 @@ spawned() { local h; for h in ${SPAWNED[@]+"${SPAWNED[@]}"}; do [ -z "$h" ] || e
 trap release_all EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+trap 'exit 129' HUP
 for h in "${HOSTS[@]}"; do
   start=$SECONDS
   while :; do
@@ -130,6 +140,6 @@ rc=0; "$@" || rc=$?
 lapsed=
 for h in $(spawned); do held "$h" || { lapsed="$lapsed $h"; echo "WARNING: $h's hold ended before the install finished" >&2; }; done
 release_all; trap - EXIT
-[ "$rc" = 0 ] || { echo "the install command exited $rc; every hold released" >&2; exit "$rc"; }
+[ "$rc" = 0 ] || { echo "install command exited $rc; every hold released" >&2; exit 11; }
 [ -z "$lapsed" ] || { echo "installed, but the hold on${lapsed} ended during the install; every hold released" >&2; exit 10; }
 echo "installed; every hold lasted; every hold released"
