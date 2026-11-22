@@ -293,4 +293,53 @@ class BbZeroTestcaseIT {
 
         assertRefused(run, "fx.ATest=0", "fx.ATest");
     }
+
+    // ---- (d) EXECUTED testcases only: a <testcase> with a <skipped> child does not count ----
+
+    private static final String SKIPPED = "<testsuite><testcase classname='x' name='a'><skipped/></testcase><testcase classname='x' name='b'><skipped/></testcase></testsuite>";
+
+    @Test
+    void aSelectedClassWhoseEveryTestcaseWasSkipped_isRefusedWith19() throws Exception {
+        assertRefused(run(report("m/target/surefire-reports", "org.x.FooTest", SKIPPED), "-Dtest=FooTest"), "FooTest=0(+2 skipped)", "FooTest");
+    }
+
+    @Test
+    void aSelectedClassWithOneExecutedAndOneSkippedTestcase_isRc0() throws Exception {
+        var run = run(report("m/target/surefire-reports", "org.x.FooTest", "<testsuite><testcase classname='x' name='a'/><testcase classname='x' name='b'><skipped/></testcase></testsuite>"),
+                      "-Dtest=FooTest");
+
+        assertThat(run.rc()).as(run.log()).isEqualTo("0");
+        assertThat(run.log()).contains("bb-build: selected testcases: FooTest=1(+1 skipped)\n");
+    }
+
+    // ---- (c) BB_QUEUE=0: bb-build-direct writes .bb/rc from its own detached job, so a counted selector is refused at the call ----
+
+    private BbFixtures.Outcome direct(String... args) throws Exception {
+        BbFixtures.executable(tools.resolve("bb-build-direct"), "#!/bin/sh\necho direct-ran \"$@\"\n");
+        var command = new ArrayList<>(List.of("bash", tools.resolve("bb-build").toString()));
+        command.addAll(List.of(args));
+        return BbFixtures.run(command, Map.of("BB_QUEUE", "0", "BB_OWNER", ME), null, null);
+    }
+
+    @Test
+    void queueOff_aCountedSelector_isRefusedWith19_andNothingRuns() throws Exception {
+        for (var args : List.of(List.of(co.toString(), "-Dtest=FooTest"), List.of(co.toString(), "-Dtest=none", "-Dit.test=none"),
+                                List.of("--since", "abc", co.toString(), "-Dit.test=BbFooIT"))) {
+            var out = direct(args.toArray(String[]::new));
+
+            assertThat(out.rc()).as(args + out.stdout() + out.stderr()).isEqualTo(19);
+            assertThat(out.stderr()).contains("refusing (rc 19): BB_QUEUE=0 cannot count the selected test classes");
+            assertThat(out.stdout()).doesNotContain("direct-ran");
+        }
+    }
+
+    @Test
+    void queueOff_noCountedSelector_runsBbBuildDirectUnchanged() throws Exception {
+        for (var args : List.of(List.of(co.toString(), "-B", "install"), List.of(co.toString(), "-Dtest=none", "-Dit.test=!X"))) {
+            var out = direct(args.toArray(String[]::new));
+
+            assertThat(out.rc()).as(args + out.stderr()).isZero();
+            assertThat(out.stdout()).startsWith("direct-ran " + String.join(" ", args));
+        }
+    }
 }
