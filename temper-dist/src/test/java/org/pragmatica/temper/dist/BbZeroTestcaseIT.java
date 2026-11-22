@@ -22,6 +22,8 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 /// ran 0 testcases is recorded as rc 19, in the ticket's `rc=` and in `.bb/rc`, with the per-class counts in build.log. Real `bb-build __run`
 /// waiters on a pre-written ticket, with a stub maven that writes (or does not write) surefire/failsafe reports into the checkout.
 ///
+/// bb-test launch tickets (BB_LAUNCH) go through the same counter on the ticket's own report dir.
+///
 /// Probe: drop the refusal (the `selected_testcases ... || rc=...` block in the job subshell) -> every row expecting 19 is red.
 class BbZeroTestcaseIT {
     private static final String ME = "zt";
@@ -66,6 +68,28 @@ class BbZeroTestcaseIT {
     }
 
     private Run run(String mvnBody, String... args) throws Exception {
+        return run(Map.of(), mvnBody, args);
+    }
+
+    /// A bb-test launch ticket (BB_LAUNCH, args `__launch m <repeat> <selector>...`): the stub writes its reports into the ticket's own
+    /// `m/target/bb-test-reports/<ticket>/` (as the launcher's TEST-junit-jupiter.xml, classes by `classname`) and verdict_source=java.
+    private Run launch(String reports, String... args) throws Exception {
+        var all = new ArrayList<>(List.of("__launch", "m"));
+        all.addAll(List.of(args));
+        return run(Map.of("BB_LAUNCH", dir.resolve("stubmvn").toString()),
+                   "D=m/target/bb-test-reports/$BB_TICKET; mkdir -p $D; " + reports + "; echo verdict_source=java > .bb/fields.$BB_TICKET",
+                   all.toArray(String[]::new));
+    }
+
+    private static String cases(String... classes) {
+        var body = new StringBuilder("<testsuite>");
+        for (var c : classes) {
+            body.append("<testcase classname='").append(c.replace("$", "\\$")).append("' name='t'/>");
+        }
+        return body.append("</testsuite>").toString();
+    }
+
+    private Run run(Map<String, String> extra, String mvnBody, String... args) throws Exception {
         BbFixtures.executable(dir.resolve("stubmvn"), "#!/bin/sh\n" + mvnBody + "\n");
         var id = System.nanoTime() + "-1";
         Files.writeString(queue.resolve("waiting").resolve(id),
@@ -84,6 +108,7 @@ class BbZeroTestcaseIT {
         env.put("BB_PORT_GROUP", "0");
         env.put("BB_MAX_REACTORS", "5");
         env.put("BB_TEST_MVN", dir.resolve("stubmvn").toString());
+        env.putAll(extra);
         var command = new ArrayList<>(List.of("bash", tools.resolve("bb-build").toString(), "__run", id));
         command.addAll(List.of(args));
         var builder = BbFixtures.processClean(command, env);
@@ -201,5 +226,71 @@ class BbZeroTestcaseIT {
 
         assertThat(run.rc()).as(run.log()).isEqualTo("19");
         assertThat(run.log()).contains("[ERROR] bb-build: refused rc 0 -> 19: the selected-testcase count failed (rc 1)");
+    }
+
+    // ---- (a) `none` only as the exact whole value (CTO ruling 2026-11-22) ----
+
+    @Test
+    void noneAsBothSelectors_selectsNoClass_isRefusedWith19() throws Exception {
+        var run = run(report("m/target/surefire-reports", "org.x.FooTest", TWO), "-Dtest=none", "-Dit.test=none");
+
+        assertThat(run.rc()).as(run.log()).isEqualTo("19");
+        assertThat(run.fileRc()).isEqualTo("19");
+        assertThat(run.log()).contains("[ERROR] bb-build: refused rc 0 -> 19: -Dtest=none and -Dit.test=none select no class\n");
+    }
+
+    @Test
+    void capitalisedNone_isAClassToken_andRanNothing_isRefused() throws Exception {
+        var run = run(report("m/target/failsafe-reports", "org.x.BbFooIT", TWO), "-Dtest=None", "-Dit.test=BbFooIT");
+
+        assertRefused(run, "None=0 BbFooIT=2", "None");
+    }
+
+    @Test
+    void noneInsideACommaList_isAClassToken_andRanNothing_isRefused() throws Exception {
+        var run = run(report("m/target/surefire-reports", "org.x.FooTest", TWO), "-Dtest=none,FooTest");
+
+        assertRefused(run, "none=0 FooTest=2", "none");
+    }
+
+    @Test
+    void itTestNone_withACountedTestSelector_isRc0() throws Exception {
+        var run = run(report("m/target/surefire-reports", "org.x.FooTest", TWO), "-Dtest=FooTest", "-Dit.test=none");
+
+        assertThat(run.rc()).as(run.log()).isEqualTo("0");
+        assertThat(run.log()).contains("bb-build: selected testcases: FooTest=2\n");
+    }
+
+    // ---- (b) bb-test launch tickets go through the same counter (CTO ruling 2026-11-22) ----
+
+    @Test
+    void aLaunchOfTwoClasses_oneRanNothing_isRefusedWith19() throws Exception {
+        var run = launch(report("$D", "junit-jupiter", cases("fx.ATest", "fx.ATest")), "1", "fx.ATest", "fx.BTest#m");
+
+        assertRefused(run, "fx.ATest=2 fx.BTest#m=0", "fx.BTest#m");
+    }
+
+    @Test
+    void aLaunchOfTwoClasses_bothRan_isRc0() throws Exception {
+        var run = launch(report("$D", "junit-jupiter", cases("fx.ATest", "fx.BTest", "fx.BTest$Inner")), "1", "fx.ATest", "fx.BTest");
+
+        assertThat(run.rc()).as(run.log()).isEqualTo("0");
+        assertThat(run.fileRc()).isEqualTo("0");
+        assertThat(run.log()).contains("bb-build: selected testcases: fx.ATest=1 fx.BTest=2\n").doesNotContain("refused");
+    }
+
+    @Test
+    void aRepeatedLaunch_whoseSecondRunRanNothing_isRefusedNamingTheRun() throws Exception {
+        var run = launch(report("$D/run1", "junit-jupiter", cases("fx.ATest")) + " && mkdir -p $D/run2", "2", "fx.ATest");
+
+        assertRefused(run, "run1:fx.ATest=1 run2:fx.ATest=0", "run2:fx.ATest");
+    }
+
+    @Test
+    void aLaunchCountsOnlyItsOwnTicketsReports() throws Exception {
+        var run = launch(report("m/target/bb-test-reports/other-ticket", "junit-jupiter", cases("fx.ATest"))
+                         + " && " + report("m/target/surefire-reports", "fx.ATest", TWO), "1", "fx.ATest");
+
+        assertRefused(run, "fx.ATest=0", "fx.ATest");
     }
 }

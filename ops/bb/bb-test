@@ -5,8 +5,9 @@
 # -Daether.requireDocker=true. The launch is ONE queue ticket (cap, port group, netns slot, memory floor, load gate as for a build),
 # enqueued through bb-build (BB_LAUNCH makes the waiter run this script's __launch mode instead of maven), and NEVER deduped.
 # VERDICT = the java exit status (the ticket's rc, read with bb-wait/bb-await as for a build), unless the resolved junit check below refuses
-# the run (rc 15, which replaces it). --fail-if-no-tests: a selection that
-# matches nothing is red (java exit 2). Reports: <module>/target/bb-test-reports/<ticket>/ (with --repeat N>1: .../run<i>/), the
+# the run (rc 15, which replaces it). ZERO TESTCASES (#86): java's exit 0 is rc 19 when any selector ran 0 testcases (in any run),
+# counted by bb-build's one counter (bb-build: ZERO-TESTCASE REFUSAL) on this ticket's reports; java runs without --fail-if-no-tests, so an
+# empty selection is that counter's 19, never a second rule (java exit 2). Reports: <module>/target/bb-test-reports/<ticket>/ (with --repeat N>1: .../run<i>/), the
 # launcher's legacy XML, never surefire-reports; java's console and a count line (bb-testcount) per run are appended to .bb/build.log
 # after the last run, once the resolved junit check passed.
 # STALE-JAR GUARD (rc 12, nothing queued; run again at launch, after any queue wait): bb-cp-record check. BB_STALE_OK (any value) is
@@ -254,7 +255,7 @@ if [ "${1:-}" = __launch ]; then
     D=$BASE; [ "$REPEAT" = 1 ] || D=$D/run$i
     mkdir -p "$D"
     r=0
-    bounded "$JAVA_T" "$CO/$MOD" "$OUT" "$JAVA" ${JVM[@]+"${JVM[@]}"} -jar "$LAUNCHER_JAR" execute --disable-banner --fail-if-no-tests \
+    bounded "$JAVA_T" "$CO/$MOD" "$OUT" "$JAVA" ${JVM[@]+"${JVM[@]}"} -jar "$LAUNCHER_JAR" execute --disable-banner \
         --class-path "$CP" --reports-dir "$D" "${SELS[@]}" || r=$?
     JT=$TIMED_OUT   # bounded() below resets TIMED_OUT
     RD=$(mktemp "$CO/.bb/bb-test-read.XXXXXX")   # a fresh file: the count is bounded too (BOUNDS); fail closed: an expiry prints "count timed out" and REFUSES, never a count, never a pass

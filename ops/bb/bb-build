@@ -70,15 +70,20 @@
 # (bb-jbct-bootstrap holds the rules and its exit codes: failure -> the ticket's rc is the bootstrap's and the main maven does not run;
 # 82-87 are refusals; 88 = the helper itself is missing or not executable on a jbct run, refused before any maven). build.log carries `bootstrap: jbct plugin <ver> installed into .m2-local|present|FAILED rc=<n>`; the ticket carries
 # jbct_bootstrap=<ver> after an install. The jbct-run test lives here (wants_jbct) and only here; any other run never execs or even looks for the helper and is unchanged. Not part of the dedup key.
-# ZERO-TESTCASE REFUSAL (#86, CTO ruling 2026-11-22): when the args select classes (-Dtest=... / -Dit.test=..., the last of each, comma-separated
-# tokens; `!X` exclusions and the token `none` select nothing), a job whose maven ended 0 counts, PER token, the <testcase> elements of the
-# TEST-<fqcn>.xml files under any <module>/target/{surefire,failsafe}-reports (nothing else: fixture XML under src/ never counts) whose mtime
-# is newer than .bb/run.marker. A token matches a report by its class part (before '#'): a bare name or glob against the simple name
-# (`Bb*IT` is ONE token and must be > 0), a dotted or slashed name or glob against the package path, %regex[...] against the class path.
-# Any token at 0 turns rc 0 into 19 (.bb/rc and the ticket's rc=; no bb-cp-record); a count that cannot be made (timeout 120 s, missing
-# marker) is 19 too, never a pass. build.log gets `bb-build: selected testcases: <token>=<n> ...` and, on refusal, an `[ERROR] bb-build:
-# refused rc 0 -> 19 ...` line naming the empty tokens. A non-zero maven rc is kept as it is; BB_LAUNCH (bb-test) tickets are not counted
-# here (bb-test counts its own reports dir). Limits: a %regex containing ',' is split like any value; a bare name does not match a nested class.
+# ZERO-TESTCASE REFUSAL (#86, CTO rulings 2026-11-22): ONE counter (selected_testcases) for EVERY ticket whose job ended 0, a build's and a
+# bb-test launch's (BB_LAUNCH) alike. Selectors: for a build, the last -Dtest=... and the last -Dit.test=..., comma-separated tokens (`!X`
+# exclusions select nothing); `none` selects nothing ONLY as a property's exact whole value (case-sensitive: `None` and `none,X` are class
+# tokens like any other), and -Dtest=none with -Dit.test=none selects no class at all, which is 19 too. For a launch, every Class[#method]
+# selector of the ticket. Reports: for a build, the TEST-<fqcn>.xml files under any <module>/target/{surefire,failsafe}-reports (nothing
+# else: fixture XML under src/ never counts); for a launch, the TEST-*.xml of the ticket's own <module>/target/bb-test-reports/<ticket>/
+# (with --repeat N>1, each run<i>/ is a run of its own, and every selector must be > 0 in EVERY run). Only reports whose mtime is newer
+# than .bb/run.marker count. A <testcase> belongs to the class its file names (TEST-<fqcn>.xml), else (the launcher's TEST-junit-jupiter.xml)
+# to its classname; a nested Outer$Inner counts for Outer too. A token matches by its class part (before '#'): a bare name or glob against
+# the simple name (`Bb*IT` is ONE token and must be > 0), a dotted or slashed name or glob against the package path, %regex[...] against the
+# class path. Any token at 0 turns rc 0 into 19 (.bb/rc and the ticket's rc=; no bb-cp-record); a count that cannot be made (timeout 120 s,
+# missing marker) is 19 too, never a pass. build.log gets `bb-build: selected testcases: [run<i>:]<token>=<n> ...` and, on refusal, an
+# `[ERROR] bb-build: refused rc 0 -> 19 ...` line naming the empty tokens. A non-zero job rc is kept as it is. Limit: a %regex containing ','
+# is split like any value.
 set -euo pipefail
 SELF=$(readlink -f "$0")
 # --help / -h as the only argument: print this header (the usage and the rules above) to stdout, exit 0, touch nothing
@@ -95,43 +100,68 @@ wants_jbct() {  # the ONE copy of the jbct-run test (the helper trusts it): a jb
   done
   return $w
 }
-selected_testcases() {  # selected_testcases <co> <marker> <mvn args...>: ZERO-TESTCASE REFUSAL (header). Prints the per-class line; 0 = no selector or every selector >0, 19 = refused
+selected_testcases() {  # selected_testcases <co> <marker> mvn|launch:<ticket> <job args...>: ZERO-TESTCASE REFUSAL (header), the ONE counter of build and bb-test tickets. Prints the per-class line; 0 = no selector or every selector >0, 19 = refused
   timeout -k 5 120 python3 - "$@" <<'PY'
 import fnmatch, os, re, sys, xml.etree.ElementTree as ET
-co, marker, args = sys.argv[1], sys.argv[2], sys.argv[3:]
-values = {}
-for a in args:                                   # maven keeps the last -D of a property
-    for prop in ('test', 'it.test'):
-        if a.startswith('-D' + prop + '='):
-            values[prop] = a[len(prop) + 3:]
+co, marker, kind, args = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4:]
+JAVA_NAME = re.compile(r'[A-Za-z_$][\w$]*(\.[A-Za-z_$][\w$]*)*\Z')
+none_only = False
 tokens = []
-for v in values.values():
-    for t in v.split(','):
-        t = t.strip()
-        if t and not t.startswith('!') and t != 'none' and t not in tokens:
+if kind == 'mvn':                                # selectors: the last -Dtest= / -Dit.test= (maven keeps the last -D of a property)
+    values = {}
+    for a in args:
+        for prop in ('test', 'it.test'):
+            if a.startswith('-D' + prop + '='):
+                values[prop] = a[len(prop) + 3:]
+    for v in values.values():
+        if v == 'none':                          # `none` selects nothing only as the exact whole value; `None`, `none,X` are class names
+            continue
+        for t in v.split(','):
+            t = t.strip()
+            if t and not t.startswith('!') and t not in tokens:
+                tokens.append(t)
+    none_only = values.get('test') == 'none' and values.get('it.test') == 'none'
+else:                                            # launch:<ticket>, args `__launch <module> <repeat> <Class[#method]>...`: every selector
+    for t in args[3:]:
+        if not t.startswith('-') and t not in tokens:
             tokens.append(t)
 if not tokens:
+    if none_only:
+        print('[ERROR] bb-build: refused rc 0 -> 19: -Dtest=none and -Dit.test=none select no class')
+        sys.exit(19)
     sys.exit(0)
 since = os.stat(marker).st_mtime_ns
-reports = []                                     # (fqcn, testcases) of TEST-*.xml newer than the marker, only in */target/{surefire,failsafe}-reports
-base = co.rstrip('/').count('/')
-for root, dirs, files in os.walk(co):
-    name = os.path.basename(root)
-    if name in ('surefire-reports', 'failsafe-reports') and os.path.basename(os.path.dirname(root)) == 'target':
-        dirs[:] = []
-        for f in files:
-            p = os.path.join(root, f)
-            if f.startswith('TEST-') and f.endswith('.xml') and os.stat(p).st_mtime_ns > since:
-                try:
-                    n = sum(1 for _ in ET.parse(p).getroot().iter('testcase'))
-                except Exception:
-                    n = 0; print('bb-build: selected testcases: unparseable report %s counts 0' % p)
-                reports.append((f[5:-4], n))
-        continue
-    dirs[:] = [d for d in dirs if d in ('surefire-reports', 'failsafe-reports')] if name == 'target' else \
-              [d for d in dirs if d not in ('.git', '.m2-local', '.bb', 'node_modules', 'src')]
-    if root.rstrip('/').count('/') - base >= 8:
-        dirs[:] = []
+def cases(p):                                    # (class, skipped) per <testcase> of one report newer than the marker
+    if not (os.path.isfile(p) and os.stat(p).st_mtime_ns > since):
+        return []
+    try:
+        root = ET.parse(p).getroot()
+    except Exception:
+        print('bb-build: selected testcases: unparseable report %s counts 0' % p)
+        return []
+    name = os.path.basename(p)[5:-4]             # TEST-<fqcn>.xml (surefire/failsafe); else (the launcher's TEST-junit-jupiter.xml) the classname
+    return [(name if JAVA_NAME.match(name) else (c.get('classname') or ''), any(x.tag == 'skipped' for x in c)) for c in root.iter('testcase')]
+def reports_in(d):
+    return [c for f in (sorted(os.listdir(d)) if os.path.isdir(d) else []) if f.startswith('TEST-') and f.endswith('.xml')
+            for c in cases(os.path.join(d, f))]
+runs = []                                        # (label, cases) of each run whose every selector must be > 0
+if kind == 'mvn':                                # only */target/{surefire,failsafe}-reports: fixture XML under src/ never counts
+    found = []
+    base = co.rstrip('/').count('/')
+    for root, dirs, files in os.walk(co):
+        name = os.path.basename(root)
+        if name in ('surefire-reports', 'failsafe-reports') and os.path.basename(os.path.dirname(root)) == 'target':
+            dirs[:] = []
+            found.extend(reports_in(root))
+            continue
+        dirs[:] = [d for d in dirs if d in ('surefire-reports', 'failsafe-reports')] if name == 'target' else \
+                  [d for d in dirs if d not in ('.git', '.m2-local', '.bb', 'node_modules', 'src')]
+        if root.rstrip('/').count('/') - base >= 8:
+            dirs[:] = []
+    runs.append(('', found))
+else:                                            # the ticket's own report dir, one run dir per REPEAT (bb-test: Reports)
+    rep, d = int(args[2]), os.path.join(co, args[1], 'target', 'bb-test-reports', kind.split(':', 1)[1])
+    runs = [('', reports_in(d))] if rep == 1 else [('run%d:' % i, reports_in(os.path.join(d, 'run%d' % i))) for i in range(1, rep + 1)]
 def matches(token, fqcn):
     cls = token.split('#', 1)[0]
     path = fqcn.replace('.', '/')
@@ -149,7 +179,9 @@ def matches(token, fqcn):
         pat = cls.replace('.', '/')
         return fnmatch.fnmatchcase(path, pat) or fnmatch.fnmatchcase(path, '*/' + pat)
     return fnmatch.fnmatchcase(fqcn.rsplit('.', 1)[-1], cls)
-counts = [(t, sum(n for fq, n in reports if matches(t, fq))) for t in tokens]
+def hit(token, fqcn):                            # a nested Outer$Inner counts for its Outer
+    return bool(fqcn) and (matches(token, fqcn) or ('$' in fqcn and matches(token, fqcn.split('$', 1)[0])))
+counts = [(label + t, sum(1 for fq, skipped in found if hit(t, fq))) for label, found in runs for t in tokens]
 print('bb-build: selected testcases: ' + ' '.join('%s=%d' % c for c in counts))
 empty = [t for t, n in counts if n == 0]
 if empty:
@@ -215,8 +247,8 @@ if [ "${1:-}" = __run ]; then
       env -u HCLOUD_TOKEN BB_TICKET="$ID" JAVA_HOME=/usr/lib/jvm/java-25-openjdk-amd64 "$MVN" "$@" ${RDF[@]+"${RDF[@]}"} >> "$B/build.log" 2>&1
     fi
     rc=$?
-    if [ "$rc" = 0 ] && [ -z "${BB_LAUNCH:-}" ]; then   # ZERO-TESTCASE REFUSAL (header, #86): a selected class that ran nothing is never rc 0
-      selected_testcases "$CO" "$B/run.marker" "$@" >> "$B/build.log" 2>&1 \
+    if [ "$rc" = 0 ]; then   # ZERO-TESTCASE REFUSAL (header, #86): a selected class that ran nothing is never rc 0, a build's or a bb-test launch's
+      selected_testcases "$CO" "$B/run.marker" "$([ -z "${BB_LAUNCH:-}" ] && echo mvn || echo "launch:$ID")" "$@" >> "$B/build.log" 2>&1 \
         || { rc=$?; [ "$rc" = 19 ] || { echo "[ERROR] bb-build: refused rc 0 -> 19: the selected-testcase count failed (rc $rc)" >> "$B/build.log"; rc=19; }; }
     fi
     date +%s > "$B/end"
