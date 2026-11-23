@@ -134,7 +134,7 @@ expected_of() {  # expected_of <file>: the md5 a place must hold
 drift=0; down=0
 
 # ---- the repo's own pins: a repo file off its pin is drift of the repo itself
-pin_of() { sed -n "s/^readonly $1=\([0-9a-f]\{32\}\)\$/\1/{p;q;}" "$HERE/install-bb-fields.sh"; }   # no `| head`: head exits at line 1, sed then dies of SIGPIPE and pipefail returns 141 (#102)
+pin_of() { sed -n "/^readonly $1=[0-9a-f]\{32\}\$/{s/^[^=]*=//;p;q;}" "$HERE/install-bb-fields.sh"; }   # no `| head`: head exits at line 1, sed then dies of SIGPIPE and pipefail returns 141 (#102)
 for pair in bb-build:BB_BUILD_NEW bb-tickets:BB_TICKETS_NEW bb-queue-lib.sh:BB_LIB_NEW bb-queue:BB_QUEUE_NEW bb-hold:BB_HOLD_NEW \
             bb-wait:BB_WAIT_NEW bb-await:BB_AWAIT_NEW bb-netns-run:BB_NETNS_NEW bb-portgroup.py:BB_PORTGROUP_NEW bb-mutate:BB_MUTATE_NEW bb-jbct-bootstrap:BB_JBCTBOOT_NEW \
             bb-cp-record:BB_CPRECORD_NEW bb-test:BB_TEST_NEW bb-testcount:BB_TESTCOUNT_NEW bb-result:BB_RESULT_NEW; do
