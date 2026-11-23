@@ -27,7 +27,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 ///  - exit 0 although a mutant is NOT-RUN -> [#everyMutantNotRun_exitsFive], [#anEmptyReport_isNotRun_neverSurvived]
 ///  - drop the single re-run of a NOT-RUN batch-mate -> [#aZeroFailureBatch_withAnEmptyReport_isRerunSingly]
 ///  - #97: `fails` back to `len(fails) > 1 and ...` in the singles condition -> [#aBatchWithAFailure_isRerunSinglyForEveryMember],
-///    [#aBatchMateBreakingAnotherMutantsTest_isNeverCreditedRed], [#aDownstreamMutant_isCreditedOnlyBySoloRuns]
+///    [#aFailureUnderRcZero_isStillNotCreditedAsABatch], [#aBatchMateBreakingAnotherMutantsTest_isNeverCreditedRed], [#aDownstreamMutant_isCreditedOnlyBySoloRuns]
 ///  - #97: `compatible()` without the same-file refusal -> [#mutantsOfOneFile_areNeverBatched]
 ///  - #97: a constant `credited` -> [#aZeroFailureBatch_isCreditedAsABatch], [#aLoneMutant_isRunWithoutFae]
 ///  - drop the expected-class test in `ran` -> [#aReportOfAnotherClass_isNotRun_neverSurvived]
@@ -156,6 +156,17 @@ class BbMutateIT {
         assertThat(out.rc()).isZero();
         assertThat(builds()).containsExactly("[] false", "[A] true", "[A] false", "[] false");
         assertThat(out.md()).doesNotContain("failures none of which were expected");
+    }
+
+    /// A failing testcase under rc 0 (testFailureIgnore) is a failure all the same: the batch is not credited, every member runs solo.
+    @Test
+    void aFailureUnderRcZero_isStillNotCreditedAsABatch() throws Exception {
+        var out = batch(modules(null).replace("{\"modules\"", "{\"ignoreFailures\":true,\"modules\""),
+                        mutation("mA", "A", "ATest", "MUT"),
+                        mutation("mC", "C", "CTest", "fine"));
+
+        assertThat(out.credited()).containsEntry("mA", "solo").containsEntry("mC", "solo");
+        assertThat(builds()).containsExactly("[] false", "[A] true", "[A] false", "[] false");
     }
 
     /// #97 false RED: mC's change (file C) breaks ATest#t1, a test of mA's expected class; mA's own change is inert. The batch has exactly

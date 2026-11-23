@@ -4,6 +4,7 @@
 # testcase fails unless the module has a fault: zero (suite for the class, no testcases), otherclass (suite of another class),
 # stale (writes nothing), inert (mutated, but its tests pass). A module with "breaks":[names] ALSO fails its first testcase when any
 # listed module is mutated (a change in another file breaking this module's test: the #97 cross-file shape).
+# Top-level "ignoreFailures":true makes rc 0 although testcases fail (testFailureIgnore).
 # A module with a failed or skipped dependency is skipped; without -fae every module after a failure is.
 import json, os, sys, time
 
@@ -44,5 +45,5 @@ for m in sc["modules"]:
         bad.add(n)
         rc = 1
 open(b + "/end", "w").write(str(int(time.time())) + "\n")
-open(b + "/rc", "w").write(f"{rc}\n")
+open(b + "/rc", "w").write(f"{0 if sc.get('ignoreFailures') else rc}\n")
 print("ticket=T1")

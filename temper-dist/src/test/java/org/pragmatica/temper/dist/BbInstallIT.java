@@ -240,6 +240,7 @@ class BbInstallIT {
         assertThat(pin("BB_QUEUE_PRE90")).isEqualTo(BbFixtures.md5(prev("bb-queue.pre90")));
         assertThat(pin("BB_WAIT_PRE90")).isEqualTo(BbFixtures.md5(prev("bb-wait.pre90")));
         assertThat(pin("BB_AWAIT_PRE90")).isEqualTo(BbFixtures.md5(prev("bb-await.pre90")));
+        assertThat(pin("BB_MUTATE_PRE97")).isEqualTo(BbFixtures.md5(prev("bb-mutate.pre97")));
         assertThat(pin("BB_RESULT_PRE80")).isEqualTo(BbFixtures.md5(prev("bb-result.pre80")));
         assertThat(pin("BB_WAIT_PRE80")).isEqualTo(BbFixtures.md5(prev("bb-wait.pre80")));
         assertThat(pin("BB_BUILD_PRE76")).isEqualTo(BbFixtures.md5(prev("bb-build.pre76")));
@@ -267,7 +268,9 @@ class BbInstallIT {
 
         assertThat(refused.rc()).isEqualTo(65);
         assertThat(refused.stdout().trim()).isEqualTo("refused builder@h1 bb-test installed=" + BbFixtures.md5("a stranger's bb-test\n".getBytes())
-                                                     + " expected=" + pin("BB_TEST_PRE76") + "|" + pin("BB_TEST_PRE86") + "|" + pin("BB_TEST_NEW"));
+                                                     + " expected=" + pin("BB_TEST_PRE76")
+                                                     + "|" + pin("BB_TEST_PRE86")
+                                                     + "|" + pin("BB_TEST_NEW"));
         assertThat(listing(tools)).isEqualTo(before);
     }
 
@@ -755,8 +758,10 @@ class BbInstallIT {
             var pinName = "BB_BUILD_PRE" + old.substring(3).toUpperCase();
 
             assertThat(run.rc()).as(old + ": " + run.stdout() + run.stderr()).isZero();
-            assertThat(run.stdout().lines().toList()).contains("installed builder@h-" + old + " bb-result before=absent after=" + pin("BB_RESULT_NEW"),
-                                                               "installed builder@h-" + old + " bb-build before=" + pin(pinName)
+            assertThat(run.stdout().lines().toList()).contains("installed builder@h-" + old
+                                                              + " bb-result before=absent after=" + pin("BB_RESULT_NEW"),
+                                                               "installed builder@h-" + old
+                                                              + " bb-build before=" + pin(pinName)
                                                               + " after=" + pin("BB_BUILD_NEW"));
             assertThat(tools.resolve("bb-build.bak-" + pin(pinName))).hasBinaryContent(prev("bb-build." + old));
             assertThat(PosixFilePermissions.toString(Files.getPosixFilePermissions(tools.resolve("bb-result")))).isEqualTo("rwxr-xr-x");
@@ -831,18 +836,22 @@ class BbInstallIT {
 
         assertThat(files.find()).as("FILES=(...) in install-bb-fields.sh").isTrue();
         assertThat(live.keySet()).as("bb/" + resource + " names every FILES entry, and only those")
-                                 .containsExactlyInAnyOrder(files.group(1).trim().split("\\s+"));
-
+                  .containsExactlyInAnyOrder(files.group(1).trim().split("\\s+"));
         var candidates = new HashMap<String, byte[]>();
 
         try (Stream<Path> walk = Files.list(Path.of(BbInstallIT.class.getResource("/bb").toURI()))) {
-            for (var path : walk.filter(p -> p.getFileName().toString().endsWith(".prev")).toList()) {
+            for (var path : walk.filter(p -> p.getFileName()
+                                              .toString()
+                                              .endsWith(".prev")).toList()) {
                 var bytes = Files.readAllBytes(path);
+
                 candidates.putIfAbsent(BbFixtures.md5(bytes), bytes);
             }
         }
+
         for (var f : live.keySet()) {
             var bytes = Files.readAllBytes(OPS_BB.resolve(f));
+
             candidates.put(BbFixtures.md5(bytes), bytes);
         }
 
@@ -852,8 +861,13 @@ class BbInstallIT {
             if (e.getValue().equals("absent")) {
                 continue;
             }
-            assertThat(candidates).as("live " + e.getKey() + " " + e.getValue() + " is the repo file or a vendored .prev").containsKey(e.getValue());
-            Files.write(tools.resolve(e.getKey()), candidates.get(e.getValue()));
+
+            assertThat(candidates).as("live " + e.getKey()
+                                     + " " + e.getValue()
+                                     + " is the repo file or a vendored .prev")
+                      .containsKey(e.getValue());
+            Files.write(tools.resolve(e.getKey()),
+                        candidates.get(e.getValue()));
         }
 
         var run = install("builder@h-live");
@@ -907,7 +921,7 @@ class BbInstallIT {
     void bbModules_isInstalledBeforeBbBuild_andNamedAsPhaseOneAcceptsAbsentOrNew() throws Exception {
         host("h1");
         var run = install("builder@h1");
-        var order = run.stdout().lines().map(l -> l.split(" ")[2]).toList();
+        var order = run.stdout().lines().map(l -> l.split(" ") [2]).toList();
 
         assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
         assertThat(order).contains("bb-modules.py", "bb-build");
@@ -923,8 +937,7 @@ class BbInstallIT {
         var run = install("builder@h1");
 
         assertThat(run.rc()).as(run.stdout() + run.stderr()).isEqualTo(65);
-        assertThat(run.stdout().lines().toList()).containsExactly("refused builder@h1 bb-modules.py installed="
-                                                                 + BbFixtures.md5("a diverged modules helper\n".getBytes())
+        assertThat(run.stdout().lines().toList()).containsExactly("refused builder@h1 bb-modules.py installed=" + BbFixtures.md5("a diverged modules helper\n".getBytes())
                                                                  + " expected=" + pin("BB_MODULES_NEW"));
         assertThat(listing(tools)).isEqualTo(before);
     }
@@ -934,28 +947,52 @@ class BbInstallIT {
     /// Mutation: drop BB_BUILD_PRESINCE from accepted_of -> the live host is refused, exit 65, red.
     @Test
     void aHostHoldingTheLive20261121Files_isAcceptedForEveryFile() throws Exception {
-        var live = java.util.Map.of("bb-build", "24183c7d359b4030faeef894bbe4ba52",
-                                    "bb-queue-lib.sh", "2569b8af2cf8acc063024e553be66a93",
-                                    "bb-queue", "9cb677b671867eecdf90c9514bbd0732",
-                                    "bb-tickets", "8d34d9dc9ab2a4f867af863ec21be77e",
-                                    "bb-jbct-bootstrap", "3e5396ecee48b99949456cf805df1e60",
-                                    "bb-result", "2b99dd5c414175c4fd40a9836da76298",
-                                    "bb-portgroup.py", "884caf3cf37b12cf5cf1d97e96f76a4c");
+        var live = java.util.Map.of("bb-build",
+                                    "24183c7d359b4030faeef894bbe4ba52",
+                                    "bb-queue-lib.sh",
+                                    "2569b8af2cf8acc063024e553be66a93",
+                                    "bb-queue",
+                                    "9cb677b671867eecdf90c9514bbd0732",
+                                    "bb-tickets",
+                                    "8d34d9dc9ab2a4f867af863ec21be77e",
+                                    "bb-jbct-bootstrap",
+                                    "3e5396ecee48b99949456cf805df1e60",
+                                    "bb-result",
+                                    "2b99dd5c414175c4fd40a9836da76298",
+                                    "bb-portgroup.py",
+                                    "884caf3cf37b12cf5cf1d97e96f76a4c");
         var tools = host("h1");
 
         assertThat(install("builder@h1").rc()).isZero();
         Files.write(tools.resolve("bb-build"), prev("bb-build.presince"));
         Files.write(tools.resolve("bb-portgroup.py"), prev("bb-portgroup.py.presince"));
-        Files.write(tools.resolve("bb-result"), prev("bb-result.precp"));                // #70 changes these three too:
-        Files.write(tools.resolve("bb-queue-lib.sh"), prev("bb-queue-lib.sh.preledger")); // the host holds their live versions
+        Files.write(tools.resolve("bb-result"), prev("bb-result.precp"));  // #70 changes these three too:
+        Files.write(tools.resolve("bb-queue-lib.sh"), prev("bb-queue-lib.sh.preledger"));  // the host holds their live versions
         Files.write(tools.resolve("bb-queue"), prev("bb-queue.preledger"));
         for (var e : live.entrySet()) {
-            assertThat(BbFixtures.md5(Files.readAllBytes(tools.resolve(e.getKey())))).as(e.getKey()).isEqualTo(e.getValue());
+            assertThat(BbFixtures.md5(Files.readAllBytes(tools.resolve(e.getKey())))).as(e.getKey())
+                      .isEqualTo(e.getValue());
         }
+
         var run = install("builder@h1");
 
         assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
         assertThat(run.stdout()).doesNotContain("refused");
+    }
+
+    /// The bb-mutate before issue #97 (BB_MUTATE_PRE97: a batch credited from a build with failures) is an accepted source and is replaced, backed up under its md5.
+    @Test
+    void aHostRunningTheBbMutateBefore97_isUpdated() throws Exception {
+        var tools = host("h1");
+
+        Files.write(tools.resolve("bb-mutate"), prev("bb-mutate.pre97"));
+        var run = install("builder@h1");
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        assertThat(run.stdout()).contains("installed builder@h1 bb-mutate before=" + pin("BB_MUTATE_PRE97")
+                                         + " after=" + pin("BB_MUTATE_NEW"));
+        assertThat(tools.resolve("bb-mutate")).hasBinaryContent(Files.readAllBytes(OPS_BB.resolve("bb-mutate")));
+        assertThat(tools.resolve("bb-mutate.bak-" + pin("BB_MUTATE_PRE97"))).hasBinaryContent(prev("bb-mutate.pre97"));
     }
 
     /// A host at main's install set after #70 (bb-build dafd74a3, bb-queue 6d96fab8, bb-queue-lib.sh e607b50f, bb-result f4505867, bb-wait d742e51d,
@@ -987,14 +1024,17 @@ class BbInstallIT {
         Files.write(tools.resolve("bb-hold"), prev("bb-hold.pre90"));
         Files.write(tools.resolve("bb-await"), prev("bb-await.pre90"));
         for (var e : live.entrySet()) {
-            assertThat(BbFixtures.md5(Files.readAllBytes(tools.resolve(e.getKey())))).as(e.getKey()).isEqualTo(e.getValue());
+            assertThat(BbFixtures.md5(Files.readAllBytes(tools.resolve(e.getKey())))).as(e.getKey())
+                      .isEqualTo(e.getValue());
         }
+
         var run = install("builder@h1");
 
         assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
         assertThat(run.stdout()).doesNotContain("refused");
         for (var f : List.of("bb-build", "bb-queue", "bb-queue-lib.sh", "bb-result", "bb-wait", "bb-test")) {
-            assertThat(BbFixtures.md5(Files.readAllBytes(tools.resolve(f)))).as(f).isEqualTo(BbFixtures.md5(OPS_BB.resolve(f)));
+            assertThat(BbFixtures.md5(Files.readAllBytes(tools.resolve(f)))).as(f)
+                      .isEqualTo(BbFixtures.md5(OPS_BB.resolve(f)));
         }
     }
 
@@ -1016,10 +1056,13 @@ class BbInstallIT {
 
         assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
         assertThat(run.stdout()).doesNotContain("refused")
-                                .contains("installed builder@h1 bb-build before=" + pin("BB_BUILD_PRE76") + " after=" + pin("BB_BUILD_NEW"),
-                                          "installed builder@h1 bb-test before=" + pin("BB_TEST_PRE76") + " after=" + pin("BB_TEST_NEW"));
+                  .contains("installed builder@h1 bb-build before=" + pin("BB_BUILD_PRE76")
+                           + " after=" + pin("BB_BUILD_NEW"),
+                            "installed builder@h1 bb-test before=" + pin("BB_TEST_PRE76")
+                           + " after=" + pin("BB_TEST_NEW"));
         for (var f : List.of("bb-build", "bb-test", "bb-netns-run")) {
-            assertThat(BbFixtures.md5(Files.readAllBytes(tools.resolve(f)))).as(f).isEqualTo(BbFixtures.md5(OPS_BB.resolve(f)));
+            assertThat(BbFixtures.md5(Files.readAllBytes(tools.resolve(f)))).as(f)
+                      .isEqualTo(BbFixtures.md5(OPS_BB.resolve(f)));
         }
     }
 
@@ -1039,8 +1082,10 @@ class BbInstallIT {
 
         assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
         assertThat(run.stdout()).doesNotContain("refused")
-                                .contains("installed builder@h1 bb-build before=" + pin("BB_BUILD_PRE86") + " after=" + pin("BB_BUILD_NEW"),
-                                          "installed builder@h1 bb-test before=" + pin("BB_TEST_PRE86") + " after=" + pin("BB_TEST_NEW"));
+                  .contains("installed builder@h1 bb-build before=" + pin("BB_BUILD_PRE86")
+                           + " after=" + pin("BB_BUILD_NEW"),
+                            "installed builder@h1 bb-test before=" + pin("BB_TEST_PRE86")
+                           + " after=" + pin("BB_TEST_NEW"));
         assertThat(BbFixtures.md5(Files.readAllBytes(tools.resolve("bb-build")))).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-build")));
         assertThat(BbFixtures.md5(Files.readAllBytes(tools.resolve("bb-test")))).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-test")));
     }
@@ -1061,8 +1106,10 @@ class BbInstallIT {
 
         assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
         assertThat(run.stdout()).doesNotContain("refused")
-                                .contains("installed builder@h1 bb-build before=" + pin("BB_BUILD_PRE91") + " after=" + pin("BB_BUILD_NEW"),
-                                          "installed builder@h1 bb-test before=" + pin("BB_TEST_PRE86") + " after=" + pin("BB_TEST_NEW"));
+                  .contains("installed builder@h1 bb-build before=" + pin("BB_BUILD_PRE91")
+                           + " after=" + pin("BB_BUILD_NEW"),
+                            "installed builder@h1 bb-test before=" + pin("BB_TEST_PRE86")
+                           + " after=" + pin("BB_TEST_NEW"));
         assertThat(BbFixtures.md5(Files.readAllBytes(tools.resolve("bb-build")))).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-build")));
         assertThat(BbFixtures.md5(Files.readAllBytes(tools.resolve("bb-test")))).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-test")));
     }
@@ -1072,12 +1119,18 @@ class BbInstallIT {
     /// Mutation: drop BB_BUILD_PRESESSION from accepted_of -> the post-install host is refused, red.
     @Test
     void aHostAfterTheInstallOf79_isAcceptedForEveryFile() throws Exception {
-        var live = java.util.Map.of("bb-build", "2810f93c875ad9a106c2cda284babb81",
-                                    "bb-queue-lib.sh", "2569b8af2cf8acc063024e553be66a93",
-                                    "bb-queue", "9cb677b671867eecdf90c9514bbd0732",
-                                    "bb-result", "2b99dd5c414175c4fd40a9836da76298",
-                                    "bb-portgroup.py", "8ad1c6dbe2044f984814c2b19645c48b",
-                                    "bb-modules.py", "9c668381f2a161c24a9b5d55cccc4945");
+        var live = java.util.Map.of("bb-build",
+                                    "2810f93c875ad9a106c2cda284babb81",
+                                    "bb-queue-lib.sh",
+                                    "2569b8af2cf8acc063024e553be66a93",
+                                    "bb-queue",
+                                    "9cb677b671867eecdf90c9514bbd0732",
+                                    "bb-result",
+                                    "2b99dd5c414175c4fd40a9836da76298",
+                                    "bb-portgroup.py",
+                                    "8ad1c6dbe2044f984814c2b19645c48b",
+                                    "bb-modules.py",
+                                    "9c668381f2a161c24a9b5d55cccc4945");
         var tools = host("h1");
 
         assertThat(install("builder@h1").rc()).isZero();
@@ -1086,8 +1139,10 @@ class BbInstallIT {
         Files.write(tools.resolve("bb-queue-lib.sh"), prev("bb-queue-lib.sh.preledger"));
         Files.write(tools.resolve("bb-queue"), prev("bb-queue.preledger"));
         for (var e : live.entrySet()) {
-            assertThat(BbFixtures.md5(Files.readAllBytes(tools.resolve(e.getKey())))).as(e.getKey()).isEqualTo(e.getValue());
+            assertThat(BbFixtures.md5(Files.readAllBytes(tools.resolve(e.getKey())))).as(e.getKey())
+                      .isEqualTo(e.getValue());
         }
+
         var run = install("builder@h1");
 
         assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
@@ -1105,7 +1160,8 @@ class BbInstallIT {
         var run = install("builder@h1");
 
         assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
-        assertThat(run.stdout()).contains("installed builder@h1 bb-build before=" + pin("BB_BUILD_PREFIELDS") + " after=" + pin("BB_BUILD_NEW"));
+        assertThat(run.stdout()).contains("installed builder@h1 bb-build before=" + pin("BB_BUILD_PREFIELDS")
+                                         + " after=" + pin("BB_BUILD_NEW"));
         assertThat(tools.resolve("bb-build.bak-" + pin("BB_BUILD_PREFIELDS"))).hasBinaryContent(prev("bb-build.prefields"));
     }
 
