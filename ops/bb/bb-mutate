@@ -6,10 +6,16 @@ Spec (data only):
   {"build": {"pl": "integrations/utility", "tests": "ATest,BTest", "extra": ["-am"]},
    "mutations": [{"id": "m1", "file": "rel/path.java", "kind": "lit"|"re", "old": "...", "new": "...",
                   "expect": ["TestClass#method", "TestClass"], "zone": "optional"}]}
-Outcomes: RED SURVIVED APPLY-INVALID CALL-REFUSED TIMEOUT NO-XML COMPILE-ERROR (+ BUILD-FAIL: build failed,
+Outcomes: RED SURVIVED KILLED-ELSEWHERE APPLY-INVALID CALL-REFUSED TIMEOUT NO-XML COMPILE-ERROR (+ BUILD-FAIL: build failed,
 no test failure, no compile error; never RED, never SURVIVED) and NOT-RUN: the mutant's expected tests did not run
 (or the run was aborted); NOT-RUN is neither detected nor survived and is tallied apart.
-CREDIT (multi-module soundness): a mutant is credited RED/SURVIVED only if, in ITS OWN module (a module whose control
+PER-OUTCOME MEANING (issue #100), for a build whose tests ran in the mutant's own module:
+  RED              a test in the mutant's expect list failed: detected, as expected.
+  KILLED-ELSEWHERE failing testcases, NONE of them in the expect list: the mutation was detected, so it did not survive, but the
+                   expect list is wrong or incomplete (detail names the failing tests). The control was green, yet one green control
+                   does not rule out a flake of that test: re-run once before trusting it. Tallied apart; exit code as for RED.
+  SURVIVED         ZERO failing testcases, and nothing else (a failure outside the expect list is KILLED-ELSEWHERE, never SURVIVED).
+CREDIT (multi-module soundness): a mutant is credited RED/KILLED-ELSEWHERE/SURVIVED only if, in ITS OWN module (a module whose control
 reports held the expected test class), a surefire/failsafe XML newer than the build marker names each expected class and
 has testcases > 0. A red module fails the reactor, so modules downstream of it never run and leave stale or no XML:
 their mutants are NOT-RUN, never SURVIVED. A NOT-RUN batch-mate is re-run singly (like an ambiguous batch); if it is NOT-RUN
@@ -18,7 +24,7 @@ ATTRIBUTION (--batch; issue #97): a batch is credited only when it is clean AND 
 all, a compile error, no XML or a nonzero rc re-runs EVERY member singly. So a RED is always from a solo build (a batch-mate's
 kill can never read as another mutant's RED). A SURVIVED from a batch means "no expected test failed with all batch-mates
 applied": masking by a batch-mate is not excluded (disjoint files, zones and expected classes do not bound what a change can
-reach), so a batch SURVIVED can only over-report survivors, never invent a RED. A SURVIVED from a build with any failure is always solo. results.tsv/results.md carry a `credited`
+reach), so a batch SURVIVED can only over-report survivors, never invent a RED. A build with any failing testcase is always solo (RED or KILLED-ELSEWHERE, never a batch credit). results.tsv/results.md carry a `credited`
 column (after `outcome`): `batch` (a zero-failure build of 2+ mutants), `solo` (a build of one mutant), `-` (no build ran).
 COST (--batch): a batch with any failure costs 1+k builds (the batch, then each of its k members singly), so --batch pays only
 when most mutants are expected to survive; for a mostly-RED matrix use the default --single.
@@ -564,6 +570,9 @@ def main():
         state["verdict"] += "  \nTIMEOUT = mutant exceeded the bound and was killed; counted as DETECTED"
     if any(r["outcome"] == "NOT-RUN" for r in results.values()):
         state["verdict"] += "  \nNOT-RUN = the mutant's expected tests did not run (or the run aborted); neither detected nor survived"
+    if any(r["outcome"] == "KILLED-ELSEWHERE" for r in results.values()):
+        state["verdict"] += ("  \nKILLED-ELSEWHERE = a solo build failed only tests outside the mutant's expect list: detected, not survived, "
+                            "but the expect list is wrong or incomplete; one green control does not rule out a flake of that test, so re-run once before trusting it")
     flush()
     if porcelain(co):
         die(3, "tree dirty at end")
@@ -571,7 +580,9 @@ def main():
     for r in results.values(): counts[r["outcome"]] = counts.get(r["outcome"], 0) + 1
     print(f"bb-mutate: sha={sha[:9]} control OK ({ctl_n} testcases); " +
           " ".join(f"{k}={v}" for k, v in sorted(counts.items())) +
-          ("; TIMEOUT counted as detected" if counts.get("TIMEOUT") else "") + f"; tree clean; results={out}/results.md")
+          ("; TIMEOUT counted as detected" if counts.get("TIMEOUT") else "") +
+          ("; KILLED-ELSEWHERE detected by tests outside the expect list (re-run once: one green control does not rule out a flake)"
+           if counts.get("KILLED-ELSEWHERE") else "") + f"; tree clean; results={out}/results.md")
     sys.exit(5 if counts.get("NOT-RUN") else 0)
 
 
@@ -591,8 +602,9 @@ def finish(m, res, own, rec, credited):
         rec(m, "RED", **common)
     elif res["rc"] != 0 and not fails:
         rec(m, "BUILD-FAIL", detail=f"rc={res['rc']} with no failing testcase", **common)
-    elif fails:
-        rec(m, "SURVIVED", detail="failures none of which were expected: " + ",".join(fails[:5]), **common)
+    elif fails:  # #100: detected by a test outside the expect list; SURVIVED is only zero failing testcases
+        rec(m, "KILLED-ELSEWHERE", detail="failures none of which were expected: " + ",".join(fails[:5]) +
+            "; expect list wrong or incomplete; re-run once: one green control does not rule out a flake of that test", **common)
     else:
         rec(m, "SURVIVED", **common)
 

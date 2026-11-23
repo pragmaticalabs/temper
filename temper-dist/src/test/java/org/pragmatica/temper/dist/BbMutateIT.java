@@ -39,6 +39,14 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 ///  - drop `compile_err` from the singles condition -> [#aBatchWithACompilerErrorInItsLog_isRerunSingly]
 ///  - `rec` defaulting `credited` to `solo` -> [#anInvalidMutant_isCreditedDash], [#aRunAbortedByTheQueueWait_leavesTheRestNotRunCreditedDash]
 ///  - a TIMEOUT credited `batch` (lone, or singly after a batch) -> [#aLoneTimeout_isCreditedSolo], [#aTimeoutInABatch_isRerunSinglyAndEachCreditedSolo]
+///  - #100: a solo build failing only unlisted tests recorded SURVIVED (`elif fails` -> SURVIVED) -> [#aSoloMutantBreakingOnlyAnUnlistedTest_isKilledElsewhere_namingTheTest],
+///    [#aBatchMemberBreakingOnlyAnUnlistedTest_isKilledElsewhere_creditedSolo], [#aBatchMateBreakingAnotherMutantsTest_isNeverCreditedRed]
+///  - #100: the `elif fails` branch taken without a failure (`else`) -> [#aZeroFailureSoloBuild_stillReadsSurvived]
+///  - #100: the detail without the failing tests' names -> [#aSoloMutantBreakingOnlyAnUnlistedTest_isKilledElsewhere_namingTheTest]
+///  - #100: the verdict without the flake note -> [#theKilledElsewhereTally_andTheFlakeNote_showInTheSummaryAndTheResults]
+///  - #100: the detail truncated to fewer than five failing tests (`fails[:5]` -> `fails[:1]`) -> [#aSoloMutantBreakingSixUnlistedTests_namesTheFirstFiveInTheDetail_andAllSixInAllFailures]
+///  - #100: the detail's tail (expect-list hint, flake note) dropped -> [#aSoloMutantBreakingOnlyAnUnlistedTest_isKilledElsewhere_namingTheTest]
+///  - #100: the summary line without the KILLED-ELSEWHERE count or note -> [#theKilledElsewhereTally_andTheFlakeNote_showInTheSummaryAndTheResults]
 ///  - results.tsv header columns reordered -> [#resultsTsv_headerNamesTheColumnsInRowOrder]
 class BbMutateIT {
     private static final Path TOOL = BbFixtures.OPS_BB.resolve("bb-mutate");
@@ -180,7 +188,7 @@ class BbMutateIT {
 
     /// #97 false RED: mC's change (file C) breaks ATest#t1, a test of mA's expected class; mA's own change is inert. The batch has exactly
     /// one failure and it matches mA's expectation, so the old tool credited mA RED from it. Solo, mA survives; mC's expected CTest passes
-    /// and only the unexpected ATest#t1 fails, so mC is SURVIVED too (a batch-mate's kill is never another mutant's RED).
+    /// and only the unexpected ATest#t1 fails, so mC is KILLED-ELSEWHERE (#100), not SURVIVED (a batch-mate's kill is never another mutant's RED).
     @Test
     void aBatchMateBreakingAnotherMutantsTest_isNeverCreditedRed() throws Exception {
         var out = batch("""
@@ -189,10 +197,86 @@ class BbMutateIT {
                         mutation("mA", "A", "ATest", "fine"),
                         mutation("mC", "C", "CTest", "MUT"));
 
-        assertThat(out.outcomes()).containsEntry("mA", "SURVIVED").containsEntry("mC", "SURVIVED");
+        assertThat(out.outcomes()).containsEntry("mA", "SURVIVED").containsEntry("mC", "KILLED-ELSEWHERE");
         assertThat(out.credited()).containsEntry("mA", "solo").containsEntry("mC", "solo");
         assertThat(builds()).containsExactly("[] false", "[C] true", "[] false", "[C] false");
         assertThat(out.md()).contains("failures none of which were expected: ATest#t1");
+    }
+
+    /// Scenario: C's change breaks ATest#t1 (outside the mutant's expect list CTest); C's own tests pass.
+    private static final String C_BREAKS_ATEST = """
+        {"modules":[{"name":"C","class":"CTest","cases":["t1"],"fault":"inert"},
+                     {"name":"A","class":"ATest","cases":["t1","t2"],"breaks":["C"]}]}""";
+
+    /// C's mutation breaks the first six testcases of A's one suite; the case names are out of alphabetical order, so the report order shows
+    private static final String SIX_BROKEN = """
+        {"modules":[{"name":"C","class":"CTest","cases":["t1"],"fault":"inert"},
+                     {"name":"A","class":"ATest","cases":["t3","t1","t6","t2","t5","t4"],"breaks":["C"],"failN":6}]}""";
+
+    /// #100 (row a): a lone mutant whose build fails only an unlisted test is detected, so not SURVIVED: KILLED-ELSEWHERE, the detail naming
+    /// the test. The old tool read it SURVIVED, hiding a detection behind a wrong expect list.
+    @Test
+    void aSoloMutantBreakingOnlyAnUnlistedTest_isKilledElsewhere_namingTheTest() throws Exception {
+        var out = batch(C_BREAKS_ATEST, mutation("mC", "C", "CTest", "MUT"));
+
+        assertThat(out.outcomes()).containsOnlyKeys("mC").containsEntry("mC", "KILLED-ELSEWHERE");
+        assertThat(out.credited()).containsEntry("mC", "solo");
+        assertThat(out.rc()).as("the exit code is unchanged: not NOT-RUN").isZero();
+        assertThat(out.detail("mC")).contains("ATest#t1");
+        assertThat(out.detail("mC")).as("the detail's tail: the expect-list hint and the flake note")
+                  .contains("expect list wrong or incomplete")
+                  .contains("one green control does not rule out a flake of that test");
+        assertThat(builds()).containsExactly("[] false", "[C] false");
+    }
+
+    /// #100 (row e): the detail names the first five failing testcases, in report order, and no more; the all_failures column keeps all six.
+    @Test
+    void aSoloMutantBreakingSixUnlistedTests_namesTheFirstFiveInTheDetail_andAllSixInAllFailures() throws Exception {
+        var out = batch(SIX_BROKEN, mutation("mC", "C", "CTest", "MUT"));
+
+        assertThat(out.outcomes()).containsEntry("mC", "KILLED-ELSEWHERE");
+        assertThat(out.detail("mC")).contains("ATest#t3,ATest#t1,ATest#t6,ATest#t2,ATest#t5;")
+                  .doesNotContain("ATest#t4");
+        assertThat(out.allFailures("mC")).isEqualTo("ATest#t3,ATest#t1,ATest#t6,ATest#t2,ATest#t5,ATest#t4");
+    }
+
+    /// #100 (row b): zero failing testcases is the only SURVIVED, and its detail stays empty.
+    @Test
+    void aZeroFailureSoloBuild_stillReadsSurvived() throws Exception {
+        var out = batch(C_BREAKS_ATEST, mutation("mC", "C", "CTest", "fine"));
+
+        assertThat(out.outcomes()).containsOnlyKeys("mC").containsEntry("mC", "SURVIVED");
+        assertThat(out.credited()).containsEntry("mC", "solo");
+        assertThat(out.detail("mC")).isEmpty();
+        assertThat(out.stdout()).contains("SURVIVED=1").doesNotContain("KILLED-ELSEWHERE");
+        assertThat(out.md()).doesNotContain("KILLED-ELSEWHERE");
+    }
+
+    /// #100 (row c): the summary line counts KILLED-ELSEWHERE apart from RED and SURVIVED and says one green control does not rule out a
+    /// flake; results.md carries the outcome in the row and the same note in the verdict; the TSV row carries it too.
+    @Test
+    void theKilledElsewhereTally_andTheFlakeNote_showInTheSummaryAndTheResults() throws Exception {
+        var out = batch(C_BREAKS_ATEST, mutation("mC", "C", "CTest", "MUT"));
+
+        assertThat(out.stdout()).contains("KILLED-ELSEWHERE=1").doesNotContain("RED=").doesNotContain("SURVIVED=");
+        assertThat(out.stdout()).contains("one green control does not rule out a flake");
+        assertThat(out.md()).contains("| mC | KILLED-ELSEWHERE | solo |");
+        assertThat(out.md()).contains("KILLED-ELSEWHERE = a solo build failed only tests outside the mutant's expect list")
+                  .contains("one green control does not rule out a flake of that test, so re-run once");
+        assertThat(out.tsvRow("mC")).startsWith("mC\tKILLED-ELSEWHERE\tsolo\t");
+    }
+
+    /// #100 (row d): a batch with a failure is re-run singly; its member that breaks only an unlisted test reads KILLED-ELSEWHERE, credited
+    /// solo, while its inert batch-mate (which would have been blamed for nothing) is a plain SURVIVED.
+    @Test
+    void aBatchMemberBreakingOnlyAnUnlistedTest_isKilledElsewhere_creditedSolo() throws Exception {
+        var out = batch(C_BREAKS_ATEST, mutation("mC", "C", "CTest", "MUT"), mutation("mA", "A", "ATest", "fine"));
+
+        assertThat(out.outcomes()).containsEntry("mC", "KILLED-ELSEWHERE").containsEntry("mA", "SURVIVED");
+        assertThat(out.credited()).containsEntry("mC", "solo").containsEntry("mA", "solo");
+        assertThat(out.detail("mC")).contains("ATest#t1");
+        assertThat(out.log()).contains("ambiguous -> re-running singly");
+        assertThat(builds()).containsExactly("[] false", "[C] true", "[C] false", "[] false");
     }
 
     /// Two mutants of one file are never in one batch, even with different `old`, zones and expected classes.
@@ -257,7 +341,9 @@ class BbMutateIT {
     /// No build ran for a refused call (bb-build exited 1 at once), so the verdict is credited `-`, not `batch`: a group of two.
     @Test
     void aRefusedBatch_isCreditedDash() throws Exception {
-        var out = batch(withKey(modules(null), "refuseWhen", 2), mutation("mA", "A", "ATest", "MUT"), mutation("mC", "C", "CTest", "MUT"));
+        var out = batch(withKey(modules(null), "refuseWhen", 2),
+                        mutation("mA", "A", "ATest", "MUT"),
+                        mutation("mC", "C", "CTest", "MUT"));
 
         assertThat(out.outcomes()).containsEntry("mA", "CALL-REFUSED").containsEntry("mC", "CALL-REFUSED");
         assertThat(out.credited()).containsEntry("mA", "-").containsEntry("mC", "-");
@@ -277,7 +363,9 @@ class BbMutateIT {
     /// The batch runs and fails, so each member is re-run singly, and both of those calls are refused: the `finish` site, credited `-` too.
     @Test
     void aRefusedSingleAfterAFailingBatch_isCreditedDash() throws Exception {
-        var out = batch(withKey(modules(null), "refuseWhen", 1), mutation("mA", "A", "ATest", "MUT"), mutation("mC", "C", "CTest", "MUT"));
+        var out = batch(withKey(modules(null), "refuseWhen", 1),
+                        mutation("mA", "A", "ATest", "MUT"),
+                        mutation("mC", "C", "CTest", "MUT"));
 
         assertThat(out.outcomes()).containsEntry("mA", "CALL-REFUSED").containsEntry("mC", "CALL-REFUSED");
         assertThat(out.credited()).containsEntry("mA", "-").containsEntry("mC", "-");
@@ -287,7 +375,9 @@ class BbMutateIT {
     /// rc 1 with fresh reports, every test green and a clean log: nothing names the cause, so the batch is not credited: each member runs solo.
     @Test
     void aBatchWithANonZeroRcAndNoFailure_isRerunSingly() throws Exception {
-        var out = batch(inertModules("rcWhen", "inert", "inert"), mutation("mA", "A", "ATest", "MUT"), mutation("mC", "C", "CTest", "MUT"));
+        var out = batch(inertModules("rcWhen", "inert", "inert"),
+                        mutation("mA", "A", "ATest", "MUT"),
+                        mutation("mC", "C", "CTest", "MUT"));
 
         assertThat(out.outcomes()).containsEntry("mA", "SURVIVED").containsEntry("mC", "SURVIVED");
         assertThat(out.credited()).containsEntry("mA", "solo").containsEntry("mC", "solo");
@@ -409,7 +499,27 @@ class BbMutateIT {
                           String stdout,
                           String log,
                           String md,
-                          String tsvHeader) {}
+                          String tsvHeader,
+                          List<String> tsvRows) {
+        String tsvRow(String id) {
+            return tsvRows.stream()
+                          .filter(r -> r.startsWith(id + "\t"))
+                          .findFirst()
+                          .orElseThrow();
+        }
+
+        /// the all_failures column of a mutant's TSV row
+        String allFailures(String id) {
+            return tsvRow(id).split("\t", -1) [4];
+        }
+
+        /// the detail column of a mutant's TSV row (empty when the column is absent)
+        String detail(String id) {
+            var cols = tsvRow(id).split("\t", -1);
+
+            return cols[cols.length - 1];
+        }
+    }
 
     /// scenario with one more top-level key
     private static String withKey(String scenario, String key, int value) {
@@ -421,12 +531,15 @@ class BbMutateIT {
         return withKey("""
                        {"modules":[{"name":"A","class":"ATest","cases":["t1","t2"],"fault":"%s"},
                                     {"name":"B","deps":["A"],"class":"BTest","cases":["t1"]},
-                                    {"name":"C","class":"CTest","cases":["t1"],"fault":"%s"}]}""".formatted(a, c), key, 2);
+                                    {"name":"C","class":"CTest","cases":["t1"],"fault":"%s"}]}""".formatted(a, c),
+                       key,
+                       2);
     }
 
     /// The builds that bb-mutate must kill (a bound or the queue wait): its kill path lists /proc and calls `~/tools/bb-queue reap`.
     private void killableBuilds() throws IOException {
-        assumeTrue(Files.isDirectory(Path.of("/proc")), "the kill path of bb-mutate reads /proc");
+        assumeTrue(Files.isDirectory(Path.of("/proc")),
+                   "the kill path of bb-mutate reads /proc");
         BbFixtures.executable(home.resolve("tools/bb-queue"), "#!/bin/sh\nexit 0\n");
     }
 
@@ -461,7 +574,8 @@ class BbMutateIT {
         var out = dir.resolve("out");
 
         Files.writeString(home.resolve("scenario.json"), scenario);
-        Files.writeString(dir.resolve(specName), "{\"build\":" + buildJson + ",\"mutations\":[" + String.join(",", mutations) + "]}");
+        Files.writeString(dir.resolve(specName),
+                          "{\"build\":" + buildJson + ",\"mutations\":[" + String.join(",", mutations) + "]}");
         var env = new HashMap<String, String>();
 
         env.put("PATH", System.getenv("PATH"));
@@ -496,7 +610,8 @@ class BbMutateIT {
                           run.stdout(),
                           Files.readString(out.resolve("bb-mutate.log")),
                           Files.readString(out.resolve("results.md")),
-                          Files.readAllLines(out.resolve("results.tsv")).get(0));
+                          Files.readAllLines(out.resolve("results.tsv")).get(0),
+                          Files.readAllLines(out.resolve("results.tsv")).stream().skip(1).toList());
     }
 
     /// one `[mutated modules] fae` line per build the fake bb-build ran
