@@ -22,8 +22,11 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 /// with `grep -q`. #102: fed through `printf | grep -q`, grep exits at its first match, printf dies of SIGPIPE on an arg list larger than
 /// the pipe buffer, and under pipefail that status turns a MATCH into "no match": the guard silently does not fire. Each guard is run with
 /// the match first and 300 KB of further args after it, and once with no padding (the control: the guard itself works).
+/// The padding must be many LINES, not many words: bb-build joins the args with `$*`, so separate words alone make one line, and grep
+/// reads a single long line to its end (match, no SIGPIPE: the old form passes). Each padding word therefore carries 100 newlines.
 ///
 /// Probes: put `printf '%s' "$A" |` back in front of any one grep of a guard -> that guard's `_withALongArgList` row is red (its control stays green).
+/// Drop `[^!]` from the named-test guard -> [#theHostKillingTestGuard_letsAnExcludedRunThrough] red.
 class BbBuildArgGuardIT {
     private static final Pattern QUEUED = Pattern.compile("queued ticket=(\\S+)");
 
@@ -97,15 +100,19 @@ class BbBuildArgGuardIT {
         env.putAll(extra);
     }
 
-    /// the match words first, then `pad` bytes of further args (40 bytes each): the grep is satisfied in its first block.
+    private static final int LINES_PER_WORD = 100;
+    private static final int WORD_BYTES = LINES_PER_WORD * 31;
+
+    /// the match words first, then `pad` bytes of further args: separate words, each of 100 newline-ended lines (31 bytes a line), so the
+    /// arg string has thousands of lines and grep is satisfied in its first block while the producer still has most of it to write.
     private BbFixtures.Outcome run(Map<String, String> extra, int pad, String... head) throws Exception {
         setUp(extra);
         var command = new ArrayList<>(List.of(dir.resolve("tools/bb-build").toString(),
                                               co.toString()));
 
         command.addAll(List.of(head));
-        for (var i = 0; i < pad / 40; i++) {
-            command.add("-Dpad" + i + "=" + "x".repeat(30));
+        for (var i = 0; i < pad / WORD_BYTES; i++) {
+            command.add("-Dpad" + i + "=" + ("x".repeat(30) + "\n").repeat(LINES_PER_WORD));
         }
 
         var run = BbFixtures.run(command, env, null, null);
@@ -170,6 +177,16 @@ class BbBuildArgGuardIT {
 
         assertThat(run.rc()).as(run.stdout() + run.stderr()).isEqualTo(6);
         assertThat(run.stderr()).contains(HEAVY);
+    }
+
+    /// the `[^!]` of the named-test guard: an exclusion (`!StreamPublishReshuffleTest`) is not a naming. Dropping `[^!]` refuses it (rc 6).
+    @Test
+    void theHostKillingTestGuard_letsAnExcludedRunThrough() throws Exception {
+        var run = run(Map.of(), 0, "-B", "verify", "-Pwith-e2e", "-Dit.test=!StreamPublishReshuffleTest");
+
+        assertThat(run.stderr()).doesNotContain(NAMED, HEAVY);
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isNotEqualTo(6);
+        assertThat(run.stdout()).contains("queued ticket=");
     }
 
     @Test

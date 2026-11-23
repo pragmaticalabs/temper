@@ -17,7 +17,8 @@
 #                   absent is fine. This class goes away when the vendoring PR lands.
 #   tla             ~/tools/tla, a directory holding exactly tla2tools.jar (the pragmaticalabs release asset tla2tools-2026.11.06) at its pinned
 #                   sha256 (sha256sum, or `shasum -a 256` where that is absent). Another sha or an absent jar is `drift <place> tla/tla2tools.jar
-#                   installed=<sha256|absent|dir|other> expected=<sha256>`; any other entry is `unlisted <place> tla/<name> sha256=<sha256|dir|other>`.
+#                   installed=<sha256|absent|dir|other|unreadable> expected=<sha256>`; any other entry is `unlisted <place> tla/<name> sha256=<sha256|dir|other|unreadable>`.
+#                   A symlink (to anything) is `other`: the jar must be the file itself, not a pointer whose target can change; a jar this user cannot read is `unreadable`.
 #   unlisted        any other file: `unlisted <place> <file> md5=<md5|dir>`, exit 1.
 # Not classified: dotfiles (the glob skips them), <known>.bak* and <known>.pre-* (backups the installers leave; <known> is a
 #   repo-sourced or pinned tool name, so evil.bak and x.pre-foo are unlisted), and `maven` -- the host's Maven install, a
@@ -187,7 +188,11 @@ done
 sha() { if command -v sha256sum > /dev/null 2>&1; then sha256sum < "$1" | cut -d" " -f1; else shasum -a 256 < "$1" | cut -d" " -f1; fi; }
 for q in "$HOME/tools/tla"/* "$HOME/tools/tla"/.[!.]* "$HOME/tools/tla"/..?*; do
   [ -e "$q" ] || [ -L "$q" ] || continue
-  if [ -f "$q" ]; then printf "tla: %s %s\n" "$(sha "$q")" "${q##*/}"; elif [ -d "$q" ]; then printf "tla: dir %s\n" "${q##*/}"; else printf "tla: other %s\n" "${q##*/}"; fi
+  if [ -L "$q" ]; then printf "tla: other %s\n" "${q##*/}"
+  elif [ -f "$q" ] && [ ! -r "$q" ]; then printf "tla: unreadable %s\n" "${q##*/}"
+  elif [ -f "$q" ]; then printf "tla: %s %s\n" "$(sha "$q")" "${q##*/}"
+  elif [ -d "$q" ]; then printf "tla: dir %s\n" "${q##*/}"
+  else printf "tla: other %s\n" "${q##*/}"; fi
 done'
   if ! out=$("${SSH[@]}" "$t" bash -s <<< "$PROBE"); then
     echo "unreachable $p"; down=1; continue
