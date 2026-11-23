@@ -2,7 +2,9 @@
 # Fake ~/tools/bb-build for BbMutateIT: argv = <checkout> <mvn args...>. Fabricates surefire XML per module of
 # $HOME/scenario.json, in reactor order. A module is "mutated" when <module>/src/f.txt contains MUT. A mutated module's first
 # testcase fails unless the module has a fault: zero (suite for the class, no testcases), otherclass (suite of another class),
-# stale (writes nothing). A module with a failed or skipped dependency is skipped; without -fae every module after a failure is.
+# stale (writes nothing), inert (mutated, but its tests pass). A module with "breaks":[names] ALSO fails its first testcase when any
+# listed module is mutated (a change in another file breaking this module's test: the #97 cross-file shape).
+# A module with a failed or skipped dependency is skipped; without -fae every module after a failure is.
 import json, os, sys, time
 
 co, args = sys.argv[1], sys.argv[2:]
@@ -34,7 +36,7 @@ for m in sc["modules"]:
         if mut and fault == "otherclass":
             cls = "Other" + cls
         cases = [(cls, c) for c in m["cases"]]
-    fail = mut and not fault
+    fail = (mut and not fault) or any(x in mutated for x in m.get("breaks", []))
     body = "".join(f'<testcase classname="{c}" name="{t}">' + ("<failure message=\"x\"/>" if fail and i == 0 else "") + "</testcase>"
                    for i, (c, t) in enumerate(cases))
     open(f"{d}/TEST-{cls}.xml", "w").write(f'<testsuite name="{cls}" tests="{len(cases)}">{body}</testsuite>')

@@ -14,6 +14,12 @@ reports held the expected test class), a surefire/failsafe XML newer than the bu
 has testcases > 0. A red module fails the reactor, so modules downstream of it never run and leave stale or no XML:
 their mutants are NOT-RUN, never SURVIVED. A NOT-RUN batch-mate is re-run singly (like an ambiguous batch); if it is NOT-RUN
 even singly it stays NOT-RUN. Batch builds of 2+ mutants add -fae, so modules not downstream of a red one still run.
+ATTRIBUTION (--batch; issue #97): a batch is credited only when it is clean AND has ZERO failing testcases. Any failure at
+all, a compile error, no XML or a nonzero rc re-runs EVERY member singly. So a RED is always from a solo build (a batch-mate's
+kill can never read as another mutant's RED). A SURVIVED from a batch means "no expected test failed with all batch-mates
+applied": masking by a batch-mate is not excluded, only mitigated: mutants of one batch are in disjoint files, zones and
+expected test classes. A SURVIVED from a build with any failure is always solo. results.tsv/results.md carry a `credited`
+column (after `outcome`): `batch` (a zero-failure build of 2+ mutants), `solo` (a build of one mutant), `-` (no build ran).
 Never deletes .bb/rc, never writes ~/.m2, stdin unused. Exit: 0 ok | 2 control failed / usage / refused | 3 tree not restored | 4 queue-wait timeout (--timeout) or run abort
 | 5 complete, but some mutant is still NOT-RUN after the singles pass (neither detected nor survived: the tally line names them).
 
@@ -418,7 +424,7 @@ def main():
     sha = preflight(co)
     owner = os.environ.get("BB_OWNER") or os.path.basename(co).split("-")[0]
     timeout_s = timeout_min * 60
-    results = {}  # id -> dict(outcome, expected_failed, failures, cases, rc, secs, detail)
+    results = {}  # id -> dict(outcome, expected_failed, failures, cases, rc, secs, detail, credited)
 
     state = dict(verdict="RUNNING (control not finished)", ctl_n=0)
 
@@ -428,7 +434,7 @@ def main():
     def rec(m, outcome, **kw):
         results[m["id"]] = dict(outcome=outcome, expected_failed=kw.get("hit", []), failures=kw.get("fails", []),
                                 cases=kw.get("cases", ""), rc=kw.get("rc", ""), secs=int(kw.get("secs", 0)),
-                                detail=kw.get("detail", ""))
+                                detail=kw.get("detail", ""), credited=kw.get("credited", "-"))
         flush()  # incremental: a killed run keeps every finished mutant
 
     # 1. validate against clean tree
@@ -497,6 +503,7 @@ def main():
     for bi, group in enumerate(batches):
         label = "+".join(m["id"] for m in group)
         res, err = run_group(group, label, fae=len(group) > 1)
+        credit = "batch" if len(group) > 1 else "solo"
         if err:
             for m in group: rec(m, "APPLY-INVALID", detail=err)
             continue
@@ -506,18 +513,17 @@ def main():
             state["verdict"] = "ABORTED after queue-wait timeout"; flush()
             die(4, f"queue-wait timeout on {label}; aborting (job killed, tree restored)")
         if res["kind"] == "CALL-REFUSED":
-            for m in group: rec(m, "CALL-REFUSED", secs=res["secs"], detail=res["detail"])
+            for m in group: rec(m, "CALL-REFUSED", secs=res["secs"], detail=res["detail"], credited=credit)
             continue
         fails, _ = classify(res, group[0])
         singles_needed = False
         if res["kind"] == "TIMEOUT":
             if len(group) == 1:
-                rec(group[0], "TIMEOUT", secs=res["secs"], detail=res["detail"]); continue
+                rec(group[0], "TIMEOUT", secs=res["secs"], detail=res["detail"], credited="solo"); continue
             singles_needed = True
         elif len(group) > 1:
-            anyhit = any(classify(res, m)[1] for m in group)
-            if res["compile_err"] or len(fails) > 1 or (fails and not anyhit) or (not res["files"]) or \
-               (res["rc"] != 0 and not fails):
+            # #97: only a zero-failure batch is credited as a batch; any failure makes every member solo
+            if res["compile_err"] or fails or (not res["files"]) or res["rc"] != 0:
                 singles_needed = True
         notrun = []
         if not singles_needed and len(group) > 1 and res["kind"] == "OK":
@@ -530,14 +536,14 @@ def main():
             if e2:
                 rec(m, "APPLY-INVALID", detail=e2); return
             if r2["kind"] == "TIMEOUT":
-                rec(m, "TIMEOUT", secs=r2["secs"], detail=r2["detail"]); return
+                rec(m, "TIMEOUT", secs=r2["secs"], detail=r2["detail"], credited="solo"); return
             if r2["kind"] == "ABORT":
                 state["verdict"] = "ABORTED after queue-wait timeout"
                 for g in batches[bi:]:
                     for m2 in g:
                         if m2["id"] not in results: rec(m2, "NOT-RUN", detail="aborted: queue-wait timeout on " + m["id"])
                 die(4, f"queue-wait timeout on {m['id']}; aborting (job killed, tree restored)")
-            finish(m, r2, own[m["id"]], rec)
+            finish(m, r2, own[m["id"]], rec, "solo")
 
         if singles_needed:
             log(f"batch {label} ambiguous -> re-running singly")
@@ -548,7 +554,7 @@ def main():
                 if m in notrun:
                     single(m)  # NOT-RUN in the batch: its own module did not run fresh tests; only a single run can credit it
                 else:
-                    finish(m, res, own[m["id"]], rec)
+                    finish(m, res, own[m["id"]], rec, credit)
 
     state["verdict"] = f"control OK ({ctl_n} testcases); per-mutant bound {int(bound)}s; complete"
     if any(r["outcome"] == "TIMEOUT" for r in results.values()):
@@ -566,11 +572,11 @@ def main():
     sys.exit(5 if counts.get("NOT-RUN") else 0)
 
 
-def finish(m, res, own, rec):
+def finish(m, res, own, rec, credited):
     if res["kind"] == "CALL-REFUSED":
-        rec(m, "CALL-REFUSED", secs=res["secs"], detail=res["detail"]); return
+        rec(m, "CALL-REFUSED", secs=res["secs"], detail=res["detail"], credited=credited); return
     fails, hit = classify(res, m)
-    common = dict(fails=fails, hit=hit, cases=len(res["cases"]), rc=res["rc"], secs=res["secs"])
+    common = dict(fails=fails, hit=hit, cases=len(res["cases"]), rc=res["rc"], secs=res["secs"], credited=credited)
     why = ran(res, own)
     if res["compile_err"]:
         rec(m, "COMPILE-ERROR", detail="compiler error in build log (never RED)", **common)
@@ -602,7 +608,7 @@ def plan_batches(ms):
 
 def compatible(batch, m):
     for o in batch:
-        if o["file"] == m["file"] and o["old"] == m["old"]: return False
+        if o["file"] == m["file"]: return False  # #97: disjoint files (the same (file, old) pair is a subset)
         if m.get("zone") is not None and o.get("zone") == m.get("zone"): return False
         if o.get("zone") is None and m.get("zone") is None and o["file"] == m["file"]: pass
         for e in m["expect"]:
@@ -612,14 +618,14 @@ def compatible(batch, m):
 
 
 def write_results(out, sha, build, muts, results, verdict, ctl_n):
-    cols = ["id", "outcome", "expected_failed", "all_failures", "testcases", "rc", "secs", "detail"]
+    cols = ["id", "outcome", "credited", "expected_failed", "all_failures", "testcases", "rc", "secs", "detail"]
     with open(os.path.join(out, "results.tsv.tmp"), "w") as t, open(os.path.join(out, "results.md.tmp"), "w") as md:
         t.write("\t".join(cols) + "\n")
         md.write(f"# bb-mutate results\n\nSHA {sha}  \nbuild: `{json.dumps(build)}`  \n{verdict}\n\n")
-        md.write("| id | outcome | expected failed | all failures | testcases | rc | secs | detail |\n|---|---|---|---|---|---|---|---|\n")
+        md.write("| id | outcome | credited | expected failed | all failures | testcases | rc | secs | detail |\n|---|---|---|---|---|---|---|---|---|\n")
         for m in muts:
-            r = results.get(m["id"], dict(outcome="NOT-RUN", expected_failed=[], failures=[], cases="", rc="", secs=0, detail=""))
-            row = [m["id"], r["outcome"], ",".join(r["expected_failed"]), ",".join(r["failures"]),
+            r = results.get(m["id"], dict(outcome="NOT-RUN", expected_failed=[], failures=[], cases="", rc="", secs=0, detail="", credited="-"))
+            row = [m["id"], r["outcome"], r["credited"], ",".join(r["expected_failed"]), ",".join(r["failures"]),
                    str(r["cases"]), str(r["rc"]), str(r["secs"]), r["detail"].replace("\t", " ").replace("\n", " ")]
             t.write("\t".join(row) + "\n")
             md.write("| " + " | ".join(c.replace("|", "\\|") for c in row) + " |\n")
