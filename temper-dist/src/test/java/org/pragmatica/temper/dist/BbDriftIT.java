@@ -4,6 +4,8 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.security.MessageDigest;
+import java.util.HexFormat;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -61,6 +63,10 @@ class BbDriftIT {
                                                                   "bb-sockwatch",
                                                                   "cdcd6dc4958b5c77493d76fcb31cabfe");
 
+    /// The release asset's real sha256 is pinned in bb-drift; the fake hosts hold a stand-in jar, and BB_DRIFT_TLA_SHA (honoured only
+    /// beside BB_DRIFT_SSH) names the stand-in's sha for the run.
+    private static final byte[] FAKE_JAR = "a stand-in for tla2tools.jar\n".getBytes();
+    private static final String REAL_TLA_SHA = "e1f11b75c4b5bc4478ba0ac5cb6ae28e40a01b0016bc33e0aa97da22dfdbcd7f";
     private static final String OLD_BB_CHECKOUT = "7098ea8dee142600771968559e15e4db";
 
     @TempDir
@@ -109,7 +115,14 @@ class BbDriftIT {
             }
         }
 
+        Files.write(Files.createDirectories(tools.resolve("tla")).resolve("tla2tools.jar"),
+                    FAKE_JAR);
+
         return tools;
+    }
+
+    private static String sha256Of(byte[] bytes) throws Exception {
+        return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
     }
 
     private BbFixtures.Outcome drift(Path script, String... places) throws Exception {
@@ -121,6 +134,7 @@ class BbDriftIT {
         env.put("HOME_BASE",
                 dir.resolve("homes").toString());
         env.put("SHIM_DOWN", "");
+        env.put("BB_DRIFT_TLA_SHA", sha256Of(FAKE_JAR));
 
         return run(script, env, places);
     }
@@ -303,6 +317,7 @@ class BbDriftIT {
         env.put("HOME_BASE",
                 dir.resolve("homes").toString());
         env.put("SHIM_DOWN", "builder@h1");
+        env.put("BB_DRIFT_TLA_SHA", sha256Of(FAKE_JAR));
         var run = run(DRIFT, env, "builder@h1", "builder@h2");
 
         assertThat(run.rc()).as(run.stdout() + run.stderr()).isEqualTo(69);
@@ -625,13 +640,19 @@ class BbDriftIT {
         var missing = drift("builder@h1");
 
         assertThat(missing.rc()).isEqualTo(1);
-        assertThat(missing.stdout().lines().toList()).containsExactly(line("builder@h1", "bb-result", "absent", expected("bb-result")));
+        assertThat(missing.stdout().lines().toList()).containsExactly(line("builder@h1",
+                                                                           "bb-result",
+                                                                           "absent",
+                                                                           expected("bb-result")));
         var ops = repoCopy();
 
-        Files.writeString(ops.resolve("bb-result"), Files.readString(ops.resolve("bb-result")) + "# edited without a new pin\n");
+        Files.writeString(ops.resolve("bb-result"),
+                          Files.readString(ops.resolve("bb-result")) + "# edited without a new pin\n");
         Files.copy(ops.resolve("bb-result"), host("h2").resolve("bb-result"), StandardCopyOption.REPLACE_EXISTING);
-        assertThat(drift(ops.resolve("bb-drift"), "builder@h2").stdout().lines().toList())
-                  .contains(line("repo", "bb-result", BbFixtures.md5(ops.resolve("bb-result")), pin("BB_RESULT_NEW")));
+        assertThat(drift(ops.resolve("bb-drift"), "builder@h2").stdout().lines().toList()).contains(line("repo",
+                                                                                                         "bb-result",
+                                                                                                         BbFixtures.md5(ops.resolve("bb-result")),
+                                                                                                         pin("BB_RESULT_NEW")));
     }
 
     /// Exactly the old vendored bb-checkout md5 is drift (not "to be vendored"): the pin is gone from the script.
@@ -770,6 +791,68 @@ class BbDriftIT {
             assertThat(run.rc()).as(e.getKey() + ": " + run.stdout() + run.stderr()).isEqualTo(1);
             assertThat(run.stdout().lines().toList()).as(e.getKey())
                       .containsExactly("unlisted " + e.getKey() + " maven md5=" + e.getValue());
+        }
+    }
+
+    /// ~/tools/tla is a known directory holding exactly the pinned TLC jar. Mutation: drop the sha comparison -> the wrong-sha row is red;
+    /// against the earlier bb-drift (tla unlisted) the right-jar row is red.
+    @Test
+    void theTlaDirectory_withExactlyTheRightJar_isClean_andIsNotUnlisted() throws Exception {
+        host("h1");
+        var run = drift("builder@h1");
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        assertThat(run.stdout().lines().toList()).containsExactly("ok builder@h1 20 files");
+    }
+
+    @Test
+    void theTlaPin_isTheReleaseAssetsSha256() throws Exception {
+        assertThat(Files.readString(DRIFT)).contains("TLA_SHA=" + REAL_TLA_SHA).contains("TLA_JAR=tla2tools.jar");
+    }
+
+    @Test
+    void aTlaJarWithAnotherSha_isDrift() throws Exception {
+        var tools = host("h1");
+        var other = "another jar\n".getBytes();
+
+        Files.write(tools.resolve("tla/tla2tools.jar"), other);
+        var run = drift("builder@h1");
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isEqualTo(1);
+        assertThat(run.stdout().lines().toList()).containsExactly("drift builder@h1 tla/tla2tools.jar installed=" + sha256Of(other)
+                                                                 + " expected=" + sha256Of(FAKE_JAR));
+    }
+
+    @Test
+    void anExtraFileInTla_visibleOrDot_isUnlisted() throws Exception {
+        var tools = host("h1");
+
+        Files.writeString(tools.resolve("tla/notes.txt"), "extra\n");
+        Files.writeString(tools.resolve("tla/.hidden"), "dot\n");
+        Files.createDirectories(tools.resolve("tla/sub"));
+        var run = drift("builder@h1");
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isEqualTo(1);
+        assertThat(run.stdout().lines().toList()).containsExactlyInAnyOrder("unlisted builder@h1 tla/notes.txt sha256=" + sha256Of("extra\n".getBytes()),
+                                                                            "unlisted builder@h1 tla/.hidden sha256=" + sha256Of("dot\n".getBytes()),
+                                                                            "unlisted builder@h1 tla/sub sha256=dir");
+    }
+
+    @Test
+    void aMissingTlaJar_orAMissingTlaDirectory_isDrift() throws Exception {
+        var emptied = host("h-empty");
+        var gone = host("h-gone");
+
+        Files.delete(emptied.resolve("tla/tla2tools.jar"));
+        Files.delete(gone.resolve("tla/tla2tools.jar"));
+        Files.delete(gone.resolve("tla"));
+        for (var place : List.of("builder@h-empty", "builder@h-gone")) {
+            var run = drift(place);
+
+            assertThat(run.rc()).as(place + ": " + run.stdout() + run.stderr()).isEqualTo(1);
+            assertThat(run.stdout().lines().toList()).as(place)
+                      .containsExactly("drift " + place
+                                      + " tla/tla2tools.jar installed=absent expected=" + sha256Of(FAKE_JAR));
         }
     }
 
