@@ -415,25 +415,27 @@ if [ ! -f "$B/rc" ] && [ -f "$B/start" ]; then
   [ -z "$FIN" ] || { echo "refusing: .bb/rc in $CO was deleted by hand after ticket $FIN finished; never rm it (its verdict is the ticket record: bb-wait $FIN); rerun bb-build in a fresh checkout (a rerun in a checkout whose .bb/rc is intact clears it itself)" >&2; exit 3; }
   echo "refusing: a build appears to be running in $CO (.bb/start without .bb/rc)" >&2; exit 3
 fi
+# The guards below match the args with a here-string, never `printf | grep -q`: grep exits at its first match, printf then dies of SIGPIPE on a
+# long arg list, and under pipefail that status turns a MATCH into "no match" (#102; a guard would silently not fire).
 # Host-killing test guard (2026-09-27, #1553): StreamPublishReshuffleTest leaks sockets without bound and
 # exhausted this host's ephemeral ports twice. Unless this checkout's copy carries the #1553 @Disabled, refuse
 # any invocation that names it or that selects Heavy forge tests without explicitly excluding it.
 SPRT="$CO/aether/forge/forge-tests/src/test/java/org/pragmatica/aether/forge/StreamPublishReshuffleTest.java"
 if [ -f "$SPRT" ] && ! grep -q '@Disabled("#1553' "$SPRT"; then
   ARGS=" $* "
-  if printf '%s' "$ARGS" | grep -Eq '[^!]StreamPublishReshuffleTest'; then
+  if grep -Eq '[^!]StreamPublishReshuffleTest' <<< "$ARGS"; then
     echo "refusing: this run names StreamPublishReshuffleTest (#1553 host-killing leak; see runbook 0c)" >&2; exit 6; fi
   # the exclusion must sit in -Dit.test: forge-tests runs through failsafe, which ignores -Dtest (2026-09-29)
-  if printf '%s' "$ARGS" | grep -Eq 'groups=[^ ]*Heavy|excludedGroups= |-Pwith-e2e' && ! printf '%s' "$ARGS" | grep -Eq -- ' -Dit\.test=[^ ]*!StreamPublishReshuffleTest'; then
+  if grep -Eq 'groups=[^ ]*Heavy|excludedGroups= |-Pwith-e2e' <<< "$ARGS" && ! grep -Eq -- ' -Dit\.test=[^ ]*!StreamPublishReshuffleTest' <<< "$ARGS"; then
     echo "refusing: Heavy/e2e forge selection without '-Dit.test=…,!StreamPublishReshuffleTest' (#1553; see runbook 0c; -Dtest does not reach failsafe)" >&2; exit 6; fi
 fi
 # Failsafe filter guard (2026-09-29, s3's forge run at 36b5c3d42): forge-tests skips surefire and runs every test through
 # failsafe, which reads -Dit.test and IGNORES -Dtest. A run that names forge-tests (-pl or -f), reaches integration-test,
 # and filters with -Dtest but not -Dit.test would run the whole IT suite. Refuse (rc 10); BB_IT_UNFILTERED=1 overrides.
 A=" $* "
-if [ "${BB_IT_UNFILTERED:-0}" != 1 ] && printf '%s' "$A" | grep -Eq -- ' (-pl|--projects|-f|--file)[= ]?[^ ]*forge-tests' \
-   && printf '%s' "$A" | grep -Eq -- ' -Dtest=' && ! printf '%s' "$A" | grep -Eq -- ' -Dit\.test=' \
-   && printf '%s' "$A" | grep -Eq ' (integration-test|verify|install|deploy) '; then
+if [ "${BB_IT_UNFILTERED:-0}" != 1 ] && grep -Eq -- ' (-pl|--projects|-f|--file)[= ]?[^ ]*forge-tests' <<< "$A" \
+   && grep -Eq -- ' -Dtest=' <<< "$A" && ! grep -Eq -- ' -Dit\.test=' <<< "$A" \
+   && grep -Eq ' (integration-test|verify|install|deploy) ' <<< "$A"; then
   echo "refusing: forge-tests runs through failsafe, which ignores -Dtest; filter with -Dit.test=… (BB_IT_UNFILTERED=1 to run the whole IT suite)" >&2; exit 10
 fi
 # Concurrency cap (2026-09-27): above 3 concurrent reactors, fixed-port tests collide (BindException)
@@ -444,7 +446,7 @@ CAP=${BB_MAX_REACTORS:-5}; LIMIT=${BB_CAP_WAIT_SECS:-0}
 case "$CAP$LIMIT" in *[!0-9]*) echo "refusing: BB_MAX_REACTORS / BB_CAP_WAIT_SECS must be non-negative integers" >&2; exit 2;; esac
 # cap=1 is for ROOT builds only (2026-09-29): a module build (-pl/-f) with BB_MAX_REACTORS=1 would wait for an EMPTY host
 # and, before backfill, blocked every ticket behind it. Warn and use the default cap.
-if [ "$CAP" = 1 ] && printf ' %s ' "$*" | grep -Eq -- ' (-pl|--projects|-f|--file)([= ]|[^ ]*/)'; then
+if [ "$CAP" = 1 ] && grep -Eq -- ' (-pl|--projects|-f|--file)([= ]|[^ ]*/)' <<< " $* "; then
   echo "WARNING: BB_MAX_REACTORS=1 is for root builds only; this is a module build (-pl/-f), so the default cap 5 is used" >&2
   CAP=5
 fi

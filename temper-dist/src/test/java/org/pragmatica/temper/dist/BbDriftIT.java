@@ -773,6 +773,43 @@ class BbDriftIT {
         }
     }
 
+    /// #102: a host whose ~/tools holds thousands of entries (every install leaves a `.bak-<md5>`) made the listing larger than the pipe
+    /// buffer; awk exited at its first match, printf died of SIGPIPE, and pipefail + set -e ended bb-drift with exit 141 and no output.
+    /// Mutation: restore `exit` after the print in the awk of the per-file lookup -> exit 141, red.
+    @Test
+    void aToolsDirectoryOf2500Entries_isNotAFalseDrift_andNeverExits141() throws Exception {
+        var tools = host("h1");
+
+        for (var i = 0; i < 2500; i++) {
+            Files.writeString(tools.resolve("bb-test.bak-" + i), "");
+        }
+
+        for (var round = 0; round < 3; round++) {
+            var run = drift("builder@h1");
+
+            assertThat(run.rc()).as("round " + round + ": " + run.stdout() + run.stderr()).isZero();
+            assertThat(run.stdout().lines().toList()).containsExactly("ok builder@h1 20 files");
+        }
+    }
+
+    /// #102, `pin_of`: `sed | head -n 1` closed the pipe after one line; a pin line that occurs many times made sed die of SIGPIPE (141).
+    /// The first occurrence still wins: the repeats carry a wrong md5 and must not be read.
+    /// Mutation: restore `| head -n 1` in pin_of -> exit 141, red.
+    @Test
+    void aPinLineRepeatedThousandsOfTimes_isReadOnce_andTheFirstWins() throws Exception {
+        var ops = repoCopy();
+        var fields = ops.resolve("install-bb-fields.sh");
+        var repeat = "readonly BB_BUILD_NEW=" + "0".repeat(32) + "\n";
+
+        Files.writeString(fields,
+                          Files.readString(fields) + repeat.repeat(30000));
+        host("h1");
+        var run = drift(ops.resolve("bb-drift"), "builder@h1");
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        assertThat(run.stdout().lines().toList()).containsExactly("ok builder@h1 20 files");
+    }
+
     private Path repoCopy() throws IOException {
         var ops = Files.createDirectories(dir.resolve("copy/bb"));
 
