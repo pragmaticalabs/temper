@@ -25,8 +25,21 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 ///  - drop the freshness filter (`st_mtime_ns > marker_ns` accepts any XML) -> [#aStaleReport_isNotRun_neverSurvived]
 ///  - drop `testcases > 0` in `ran` -> [#anEmptyReport_isNotRun_neverSurvived]
 ///  - exit 0 although a mutant is NOT-RUN -> [#everyMutantNotRun_exitsFive], [#anEmptyReport_isNotRun_neverSurvived]
-///  - drop the single re-run of a NOT-RUN batch-mate -> [#aDownstreamMutant_isNotRunInTheBatch_thenCreditedSingly]
+///  - drop the single re-run of a NOT-RUN batch-mate -> [#aZeroFailureBatch_withAnEmptyReport_isRerunSingly]
+///  - #97: `fails` back to `len(fails) > 1 and ...` in the singles condition -> [#aBatchWithAFailure_isRerunSinglyForEveryMember],
+///    [#aFailureUnderRcZero_isStillNotCreditedAsABatch], [#aBatchMateBreakingAnotherMutantsTest_isNeverCreditedRed], [#aDownstreamMutant_isCreditedOnlyBySoloRuns]
+///  - #97: `compatible()` without the same-file refusal -> [#mutantsOfOneFile_areNeverBatched]
+///  - #97: a constant `credited` -> [#aZeroFailureBatch_isCreditedAsABatch], [#aLoneMutant_isRunWithoutFae]
 ///  - drop the expected-class test in `ran` -> [#aReportOfAnotherClass_isNotRun_neverSurvived]
+///  - #97 review: a CALL-REFUSED credited `credit` (group site) or `credited` (finish site) -> [#aRefusedBatch_isCreditedDash],
+///    [#aRefusedLoneMutant_isCreditedDash], [#aRefusedSingleAfterAFailingBatch_isCreditedDash]
+///  - #97 review: `compatible()` comparing raw file strings -> [#aSecondSpellingOfAFile_isNeverBatched]
+///  - #97 review: an APPLY-INVALID batch recorded instead of re-run singly -> [#anInvalidBatch_isRerunSingly_soTheValidMemberIsNotStranded]
+///  - drop `rc != 0` from the singles condition -> [#aBatchWithANonZeroRcAndNoFailure_isRerunSingly]
+///  - drop `compile_err` from the singles condition -> [#aBatchWithACompilerErrorInItsLog_isRerunSingly]
+///  - `rec` defaulting `credited` to `solo` -> [#anInvalidMutant_isCreditedDash], [#aRunAbortedByTheQueueWait_leavesTheRestNotRunCreditedDash]
+///  - a TIMEOUT credited `batch` (lone, or singly after a batch) -> [#aLoneTimeout_isCreditedSolo], [#aTimeoutInABatch_isRerunSinglyAndEachCreditedSolo]
+///  - results.tsv header columns reordered -> [#resultsTsv_headerNamesTheColumnsInRowOrder]
 class BbMutateIT {
     private static final Path TOOL = BbFixtures.OPS_BB.resolve("bb-mutate");
 
@@ -51,20 +64,21 @@ class BbMutateIT {
            git init -q . && mkdir .mvn
            echo "-Dmaven.repo.local=$PWD/.m2-local" > .mvn/maven.config
            printf '.bb/\\ntarget/\\n.m2-local/\\n' > .gitignore
-           for m in A B C; do mkdir -p $m/src; echo ok > $m/src/f.txt; done
+           for m in A B C; do mkdir -p $m/src; printf 'ok\\nko\\n' > $m/src/f.txt; done
            git add -A && git -c user.name=t -c user.email=t@t commit -qm init
            git init -q --bare "%2$s" && git remote add origin "%2$s" && git push -q origin HEAD:refs/heads/main && git fetch -q origin
            git checkout -q --detach
            """.formatted(co, dir.resolve("remote.git")));
     }
 
-    /// B depends on A. The batch turns A red, so B never runs: B's mutant is NOT-RUN in the batch and credited by its single re-run.
-    /// The old tool read the same batch as B SURVIVED (see [#theOldTool_readsADownstreamMutantAsSurvived]).
+    /// B depends on A. The batch turns A red, so B never runs in it. The batch has a failure, so both members are re-run singly and
+    /// credited solo. The old tool read the same batch as B SURVIVED (see [#theOldTool_readsADownstreamMutantAsSurvived]).
     @Test
-    void aDownstreamMutant_isNotRunInTheBatch_thenCreditedSingly() throws Exception {
+    void aDownstreamMutant_isCreditedOnlyBySoloRuns() throws Exception {
         var out = batch(modules(null), mutation("mA", "A", "ATest", "MUT"), mutation("mB", "B", "BTest", "MUT"));
 
         assertThat(out.outcomes()).containsEntry("mA", "RED").containsEntry("mB", "RED");
+        assertThat(out.credited()).containsEntry("mA", "solo").containsEntry("mB", "solo");
         assertThat(out.rc()).isZero();
         assertThat(builds()).containsExactly("[] false",
 
@@ -72,8 +86,11 @@ class BbMutateIT {
         "[A,B] true",
 
         // the batch, with -fae
-        "[B] false");  // mB singly; mA is not re-run
-        assertThat(out.log()).contains("NOT-RUN in batch (re-running singly): mB");
+        "[A] false",
+
+        // mA singly
+        "[B] false");  // mB singly
+        assertThat(out.log()).contains("batch mA+mB ambiguous -> re-running singly");
     }
 
     @Test
@@ -93,7 +110,7 @@ class BbMutateIT {
 
         assertThat(out.outcomes()).containsEntry("mA", "NOT-RUN").containsEntry("mC", "RED");
         assertThat(out.rc()).as("mixed: one mutant still NOT-RUN").isEqualTo(5);
-        assertThat(builds()).hasSize(3);
+        assertThat(builds()).as("control, the batch (it has a failure), then one solo run each").hasSize(4);
         assertThat(out.stdout()).contains("NOT-RUN=1").contains("RED=1").doesNotContain("SURVIVED");
         assertThat(out.md()).contains("neither detected nor survived");
     }
@@ -125,14 +142,83 @@ class BbMutateIT {
         assertThat(out.rc()).isEqualTo(5);
     }
 
-    /// Independent modules that all run: one batch, credited as before (RED and SURVIVED), no re-run.
+    /// Independent modules that all run and no test fails anywhere: one batch, every member credited from it (`batch`), no re-run.
     @Test
-    void independentModules_areCreditedInOneBatch() throws Exception {
+    void aZeroFailureBatch_isCreditedAsABatch() throws Exception {
+        var out = batch(modules(null), mutation("mA", "A", "ATest", "fine"), mutation("mC", "C", "CTest", "fine"));
+
+        assertThat(out.outcomes()).containsEntry("mA", "SURVIVED").containsEntry("mC", "SURVIVED");
+        assertThat(out.credited()).containsEntry("mA", "batch").containsEntry("mC", "batch");
+        assertThat(out.rc()).isZero();
+        assertThat(builds()).containsExactly("[] false", "[] true");
+        assertThat(out.md()).contains("| id | outcome | credited | expected failed |");
+    }
+
+    /// t3031g shape: one failure in the batch hits mA; mC reads "SURVIVED, failures none of which were expected" from that same build.
+    /// A batch with any failure is not credited: every member is re-run singly, so mC's verdict comes from a build without mA's kill.
+    @Test
+    void aBatchWithAFailure_isRerunSinglyForEveryMember() throws Exception {
         var out = batch(modules(null), mutation("mA", "A", "ATest", "MUT"), mutation("mC", "C", "CTest", "fine"));
 
         assertThat(out.outcomes()).containsEntry("mA", "RED").containsEntry("mC", "SURVIVED");
+        assertThat(out.credited()).containsEntry("mA", "solo").containsEntry("mC", "solo");
         assertThat(out.rc()).isZero();
-        assertThat(builds()).containsExactly("[] false", "[A] true");
+        assertThat(builds()).containsExactly("[] false", "[A] true", "[A] false", "[] false");
+        assertThat(out.md()).doesNotContain("failures none of which were expected");
+    }
+
+    /// A failing testcase under rc 0 (testFailureIgnore) is a failure all the same: the batch is not credited, every member runs solo.
+    @Test
+    void aFailureUnderRcZero_isStillNotCreditedAsABatch() throws Exception {
+        var out = batch(modules(null).replace("{\"modules\"", "{\"ignoreFailures\":true,\"modules\""),
+                        mutation("mA", "A", "ATest", "MUT"),
+                        mutation("mC", "C", "CTest", "fine"));
+
+        assertThat(out.credited()).containsEntry("mA", "solo").containsEntry("mC", "solo");
+        assertThat(builds()).containsExactly("[] false", "[A] true", "[A] false", "[] false");
+    }
+
+    /// #97 false RED: mC's change (file C) breaks ATest#t1, a test of mA's expected class; mA's own change is inert. The batch has exactly
+    /// one failure and it matches mA's expectation, so the old tool credited mA RED from it. Solo, mA survives; mC's expected CTest passes
+    /// and only the unexpected ATest#t1 fails, so mC is SURVIVED too (a batch-mate's kill is never another mutant's RED).
+    @Test
+    void aBatchMateBreakingAnotherMutantsTest_isNeverCreditedRed() throws Exception {
+        var out = batch("""
+                        {"modules":[{"name":"C","class":"CTest","cases":["t1"],"fault":"inert"},
+                                     {"name":"A","class":"ATest","cases":["t1","t2"],"breaks":["C"]}]}""",
+                        mutation("mA", "A", "ATest", "fine"),
+                        mutation("mC", "C", "CTest", "MUT"));
+
+        assertThat(out.outcomes()).containsEntry("mA", "SURVIVED").containsEntry("mC", "SURVIVED");
+        assertThat(out.credited()).containsEntry("mA", "solo").containsEntry("mC", "solo");
+        assertThat(builds()).containsExactly("[] false", "[C] true", "[] false", "[C] false");
+        assertThat(out.md()).contains("failures none of which were expected: ATest#t1");
+    }
+
+    /// Two mutants of one file are never in one batch, even with different `old`, zones and expected classes.
+    @Test
+    void mutantsOfOneFile_areNeverBatched() throws Exception {
+        var out = batch(modules(null),
+                        mutation("m1", "A", "ATest", "fine"),
+                        """
+                            {"id":"m2","file":"A/src/f.txt","kind":"lit","old":"ko","new":"fine","expect":["BTest"]}""");
+
+        assertThat(out.outcomes()).containsEntry("m1", "SURVIVED").containsEntry("m2", "SURVIVED");
+        assertThat(out.credited()).containsEntry("m1", "solo").containsEntry("m2", "solo");
+        assertThat(builds()).containsExactly("[] false", "[] false", "[] false");
+    }
+
+    /// A zero-failure batch whose member's module reported no testcases: that member is NOT-RUN in the batch and is re-run singly (still
+    /// NOT-RUN); the other member keeps its batch credit.
+    @Test
+    void aZeroFailureBatch_withAnEmptyReport_isRerunSingly() throws Exception {
+        var out = batch(modules("zero"), mutation("mA", "A", "ATest", "MUT"), mutation("mC", "C", "CTest", "fine"));
+
+        assertThat(out.outcomes()).containsEntry("mA", "NOT-RUN").containsEntry("mC", "SURVIVED");
+        assertThat(out.credited()).containsEntry("mA", "solo").containsEntry("mC", "batch");
+        assertThat(out.rc()).isEqualTo(5);
+        assertThat(builds()).containsExactly("[] false", "[A] true", "[A] false");
+        assertThat(out.log()).contains("NOT-RUN in batch (re-running singly): mA");
     }
 
     /// One module, one mutant: the build is a plain single run (no -fae) and credited.
@@ -141,6 +227,7 @@ class BbMutateIT {
         var out = batch(modules(null), mutation("mA", "A", "ATest", "MUT"));
 
         assertThat(out.outcomes()).containsEntry("mA", "RED");
+        assertThat(out.credited()).containsEntry("mA", "solo");
         assertThat(out.rc()).isZero();
         assertThat(builds()).containsExactly("[] false", "[A] false");
     }
@@ -149,7 +236,7 @@ class BbMutateIT {
     /// (a batch joins them with '+', which the ticket field cannot hold, so '.'); bb-queue shows the label as [mutant <label>].
     @Test
     void everyBuild_carriesBbVia_withTheSpecBasenameAndTheMutantLabel() throws Exception {
-        batch(modules(null), mutation("mA", "A", "ATest", "MUT"), mutation("mC", "C", "CTest", "fine"));
+        batch(modules(null), mutation("mA", "A", "ATest", "fine"), mutation("mC", "C", "CTest", "fine"));
         assertThat(Files.readAllLines(home.resolve("via.log"))).containsExactly("bb-mutate:spec:control",
                                                                                 "bb-mutate:spec:mA.mC");
     }
@@ -158,7 +245,7 @@ class BbMutateIT {
     @Test
     void bbVia_isSanitizedAndBounded() throws Exception {
         specName = "my spec+v1.json";
-        batch(modules(null), mutation("m+A", "A", "ATest", "MUT"), mutation("x".repeat(80), "C", "CTest", "fine"));
+        batch(modules(null), mutation("m+A", "A", "ATest", "fine"), mutation("x".repeat(80), "C", "CTest", "fine"));
         var vias = Files.readAllLines(home.resolve("via.log"));
 
         assertThat(vias).hasSize(2);
@@ -167,10 +254,181 @@ class BbMutateIT {
         assertThat(vias.get(1)).hasSize(64);
     }
 
+    /// No build ran for a refused call (bb-build exited 1 at once), so the verdict is credited `-`, not `batch`: a group of two.
+    @Test
+    void aRefusedBatch_isCreditedDash() throws Exception {
+        var out = batch(withKey(modules(null), "refuseWhen", 2), mutation("mA", "A", "ATest", "MUT"), mutation("mC", "C", "CTest", "MUT"));
+
+        assertThat(out.outcomes()).containsEntry("mA", "CALL-REFUSED").containsEntry("mC", "CALL-REFUSED");
+        assertThat(out.credited()).containsEntry("mA", "-").containsEntry("mC", "-");
+        assertThat(builds()).containsExactly("[] false");
+    }
+
+    /// The same for a group of one (the `solo` of the group site).
+    @Test
+    void aRefusedLoneMutant_isCreditedDash() throws Exception {
+        var out = batch(withKey(modules(null), "refuseWhen", 1), mutation("mA", "A", "ATest", "MUT"));
+
+        assertThat(out.outcomes()).containsEntry("mA", "CALL-REFUSED");
+        assertThat(out.credited()).containsEntry("mA", "-");
+        assertThat(builds()).containsExactly("[] false");
+    }
+
+    /// The batch runs and fails, so each member is re-run singly, and both of those calls are refused: the `finish` site, credited `-` too.
+    @Test
+    void aRefusedSingleAfterAFailingBatch_isCreditedDash() throws Exception {
+        var out = batch(withKey(modules(null), "refuseWhen", 1), mutation("mA", "A", "ATest", "MUT"), mutation("mC", "C", "CTest", "MUT"));
+
+        assertThat(out.outcomes()).containsEntry("mA", "CALL-REFUSED").containsEntry("mC", "CALL-REFUSED");
+        assertThat(out.credited()).containsEntry("mA", "-").containsEntry("mC", "-");
+        assertThat(builds()).containsExactly("[] false", "[A,C] true");
+    }
+
+    /// rc 1 with fresh reports, every test green and a clean log: nothing names the cause, so the batch is not credited: each member runs solo.
+    @Test
+    void aBatchWithANonZeroRcAndNoFailure_isRerunSingly() throws Exception {
+        var out = batch(inertModules("rcWhen", "inert", "inert"), mutation("mA", "A", "ATest", "MUT"), mutation("mC", "C", "CTest", "MUT"));
+
+        assertThat(out.outcomes()).containsEntry("mA", "SURVIVED").containsEntry("mC", "SURVIVED");
+        assertThat(out.credited()).containsEntry("mA", "solo").containsEntry("mC", "solo");
+        assertThat(builds()).containsExactly("[] false", "[A,C] true", "[A] false", "[C] false");
+    }
+
+    /// A compiler error in the log under rc 0 (failOnError=false) with no failing test: the batch is not credited; the member that holds the
+    /// error is COMPILE-ERROR solo, its batch-mate is SURVIVED solo from a build without that log.
+    @Test
+    void aBatchWithACompilerErrorInItsLog_isRerunSingly() throws Exception {
+        var out = batch(modules("compileerr"), mutation("mA", "A", "ATest", "MUT"), mutation("mC", "C", "CTest", "fine"));
+
+        assertThat(out.outcomes()).containsEntry("mA", "COMPILE-ERROR").containsEntry("mC", "SURVIVED");
+        assertThat(out.credited()).containsEntry("mA", "solo").containsEntry("mC", "solo");
+        assertThat(builds()).containsExactly("[] false", "[A] true", "[A] false", "[] false");
+    }
+
+    /// A mutant that never applied ran no build: credited `-`; its valid neighbour is a solo run.
+    @Test
+    void anInvalidMutant_isCreditedDash() throws Exception {
+        var out = batch(modules(null),
+                        mutation("mA", "A", "ATest", "fine"),
+                        """
+                            {"id":"mX","file":"C/src/f.txt","kind":"lit","old":"absent","new":"x","expect":["CTest"]}""");
+
+        assertThat(out.outcomes()).containsEntry("mA", "SURVIVED").containsEntry("mX", "APPLY-INVALID");
+        assertThat(out.credited()).containsEntry("mA", "solo").containsEntry("mX", "-");
+    }
+
+    /// The queue wait expires for a batch that never starts: the run is aborted (exit 4) and every member is NOT-RUN with no build credited.
+    @Test
+    void aRunAbortedByTheQueueWait_leavesTheRestNotRunCreditedDash() throws Exception {
+        killableBuilds();
+        extra = List.of("--timeout", "0.03");
+        okRcs = List.of(4);
+        var out = batch(modules("nostart"), mutation("mA", "A", "ATest", "MUT"), mutation("mC", "C", "CTest", "MUT"));
+
+        assertThat(out.rc()).isEqualTo(4);
+        assertThat(out.outcomes()).containsEntry("mA", "NOT-RUN").containsEntry("mC", "NOT-RUN");
+        assertThat(out.credited()).containsEntry("mA", "-").containsEntry("mC", "-");
+    }
+
+    /// A lone mutant whose build outlives its bound is TIMEOUT, from a build of one: `solo`.
+    @Test
+    void aLoneTimeout_isCreditedSolo() throws Exception {
+        killableBuilds();
+        buildJson = "{\"mutantTimeoutSecs\":1}";
+        var out = batch(modules("hang"), mutation("mA", "A", "ATest", "MUT"));
+
+        assertThat(out.outcomes()).containsEntry("mA", "TIMEOUT");
+        assertThat(out.credited()).containsEntry("mA", "solo");
+        assertThat(out.rc()).isZero();
+    }
+
+    /// A batch that outlives its bound is re-run singly: the member that hangs again is TIMEOUT `solo`, the other one is judged solo.
+    @Test
+    void aTimeoutInABatch_isRerunSinglyAndEachCreditedSolo() throws Exception {
+        killableBuilds();
+        buildJson = "{\"mutantTimeoutSecs\":1}";
+        var out = batch(modules("hang"), mutation("mA", "A", "ATest", "MUT"), mutation("mC", "C", "CTest", "MUT"));
+
+        assertThat(out.outcomes()).containsEntry("mA", "TIMEOUT").containsEntry("mC", "RED");
+        assertThat(out.credited()).containsEntry("mA", "solo").containsEntry("mC", "solo");
+        assertThat(builds()).containsExactly("[] false", "[A,C] true", "[A] false", "[C] false");
+    }
+
+    /// The TSV carries its columns in the order its rows do (readers take them by position); the md header is pinned apart.
+    @Test
+    void resultsTsv_headerNamesTheColumnsInRowOrder() throws Exception {
+        var out = batch(modules(null), mutation("mA", "A", "ATest", "fine"));
+
+        assertThat(out.tsvHeader()).isEqualTo("id\toutcome\tcredited\texpected_failed\tall_failures\ttestcases\trc\tsecs\tdetail");
+    }
+
+    /// `A/src/f.txt` and `./A/src/f.txt` are one file: never batched (a batch would see git name one path where two were applied and
+    /// record both APPLY-INVALID); each runs solo.
+    @Test
+    void aSecondSpellingOfAFile_isNeverBatched() throws Exception {
+        var out = batch(modules(null),
+                        """
+                            {"id":"m1","file":"A/src/f.txt","kind":"lit","old":"ok","new":"fine","expect":["ATest"]}""",
+                        """
+                            {"id":"m2","file":"./A/src/f.txt","kind":"lit","old":"ko","new":"fine","expect":["BTest"]}""");
+
+        assertThat(out.outcomes()).containsEntry("m1", "SURVIVED").containsEntry("m2", "SURVIVED");
+        assertThat(out.credited()).containsEntry("m1", "solo").containsEntry("m2", "solo");
+        assertThat(builds()).containsExactly("[] false", "[] false", "[] false");
+    }
+
+    /// C/src/f.txt is a tracked symlink to A/src/f.txt: the pair batches (two names), applies, and git names one file, so the batch is invalid.
+    /// It is not recorded as such: each member runs singly, the real file's mutant is judged, the aliased one is APPLY-INVALID alone.
+    @Test
+    void anInvalidBatch_isRerunSingly_soTheValidMemberIsNotStranded() throws Exception {
+        sh("""
+           set -e
+           cd "%s" && rm C/src/f.txt && ln -s ../../A/src/f.txt C/src/f.txt
+           git add -A && git -c user.name=t -c user.email=t@t commit -qm link
+           git push -q origin HEAD:refs/heads/main && git fetch -q origin
+           """.formatted(co));
+        var out = batch(modules(null),
+                        mutation("mA", "A", "ATest", "fine"),
+                        """
+                            {"id":"mC","file":"C/src/f.txt","kind":"lit","old":"ko","new":"fine","expect":["CTest"]}""");
+
+        assertThat(out.outcomes()).containsEntry("mA", "SURVIVED").containsEntry("mC", "APPLY-INVALID");
+        assertThat(out.credited()).containsEntry("mA", "solo").containsEntry("mC", "-");
+        assertThat(out.log()).contains("ambiguous -> re-running singly");
+    }
+
     // ---- harness
     private String specName = "spec.json";
+    private String buildJson = "{}";
+    private List<String> extra = List.of();
+    private List<Integer> okRcs = List.of(0, 5);
 
-    private record Result(int rc, Map<String, String> outcomes, String stdout, String log, String md) {}
+    private record Result(int rc,
+                          Map<String, String> outcomes,
+                          Map<String, String> credited,
+                          String stdout,
+                          String log,
+                          String md,
+                          String tsvHeader) {}
+
+    /// scenario with one more top-level key
+    private static String withKey(String scenario, String key, int value) {
+        return scenario.replace("{\"modules\"", "{\"" + key + "\":" + value + ",\"modules\"");
+    }
+
+    /// A and C take the given faults when mutated; `key` = 2 on the scenario, so a build of both mutated reads the key
+    private static String inertModules(String key, String a, String c) {
+        return withKey("""
+                       {"modules":[{"name":"A","class":"ATest","cases":["t1","t2"],"fault":"%s"},
+                                    {"name":"B","deps":["A"],"class":"BTest","cases":["t1"]},
+                                    {"name":"C","class":"CTest","cases":["t1"],"fault":"%s"}]}""".formatted(a, c), key, 2);
+    }
+
+    /// The builds that bb-mutate must kill (a bound or the queue wait): its kill path lists /proc and calls `~/tools/bb-queue reap`.
+    private void killableBuilds() throws IOException {
+        assumeTrue(Files.isDirectory(Path.of("/proc")), "the kill path of bb-mutate reads /proc");
+        BbFixtures.executable(home.resolve("tools/bb-queue"), "#!/bin/sh\nexit 0\n");
+    }
 
     private static String mutation(String id, String module, String test, String to) {
         return """
@@ -203,36 +461,42 @@ class BbMutateIT {
         var out = dir.resolve("out");
 
         Files.writeString(home.resolve("scenario.json"), scenario);
-        Files.writeString(dir.resolve(specName), "{\"build\":{},\"mutations\":[" + String.join(",", mutations) + "]}");
+        Files.writeString(dir.resolve(specName), "{\"build\":" + buildJson + ",\"mutations\":[" + String.join(",", mutations) + "]}");
         var env = new HashMap<String, String>();
 
         env.put("PATH", System.getenv("PATH"));
         env.put("HOME", home.toString());
         env.put("BB_OWNER", "t");
-        var run = BbFixtures.run(List.of("python3",
-                                         script.toString(),
-                                         co.toString(),
-                                         dir.resolve(specName).toString(),
-                                         out.toString(),
-                                         "--batch"),
-                                 env,
-                                 null,
-                                 null);
+        var argv = new java.util.ArrayList<>(List.of("python3",
+                                                     script.toString(),
+                                                     co.toString(),
+                                                     dir.resolve(specName).toString(),
+                                                     out.toString(),
+                                                     "--batch"));
 
-        assertThat(run.rc()).as(run.stdout() + run.stderr()).isIn(0, 5);
+        argv.addAll(extra);
+        var run = BbFixtures.run(argv, env, null, null);
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isIn(okRcs);
         var outcomes = new HashMap<String, String>();
+        var credited = new HashMap<String, String>();
 
         Files.readAllLines(out.resolve("results.tsv"))
              .stream()
              .skip(1)
              .map(l -> l.split("\t"))
-             .forEach(c -> outcomes.put(c[0], c[1]));
+             .forEach(c -> {
+                 outcomes.put(c[0], c[1]);
+                 credited.put(c[0], c[2]);
+             });
 
         return new Result(run.rc(),
                           outcomes,
+                          credited,
                           run.stdout(),
                           Files.readString(out.resolve("bb-mutate.log")),
-                          Files.readString(out.resolve("results.md")));
+                          Files.readString(out.resolve("results.md")),
+                          Files.readAllLines(out.resolve("results.tsv")).get(0));
     }
 
     /// one `[mutated modules] fae` line per build the fake bb-build ran
