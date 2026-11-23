@@ -4,6 +4,7 @@
 # testcase fails unless the module has a fault: zero (suite for the class, no testcases), otherclass (suite of another class),
 # stale (writes nothing), inert (mutated, but its tests pass). A module with "breaks":[names] ALSO fails its first testcase when any
 # listed module is mutated (a change in another file breaking this module's test: the #97 cross-file shape).
+# A module's "failN":N makes its first N testcases fail instead of the first one (the #100 truncation shape).
 # Top-level "ignoreFailures":true makes rc 0 although testcases fail (testFailureIgnore).
 # More scenario keys: "refuseWhen":N makes the call exit 1 (bb-build refused, no build runs) when exactly N modules are mutated;
 # "rcWhen":N forces rc 1 (reports untouched) when exactly N modules are mutated; fault "compileerr" (mutated, tests pass) puts a
@@ -59,7 +60,7 @@ for m in sc["modules"]:
             cls = "Other" + cls
         cases = [(cls, c) for c in m["cases"]]
     fail = (mut and not fault) or any(x in mutated for x in m.get("breaks", []))
-    body = "".join(f'<testcase classname="{c}" name="{t}">' + ("<failure message=\"x\"/>" if fail and i == 0 else "") + "</testcase>"
+    body = "".join(f'<testcase classname="{c}" name="{t}">' + ("<failure message=\"x\"/>" if fail and i < m.get("failN", 1) else "") + "</testcase>"
                    for i, (c, t) in enumerate(cases))
     open(f"{d}/TEST-{cls}.xml", "w").write(f'<testsuite name="{cls}" tests="{len(cases)}">{body}</testsuite>')
     if fail:
