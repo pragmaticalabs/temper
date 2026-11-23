@@ -44,6 +44,8 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 ///  - #100: the `elif fails` branch taken without a failure (`else`) -> [#aZeroFailureSoloBuild_stillReadsSurvived]
 ///  - #100: the detail without the failing tests' names -> [#aSoloMutantBreakingOnlyAnUnlistedTest_isKilledElsewhere_namingTheTest]
 ///  - #100: the verdict without the flake note -> [#theKilledElsewhereTally_andTheFlakeNote_showInTheSummaryAndTheResults]
+///  - #100: the detail truncated to fewer than five failing tests (`fails[:5]` -> `fails[:1]`) -> [#aSoloMutantBreakingSixUnlistedTests_namesTheFirstFiveInTheDetail_andAllSixInAllFailures]
+///  - #100: the detail's tail (expect-list hint, flake note) dropped -> [#aSoloMutantBreakingOnlyAnUnlistedTest_isKilledElsewhere_namingTheTest]
 ///  - #100: the summary line without the KILLED-ELSEWHERE count or note -> [#theKilledElsewhereTally_andTheFlakeNote_showInTheSummaryAndTheResults]
 ///  - results.tsv header columns reordered -> [#resultsTsv_headerNamesTheColumnsInRowOrder]
 class BbMutateIT {
@@ -206,6 +208,11 @@ class BbMutateIT {
         {"modules":[{"name":"C","class":"CTest","cases":["t1"],"fault":"inert"},
                      {"name":"A","class":"ATest","cases":["t1","t2"],"breaks":["C"]}]}""";
 
+    /// C's mutation breaks the first six testcases of A's one suite; the case names are out of alphabetical order, so the report order shows
+    private static final String SIX_BROKEN = """
+        {"modules":[{"name":"C","class":"CTest","cases":["t1"],"fault":"inert"},
+                     {"name":"A","class":"ATest","cases":["t3","t1","t6","t2","t5","t4"],"breaks":["C"],"failN":6}]}""";
+
     /// #100 (row a): a lone mutant whose build fails only an unlisted test is detected, so not SURVIVED: KILLED-ELSEWHERE, the detail naming
     /// the test. The old tool read it SURVIVED, hiding a detection behind a wrong expect list.
     @Test
@@ -216,7 +223,21 @@ class BbMutateIT {
         assertThat(out.credited()).containsEntry("mC", "solo");
         assertThat(out.rc()).as("the exit code is unchanged: not NOT-RUN").isZero();
         assertThat(out.detail("mC")).contains("ATest#t1");
+        assertThat(out.detail("mC")).as("the detail's tail: the expect-list hint and the flake note")
+                  .contains("expect list wrong or incomplete")
+                  .contains("one green control does not rule out a flake of that test");
         assertThat(builds()).containsExactly("[] false", "[C] false");
+    }
+
+    /// #100 (row e): the detail names the first five failing testcases, in report order, and no more; the all_failures column keeps all six.
+    @Test
+    void aSoloMutantBreakingSixUnlistedTests_namesTheFirstFiveInTheDetail_andAllSixInAllFailures() throws Exception {
+        var out = batch(SIX_BROKEN, mutation("mC", "C", "CTest", "MUT"));
+
+        assertThat(out.outcomes()).containsEntry("mC", "KILLED-ELSEWHERE");
+        assertThat(out.detail("mC")).contains("ATest#t3,ATest#t1,ATest#t6,ATest#t2,ATest#t5;")
+                  .doesNotContain("ATest#t4");
+        assertThat(out.allFailures("mC")).isEqualTo("ATest#t3,ATest#t1,ATest#t6,ATest#t2,ATest#t5,ATest#t4");
     }
 
     /// #100 (row b): zero failing testcases is the only SURVIVED, and its detail stays empty.
@@ -485,6 +506,11 @@ class BbMutateIT {
                           .filter(r -> r.startsWith(id + "\t"))
                           .findFirst()
                           .orElseThrow();
+        }
+
+        /// the all_failures column of a mutant's TSV row
+        String allFailures(String id) {
+            return tsvRow(id).split("\t", -1) [4];
         }
 
         /// the detail column of a mutant's TSV row (empty when the column is absent)
