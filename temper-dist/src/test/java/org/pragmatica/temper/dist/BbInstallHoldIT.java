@@ -35,6 +35,9 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 /// Rows added for verifier v93a's findings on #96 (lane93c, 2026-11-22; red at 99bf5b782, green at the fix; mutants on throwaway
 /// branches): held() proves the lock is held, not that HOLDF exists; no call rides a ControlMaster; the heartbeat bound is
 /// HB_EVERY + 2*SSH_WALL + 1 < HB_STALE; the install's nonzero status is exit 11; `touch -c` for an in-flight heartbeat.
+///
+/// Rows added for verifier v93b's four surviving mutants on #96 (lane93d, 2026-11-23; each red with its mutant, green at the head):
+/// the WANT check after flock, the waiting/ half of the drain test, the `|| echo` on the spawn call and on the queue count.
 class BbInstallHoldIT {
     private static final Path SCRIPT = BbFixtures.OPS_BB.resolve("bb-install-hold.sh");
     private static final List<String> HOSTS = List.of("h1", "h2", "h3");
@@ -411,6 +414,127 @@ class BbInstallHoldIT {
                                                          "held aether@h3");
         assertThat(samples()).containsExactly("h1=held h2=held h3=held");
         assertNoTokensAnywhere();
+    }
+
+    /// h2's holder is blocked in flock (another process has the lock) when the take times out and the release removes WANT. When the
+    /// lock frees, the holder must exit without writing HOLDF. Without the WANT check it writes HOLDF and goes on to the hold loop,
+    /// whose first `date` call is visible: a fake `date` (in front on PATH) marks and stalls only while WANT is gone, and a fake `flock`
+    /// marks when the holder's flock returned, so the absence is read after the holder provably got the lock.
+    @Test
+    void aHolderBlockedInFlockWhoseWantIsGone_exitsWithoutWritingHoldf_whenItGetsTheLock() throws Exception {
+        var fake = Files.createDirectories(dir.resolve("fake-bin"));
+
+        BbFixtures.executable(fake.resolve("flock"),
+                              """
+            #!/bin/bash
+            PATH=${PATH#@FAKE@:}; flock "$@"; rc=$?; touch "$HOME/flock.returned"; exit $rc
+            """.replace("@FAKE@", fake.toString()));
+        BbFixtures.executable(fake.resolve("date"),
+                              """
+            #!/bin/bash
+            PATH=${PATH#@FAKE@:}
+            if [ ! -e "$HOME/work/.install-want" ]; then touch "$HOME/date.after-want-gone"; sleep 8; fi
+            exec date "$@"
+            """.replace("@FAKE@", fake.toString()));
+        var lock = home("h2").resolve("work/queue/.lock");
+        var locker = BbFixtures.process(List.of("bash",
+                                                "-c",
+                                                "exec 9> \"$1\"; flock 9; echo locked; exec sleep 60",
+                                                "locker",
+                                                lock.toString()),
+                                        Map.of("PATH",
+                                               System.getenv("PATH")))
+                               .start();
+
+        lockers.add(locker);
+        assertThat(new String(locker.getInputStream().readNBytes(7),
+                              StandardCharsets.UTF_8)).isEqualTo("locked\n");
+        var outcome = hold(Map.of("TAKE_SECS", "3", "PATH", fake + ":" + System.getenv("PATH")));
+
+        assertThat(outcome.rc()).as(outcome.stderr()).isEqualTo(9);
+        assertThat(home("h2").resolve("work/.install-want")).doesNotExist();
+        locker.destroyForcibly().waitFor();
+        var returned = home("h2").resolve("flock.returned");
+        var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+
+        while (!Files.exists(returned) && System.nanoTime() < deadline) {
+            Thread.sleep(100);
+        }
+
+        assertThat(returned).as("the blocked holder got the lock once it was free").exists();
+        Thread.sleep(1500);
+        assertThat(home("h2").resolve("date.after-want-gone")).as("the holder went on to the hold loop with WANT gone")
+                  .doesNotExist();
+        assertThat(home("h2").resolve("work/.install-hold")).as("h2 HOLDF").doesNotExist();
+        assertEveryLockFreeWithin(5);
+        assertNoTokensAnywhere();
+    }
+
+    /// A ticket only in waiting/ is a queue that has not drained: h2 is not held, the drain times out, exit 9, nothing run and the
+    /// ticket untouched. A drain test that counted running/ alone would see 0 and hold h2.
+    @Test
+    void aTicketOnlyInWaiting_isNotAnEmptyQueue_isRefusedAtTheDrainTimeout_andNothingRun() throws Exception {
+        var ticket = Files.writeString(home("h2").resolve("work/queue/waiting/t1"), "ticket\n");
+        var mtime = Files.getLastModifiedTime(ticket);
+        var outcome = hold(Map.of("DRAIN_SECS", "3"));
+
+        assertThat(outcome.rc()).as(outcome.stderr()).isEqualTo(9);
+        assertThat(outcome.stderr()).contains("refused: aether@h2 did not drain in 3s (running+waiting=1); every hold released; nothing run");
+        assertThat(outcome.stdout()).contains("aether@h2: waiting for the queue to drain (running+waiting=1)")
+                  .doesNotContain("held aether@h2");
+        assertThat(installRan()).isFalse();
+        assertThat(Files.readString(ticket)).isEqualTo("ticket\n");
+        assertThat(Files.getLastModifiedTime(ticket)).isEqualTo(mtime);
+        assertNoTokensAnywhere();
+        assertEveryLockFreeWithin(5);
+    }
+
+    /// h2's holder-spawn ssh call fails (rc 255, nothing started there). The script does not die at that call: it reports it, the take
+    /// times out, and the refusal is exit 9 with nothing run and every host released, h2 included (its release call is sent).
+    @Test
+    void aFailedHolderSpawnCall_isReported_thenRefusedAsExit9_withEveryHoldReleased() throws Exception {
+        var outcome = hold(Map.of("SHIM_FAIL_HOST",
+                                  "h2",
+                                  "SHIM_FAIL_MATCH",
+                                  "*nohup*",
+                                  "SHIM_FAIL_COUNT",
+                                  "1",
+                                  "TAKE_SECS",
+                                  "3"));
+
+        assertThat(outcome.rc()).as(outcome.stderr()).isEqualTo(9);
+        assertThat(outcome.stderr()).contains("aether@h2: the holder spawn call failed (rc 255)",
+                                              "refused: aether@h2: the holder did not take the queue lock in 3s; every hold released; nothing run");
+        assertThat(outcome.stdout()).contains("held aether@h1").doesNotContain("held aether@h2");
+        assertThat(installRan()).isFalse();
+        assertThat(sshCalls()).contains("aether@h1|-n BatchMode=yes ConnectTimeout=2 ServerAliveInterval=5 ServerAliveCountMax=3 ControlMaster=no ControlPath=none|rm -f ~/work/.install-want ~/work/.install-hold",
+                                        "aether@h2|-n BatchMode=yes ConnectTimeout=2 ServerAliveInterval=5 ServerAliveCountMax=3 ControlMaster=no ControlPath=none|rm -f ~/work/.install-want ~/work/.install-hold");
+        assertNoTokensAnywhere();
+        assertEveryLockFreeWithin(5);
+    }
+
+    /// Every queue-count call to h2 fails (rc 255). An unreachable host is never an empty queue: the count reads `unreachable`, h2 is
+    /// polled until the drain times out, exit 9, nothing run, and no holder was ever spawned on h2. A count that aborted the script
+    /// would exit 255; one that read the failure as 0 would hold h2 and run the install.
+    @Test
+    void aQueueCountThatFails_isNotAnEmptyQueue_isPolledUntilTheDrainTimeout_andNothingRun() throws Exception {
+        var outcome = hold(Map.of("SHIM_FAIL_HOST",
+                                  "h2",
+                                  "SHIM_FAIL_MATCH",
+                                  "*find*",
+                                  "SHIM_FAIL_COUNT",
+                                  "1000",
+                                  "DRAIN_SECS",
+                                  "3"));
+
+        assertThat(outcome.rc()).as(outcome.stderr()).isEqualTo(9);
+        assertThat(outcome.stderr()).contains("refused: aether@h2 did not drain in 3s (running+waiting=unreachable); every hold released; nothing run");
+        assertThat(outcome.stdout()).contains("aether@h2: waiting for the queue to drain (running+waiting=unreachable)")
+                  .doesNotContain("held aether@h2");
+        assertThat(installRan()).isFalse();
+        assertThat(sshCalls()).noneMatch(call -> call.startsWith("aether@h2|") && call.contains("nohup"));
+        assertNoTokensAnywhere();
+        assertEveryLockFreeWithin(5);
     }
 
     @Test
