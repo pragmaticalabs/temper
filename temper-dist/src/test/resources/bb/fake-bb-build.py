@@ -5,6 +5,10 @@
 # stale (writes nothing), inert (mutated, but its tests pass). A module with "breaks":[names] ALSO fails its first testcase when any
 # listed module is mutated (a change in another file breaking this module's test: the #97 cross-file shape).
 # Top-level "ignoreFailures":true makes rc 0 although testcases fail (testFailureIgnore).
+# More scenario keys: "refuseWhen":N makes the call exit 1 (bb-build refused, no build runs) when exactly N modules are mutated;
+# "rcWhen":N forces rc 1 (reports untouched) when exactly N modules are mutated; fault "compileerr" (mutated, tests pass) puts a
+# COMPILATION ERROR into .bb/build.log; fault "hang" (mutated) starts, then never ends (no rc) until its detached child exits;
+# fault "nostart" never starts at all. A hung job is a detached child that sleeps 20 s, so bb-mutate must kill the build by its bound.
 # A module with a failed or skipped dependency is skipped; without -fae every module after a failure is.
 import json, os, sys, time
 
@@ -14,11 +18,28 @@ sc = json.load(open(home + "/scenario.json"))
 b = co + "/.bb"
 os.makedirs(b, exist_ok=True)
 time.sleep(0.05)
-open(b + "/start", "w").write(str(int(time.time())) + "\n")
 fae = "-fae" in args
 mutated = [m["name"] for m in sc["modules"] if "MUT" in open(f"{co}/{m['name']}/src/f.txt").read()]
+if sc.get("refuseWhen") == len(mutated):
+    sys.stderr.write("bb-build: refused\n")
+    sys.exit(1)
+faults = [m.get("fault") for m in sc["modules"] if m["name"] in mutated]
+if "nostart" not in faults:
+    open(b + "/start", "w").write(str(int(time.time())) + "\n")
 open(home + "/builds.log", "a").write("[" + ",".join(mutated) + "] " + str(fae).lower() + "\n")
 open(home + "/via.log", "a").write(os.environ.get("BB_VIA", "<unset>") + "\n")
+if "hang" in faults or "nostart" in faults:
+    print("ticket=T1", flush=True)
+    if os.fork():
+        os._exit(0)
+    os.setsid()
+    os.chdir("/")
+    nul = os.open(os.devnull, os.O_RDWR)
+    for fd in (0, 1, 2):
+        os.dup2(nul, fd)
+    time.sleep(20)
+    os._exit(0)
+open(b + "/build.log", "w").write("COMPILATION ERROR\n" if "compileerr" in faults else "BUILD SUCCESS\n")
 bad, rc = set(), 0
 for m in sc["modules"]:
     n = m["name"]
@@ -45,5 +66,5 @@ for m in sc["modules"]:
         bad.add(n)
         rc = 1
 open(b + "/end", "w").write(str(int(time.time())) + "\n")
-open(b + "/rc", "w").write(f"{0 if sc.get('ignoreFailures') else rc}\n")
+open(b + "/rc", "w").write(f"{1 if sc.get('rcWhen') == len(mutated) else 0 if sc.get('ignoreFailures') else rc}\n")
 print("ticket=T1")

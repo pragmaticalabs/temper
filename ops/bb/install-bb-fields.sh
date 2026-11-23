@@ -120,7 +120,7 @@ readonly BB_TESTCOUNT_NEW=7ef8a4c3eba2a517146eed6d7ac31511
 readonly BB_MUTATE_OLD=f9bfbd37c5feafe67995f6716e8fecb0   # the host snapshot, identical on all four hosts: batch credit unsound for multi-module specs
 readonly BB_MUTATE_PREVIA=2c341d44d428ba445db7ea03ee90af64   # the batch-sound version (#41): does not export BB_VIA (issue #46)
 readonly BB_MUTATE_PRE97=130f094861c0f835869ff42230d7bffb   # a batch is credited from a build with failures (issue #97)
-readonly BB_MUTATE_NEW=24d45902eadc64503a2d291d216ca67d
+readonly BB_MUTATE_NEW=4869a07cdaf3252905ceb0800c64cda7
 readonly TARGET_RE='^[a-z_][a-z0-9_-]{0,31}@[A-Za-z0-9.:-]+$'
 
 HERE=$(cd "$(dirname "$0")" && pwd)

@@ -995,6 +995,25 @@ class BbInstallIT {
         assertThat(tools.resolve("bb-mutate.bak-" + pin("BB_MUTATE_PRE97"))).hasBinaryContent(prev("bb-mutate.pre97"));
     }
 
+    /// A stranger's bb-mutate is refused with the four accepted pins named oldest first (OLD, PREVIA, PRE97, NEW), the order accepted_of defines,
+    /// and nothing is written.
+    @Test
+    void aStrangersBbMutate_isRefused_namingTheFourPinsOldestFirst_andNothingIsWritten() throws Exception {
+        var tools = host("h1");
+
+        Files.writeString(tools.resolve("bb-mutate"), "someone else's mutation harness\n");
+        var before = listing(tools);
+        var run = install("builder@h1");
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isEqualTo(65);
+        assertThat(run.stdout().lines().toList()).containsExactly("refused builder@h1 bb-mutate installed=" + BbFixtures.md5("someone else's mutation harness\n".getBytes())
+                                                                 + " expected=" + pin("BB_MUTATE_OLD")
+                                                                 + "|" + pin("BB_MUTATE_PREVIA")
+                                                                 + "|" + pin("BB_MUTATE_PRE97")
+                                                                 + "|" + pin("BB_MUTATE_NEW"));
+        assertThat(listing(tools)).isEqualTo(before);
+    }
+
     /// A host at main's install set after #70 (bb-build dafd74a3, bb-queue 6d96fab8, bb-queue-lib.sh e607b50f, bb-result f4505867, bb-wait d742e51d,
     /// with bb-cp-record, bb-test, bb-testcount, bb-hold, bb-await, bb-portgroup.py and bb-modules.py at their pins) is accepted for every file and
     /// upgraded to this change's run-identity set (#80). Mutation: drop BB_*_PRE80 from accepted_of -> the host is refused, exit 65, red.
