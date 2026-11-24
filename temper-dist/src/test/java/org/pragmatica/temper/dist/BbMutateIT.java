@@ -540,7 +540,7 @@ class BbMutateIT {
                   .contains("A=g.x:A:1")
                   .contains("add -am, or install them first");
         assertThat(out.log()).contains("[control] bb-build").doesNotContain("[mB] bb-build");
-        assertThat(out.outcomes()).doesNotContainKey("mB");
+        assertThat(out.outcomes()).as("the mutant was never launched").containsEntry("mB", "NOT-RUN");
         assertThat(home.resolve("builds.log")).as("no build ran").doesNotExist();
         assertThat(dir.resolve("q/waiting")).as("nothing queued").isEmptyDirectory();
     }
