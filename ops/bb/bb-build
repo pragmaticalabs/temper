@@ -48,7 +48,11 @@
 #     whose driver is gone to done/ (state=abandoned, .bb/rc 9). A RUNNING ticket is never touched on driver death.
 #   BOUND: the waiter starts a runner (`bb-build __bound`) with the job: a job still running bound= seconds after its start is stopped (its process
 #     tree, its container, java processes whose cwd is the checkout; nothing else, so not a driver or shell standing there), with a live driver or without; the
-#     ticket gets bound_hit=, rc=124 and .bb/rc 124 (when the job wrote none). It tests once a second, on whole seconds rounded up (never before the bound), and retries a stop that left survivors.
+#     ticket gets bound_hit=, rc=124 and .bb/rc 124. A job that returned by itself first gets job_end= instead (its rc is kept, whatever the count
+#     and bb-cp-record after it take). WHEN: bound_hit= comes bound to bound + 2 s after the grant (whole seconds rounded up, so never before the
+#     bound; one test a second; plus a wait for the queue lock). Then TERM after one /proc scan, KILL 5 s later to what ignores it, two more scans,
+#     .bb/rc: measured 4 to 8 s after bound_hit=, 9 to 10 s for a job that ignores TERM (300 processes on the host; a scan grows with them,
+#     and a stop that left survivors is retried, so there is no fixed upper limit).
 #     A runner outlives its waiter; NOT COVERED: the runner itself killed, and tickets without bound= (a bb-mutate of before #116).
 # The four variables are unset before the waiter (or, under BB_QUEUE=0, bb-build-direct) starts, so a build never inherits them.
 # LOAD GATE (2026-11-11): a ticket is also granted only while load5/cores < 1.2 (BB_LOAD_MAX); the oldest grantable ticket goes
@@ -324,8 +328,8 @@ if [ "${1:-}" = __bound ]; then
   while job_runs && [ "$(date +%s)" -lt "$END" ]; do sleep 1; done
   job_runs || exit 0
   exec 8> "$Q/.lock"; flock 8
-  [ -f "$T" ] && job_runs || exit 0
-  echo "bound_hit=$(date +%s)" >> "$T"   # from here the job does not write .bb/rc (it checks this field first)
+  [ -f "$T" ] && job_runs && [ -z "$(field "$T" job_end)" ] || exit 0   # a job that ended by itself is never hit: its ticket carries the one or the other (bound_or_end)
+  echo "bound_hit=$(date +%s)" >> "$T"
   exec 8>&-
   echo "bb-build: bound of $(field "$T" bound)s reached: job stopped (rc 124)" >> "$B/build.log"
   until stop_ticket_processes "$ID" "$CO" java > /dev/null; do sleep 5; done
@@ -362,13 +366,23 @@ if [ "${1:-}" = __run ]; then
   # own ledger entry, keyed to its own pid, before it closes fd 8. The waiter closes its fd 8 instead of `flock -u` (which would unlock the
   # shared description for both), so the lock is released only once BOTH have closed it: a waiter SIGKILLed after the spawn can no longer
   # let the next grant read a ledger without this launch. A subshell killed before its entry has launched nothing.
+  BOUND=$(field "$T" bound)   # header: MUTANT TICKETS, BOUND
+  # bound_or_end (the job subshell, as soon as its job returned): the job of a bounded ticket ended by itself (job_end=) or at its bound
+  # (bound_hit=), decided under the lock, never both. Hit: no .bb/rc from here, the bound runner is stopping this job and writes it.
+  bound_or_end() {
+    [ -n "$BOUND" ] || return 0
+    exec 8> "$Q/.lock"; flock 8
+    [ -z "$(field "$T" bound_hit)" ] || exit 124
+    [ ! -f "$T" ] || echo "job_end=$(date +%s)" >> "$T"   # no file: waiter gone and reaped meanwhile
+    exec 8>&-
+  }
   (
     ledger_add "$ID" "$BASHPID"; exec 8>&-
     cd "$CO"; : > "$B/build.log"
     if wants_jbct "$@"; then   # jbct plugin bootstrap (see bb-jbct-bootstrap); any other ticket never touches the helper, installed or not
       HELPER=$(dirname "$SELF")/bb-jbct-bootstrap
       if [ ! -x "$HELPER" ]; then echo "bootstrap: refused: helper $HELPER missing or not executable (rc=88)" >> "$B/build.log"; date +%s > "$B/end"; write_rc "$B" 88; exit 88; fi
-      "$HELPER" "$CO" "$MVN" "$T" "$@" >> "$B/build.log" 2>&1 || { rc=$?; date +%s > "$B/end"; write_rc "$B" "$rc"; exit "$rc"; }
+      "$HELPER" "$CO" "$MVN" "$T" "$@" >> "$B/build.log" 2>&1 || { rc=$?; bound_or_end; date +%s > "$B/end"; write_rc "$B" "$rc"; exit "$rc"; }
     fi
     if [ "$(field "$T" iso)" = 1 ]; then
       "$(dirname "$SELF")/bb-netns-run" "$ID" "$CO" "$MVN" "$@" ${RDF[@]+"${RDF[@]}"} >> "$B/build.log" 2>&1
@@ -376,6 +390,7 @@ if [ "${1:-}" = __run ]; then
       env -u HCLOUD_TOKEN BB_TICKET="$ID" JAVA_HOME=/usr/lib/jvm/java-25-openjdk-amd64 "$MVN" "$@" ${RDF[@]+"${RDF[@]}"} >> "$B/build.log" 2>&1
     fi
     rc=$?
+    bound_or_end
     c=0   # ZERO-TESTCASE REFUSAL (header, #86): THE TABLE on every job rc, a build's or a bb-test launch's; 19 replaces rc, 0 keeps it
     selected_testcases "$CO" "$B/run.marker" "$([ -z "${BB_LAUNCH:-}" ] && echo mvn || echo "launch:$ID")" "$rc" "$@" >> "$B/build.log" 2>&1 || c=$?
     case $c in
@@ -394,13 +409,12 @@ if [ "${1:-}" = __run ]; then
           echo "bb-build: cp-record skipped: timeout after ${BB_CP_RECORD_TIMEOUT:-300}s (no record is left; bb-test will refuse until a rebuild)" >> "$B/build.log"; rm -rf "$B/cp" "$B/cp.new" "$B/cp.old";;
       esac
     fi
-    [ -z "$(field "$T" bound_hit)" ] || exit 124   # the bound runner is stopping this job and writes the rc
     write_rc "$B" "$rc"   # convenience copy for pollers, 444; the ticket's rc= comes from this subshell's exit status below
     exit "$rc"
   ) &
   C=$!   # the job subshell lives as long as maven / bb-test's java / bb-netns-run (and survives a kill -9 of this waiter)
   exec 8>&-   # the lock covers the slot decision and the ledger write only, never the launch's run time (released when the subshell closes fd 8)
-  W=""; BOUND=$(field "$T" bound)   # header: MUTANT TICKETS, BOUND
+  W=""
   if [ -n "$BOUND" ]; then bash "$SELF" __bound "$ID" "$CO" "$C" "$(pstart "$C")" $((NOW + BOUND + 1)) < /dev/null > /dev/null 2>&1 & W=$!; fi
   wait "$C"; BRC=$?   # the build's exit status: the verdict. Never re-read from $B/rc, which a lane can delete or rewrite
   if [ -n "$W" ] && [ -n "$(field "$T" bound_hit)" ]; then wait "$W"; [ "$BRC" -le 128 ] || BRC=124; fi   # stopped by its bound: 124, recorded once nothing of the job is left

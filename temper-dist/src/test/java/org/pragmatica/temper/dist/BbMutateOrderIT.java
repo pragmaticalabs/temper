@@ -959,6 +959,7 @@ class BbMutateOrderIT {
         assertThat(within(120, () -> in("done", id))).as("ended at its bound").isTrue();
         assertThat(field("done", id, "state")).isEqualTo("finished");
         assertThat(field("done", id, "rc")).isEqualTo("124");
+        assertThat(field("done", id, "job_end")).isEmpty();
         assertThat(Files.readString(dir.resolve("work/co").resolve(checkout).resolve(".bb/rc")).strip()).isEqualTo("124");
         assertThat(Files.readString(dir.resolve("work/co").resolve(checkout).resolve(".bb/build.log"))).contains("bound of " + bound + "s reached");
         hitAtItsBound(id, bound);
@@ -1034,6 +1035,41 @@ class BbMutateOrderIT {
         lib(tools.resolve("bb-queue-lib.sh"), queue, "exec 8> \"$Q/.lock\" && flock 8 && reap");
         assertThat(field("done", id, "state")).isEqualTo("orphaned");
         hitAtItsBound(id, 20);
+    }
+
+    /// A job that returned by itself before its bound is not hit, though what bb-build does after it (bb-cp-record) is still running at the bound: the
+    /// ticket has no bound_hit= and its rc is the job's. Control: the bound runner lived at the job's end and went at the bound.
+    /// Mutation: drop the job_end test from the bound runner -> bound_hit= and rc 124, red.
+    @Test
+    void aJobThatEndedBeforeItsBound_isNotHit_thoughItsTicketStillRuns() throws Exception {
+        BbFixtures.executable(tools.resolve("bb-cp-record"),
+                              "#!/bin/bash\nwhile [ -e \"$HOLD_DIR/hold.cp\" ]; do sleep 0.2; done\n");
+        Files.writeString(dir.resolve("hold.cp"), "");
+        Files.writeString(dir.resolve("hold.mo-1"), "");
+        var id = drive("mo", "mo-1", "BB_MUTANT_BOUND=15").ticket();
+
+        assertThat(within(60, () -> runs().contains("mo-1") && boundRunners(id) > 0)).as("job and bound runner run").isTrue();
+        release("mo-1");
+        assertThat(within(60, () -> !field("running", id, "job_end").isEmpty())).isTrue();
+        assertThat(boundRunners(id)).as("the bound runner at the job's end").isPositive();
+        assertThat(within(60, () -> boundRunners(id) == 0)).as("the bound runner went at the bound").isTrue();
+        assertThat(now() / SECOND - Long.parseLong(field("running", id, "started"))).as("past the bound").isGreaterThanOrEqualTo(16);
+        assertThat(in("running", id)).isTrue();
+        Files.delete(dir.resolve("hold.cp"));
+        assertThat(within(60, () -> in("done", id))).isTrue();
+        assertThat(field("done", id, "rc")).isEqualTo("0");
+        assertThat(field("done", id, "bound_hit")).isEmpty();
+        assertThat(Long.parseLong(field("done", id, "job_end")) - Long.parseLong(field("done", id, "started"))).isLessThan(15);
+        assertThat(Files.readString(dir.resolve("work/co/mo-1/.bb/rc")).strip()).isEqualTo("0");
+    }
+
+    private static int boundRunners(String id) {
+        return (int) ProcessHandle.allProcesses()
+                                  .filter(process -> process.info()
+                                                            .commandLine()
+                                                            .filter(line -> line.contains(" __bound " + id + " "))
+                                                            .isPresent())
+                                  .count();
     }
 
     /// A mutant that hangs past its bound is TIMEOUT in the results of a live bb-mutate, and the run goes on to the next mutant.
