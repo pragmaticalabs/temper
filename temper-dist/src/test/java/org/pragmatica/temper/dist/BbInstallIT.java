@@ -364,7 +364,6 @@ class BbInstallIT {
         assertThat(second.stdout().lines().toList()).containsExactly("unchanged builder@h1 bb-cp-record " + pin("BB_CPRECORD_NEW"),
                                                                      "unchanged builder@h1 bb-test " + pin("BB_TEST_NEW"),
                                                                      "unchanged builder@h1 bb-testcount " + pin("BB_TESTCOUNT_NEW"),
-                                                                     "unchanged builder@h1 bb-mutate " + pin("BB_MUTATE_NEW"),
                                                                      "unchanged builder@h1 bb-tickets " + pin("BB_TICKETS_NEW"),
                                                                      "unchanged builder@h1 bb-hold " + pin("BB_HOLD_NEW"),
                                                                      "unchanged builder@h1 bb-wait " + pin("BB_WAIT_NEW"),
@@ -376,7 +375,8 @@ class BbInstallIT {
                                                                      "unchanged builder@h1 bb-result " + pin("BB_RESULT_NEW"),
                                                                      "unchanged builder@h1 bb-queue-lib.sh " + pin("BB_LIB_NEW"),
                                                                      "unchanged builder@h1 bb-queue " + pin("BB_QUEUE_NEW"),
-                                                                     "unchanged builder@h1 bb-build " + pin("BB_BUILD_NEW"));
+                                                                     "unchanged builder@h1 bb-build " + pin("BB_BUILD_NEW"),
+                                                                     "unchanged builder@h1 bb-mutate " + pin("BB_MUTATE_NEW"));
         assertThat(listing(tools)).isEqualTo(after);
         assertThat(sshCalls()).as("the second run only probes").hasSize(calls + 1);
     }

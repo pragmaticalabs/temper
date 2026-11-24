@@ -419,7 +419,8 @@ class BbMutateIT {
         var runner = batch(modules("bounded"), mutation("mA", "A", "ATest", "MUT"));
 
         assertThat(driver.log()).contains("wrote .bb/end and .bb/rc=124 (killed by bb-mutate)");
-        assertThat(runner.log()).doesNotContain("killed by bb-mutate");
+        assertThat(runner.log()).startsWith(driver.log());  // one log, appended to
+        assertThat(runner.log().substring(driver.log().length())).contains("[mA] bb-build exit=0").doesNotContain("KILL").doesNotContain("killed by bb-mutate");
         assertThat(runner.outcomes()).containsEntry("mA", "TIMEOUT").isEqualTo(driver.outcomes());
         assertThat(runner.credited()).containsEntry("mA", "solo").isEqualTo(driver.credited());
         assertThat(runner.detail("mA")).isEqualTo("exceeded 1s from its own Maven start; job killed (counted detected)").isEqualTo(driver.detail("mA"));
