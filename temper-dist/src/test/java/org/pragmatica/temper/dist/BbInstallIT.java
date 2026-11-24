@@ -1064,6 +1064,7 @@ class BbInstallIT {
         Files.write(tools.resolve("bb-test"), prev("bb-test.pre76"));
         Files.write(tools.resolve("bb-hold"), prev("bb-hold.pre90"));
         Files.write(tools.resolve("bb-await"), prev("bb-await.pre90"));
+        Files.write(tools.resolve("bb-modules.py"), prev("bb-modules.py.pre112"));
         for (var e : live.entrySet()) {
             assertThat(BbFixtures.md5(Files.readAllBytes(tools.resolve(e.getKey())))).as(e.getKey())
                       .isEqualTo(e.getValue());
@@ -1221,6 +1222,7 @@ class BbInstallIT {
         Files.write(tools.resolve("bb-result"), prev("bb-result.precp"));
         Files.write(tools.resolve("bb-queue-lib.sh"), prev("bb-queue-lib.sh.preledger"));
         Files.write(tools.resolve("bb-queue"), prev("bb-queue.preledger"));
+        Files.write(tools.resolve("bb-modules.py"), prev("bb-modules.py.pre112"));
         for (var e : live.entrySet()) {
             assertThat(BbFixtures.md5(Files.readAllBytes(tools.resolve(e.getKey())))).as(e.getKey())
                       .isEqualTo(e.getValue());
