@@ -609,9 +609,12 @@ class BbMutateIT {
         }
     }
 
-    /// scenario with one more top-level key
+    /// scenario with one more top-level key, put right after the opening brace (so keys stack: the first form of this matched `{"modules"`
+    /// and silently dropped the second key, leaving "turns" at its default of 1 in aTurnThatNeverComes, whose second call then ran)
     private static String withKey(String scenario, String key, int value) {
-        return scenario.replace("{\"modules\"", "{\"" + key + "\":" + value + ",\"modules\"");
+        assertThat(scenario).startsWith("{");
+
+        return "{\"" + key + "\":" + value + "," + scenario.substring(1);
     }
 
     /// A and C take the given faults when mutated; `key` = 2 on the scenario, so a build of both mutated reads the key

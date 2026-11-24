@@ -54,13 +54,13 @@ class BbMutateOrderIT {
         time.sleep(1200)
         """;
 
-    /// maven: records its start order and its BB_* environment, waits while <dir>/hold or <dir>/hold.<checkout> exists, then reports one testcase
+    /// maven: records its BB_* environment (env.<checkout>, whole before the next line), then its start order (a checkout named in runs.log has its env file), waits while <dir>/hold or <dir>/hold.<checkout> exists, then reports one testcase
     /// of module A, failing when the module's file is mutated.
     private static final String LAUNCH = """
         #!/bin/bash
         n=${PWD##*/}
+        env | grep -E '^BB_(ORDER_AT|DRIVER_|VIA|OWNER)' > "$HOLD_DIR/env.$n.tmp"; mv "$HOLD_DIR/env.$n.tmp" "$HOLD_DIR/env.$n"
         echo "$n" >> "$HOLD_DIR/runs.log"
-        env | grep -E '^BB_(ORDER_AT|DRIVER_|VIA|OWNER)' > "$HOLD_DIR/env.$n"
         while [ -e "$HOLD_DIR/hold" ] || [ -e "$HOLD_DIR/hold.$n" ]; do sleep 0.2; done
         f=0; b=""; if grep -q MUT A/src/f.txt; then f=1; b='<failure message="x">x</failure>'; fi
         mkdir -p A/target/surefire-reports
