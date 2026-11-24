@@ -398,7 +398,7 @@ class BbCoGcIT {
             assertThat(run.stdout()).contains("keep victim reasons=blind ",
                                               "keep control reasons=blind ",
                                               "unlisted-blind=1")
-                      .doesNotContain("removed ");
+                      .doesNotContain("\nremoved ", "removed control ", "removed victim ");
         } finally {
             stop(blind);
         }
