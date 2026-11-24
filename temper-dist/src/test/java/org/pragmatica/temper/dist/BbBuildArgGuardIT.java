@@ -25,6 +25,15 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 /// The padding must be many LINES, not many words: bb-build joins the args with `$*`, so separate words alone make one line, and grep
 /// reads a single long line to its end (match, no SIGPIPE: the old form passes). Each padding word therefore carries 100 newlines.
 ///
+/// #112 UNINSTALLED SIBLING (rc 11): `-pl` without -am/-amd is refused at submit, nothing queued, when a reactor module the selected ones depend on has
+/// no pom in the checkout's `.m2-local`. Reactor: root -> a, b (depends on a), c (depends on b), d (no deps); version 1, group g.x.
+/// Probes (each mutation of ops/bb/bb-modules.py `installed_check` turns the named rows red):
+///  - drop `-am`/`--also-make` from the tuple -> [#theUninstalledSiblingGuard_queuesWithAm]
+///  - drop `-amd`/`--also-make-dependents` from the tuple -> [#theUninstalledSiblingGuard_queuesWithAmd]
+///  - drop the `isfile` test (every needed module counts as missing) -> [#theUninstalledSiblingGuard_queuesWhenTheSiblingIsInstalled]
+///  - drop `- selected` (the selected modules count as needed) -> [#theUninstalledSiblingGuard_queuesAModuleWithNoReactorDependencies],
+///    [#theUninstalledSiblingGuard_neverAsksForTheSelectedModulesThemselves]
+///
 /// Probes: put `printf '%s' "$A" |` back in front of any one grep of a guard -> that guard's `_withALongArgList` row is red (its control stays green).
 /// Drop `[^!]` from the named-test guard -> [#theHostKillingTestGuard_letsAnExcludedRunThrough] red.
 class BbBuildArgGuardIT {
@@ -38,6 +47,8 @@ class BbBuildArgGuardIT {
     private final List<String> tickets = new ArrayList<>();
     private Path co;
     private Map<String, String> env;
+    private boolean reactor;
+    private List<String> installed = List.of();
 
     @BeforeEach
     void linuxOnly() {
@@ -62,6 +73,9 @@ class BbBuildArgGuardIT {
         Files.copy(BbFixtures.OPS_BB.resolve("bb-portgroup.py"),
                    tools.resolve("bb-portgroup.py"),
                    StandardCopyOption.REPLACE_EXISTING);
+        Files.copy(BbFixtures.OPS_BB.resolve("bb-modules.py"),
+                   tools.resolve("bb-modules.py"),
+                   StandardCopyOption.REPLACE_EXISTING);
         BbFixtures.executable(tools.resolve("bb-cp-record"), "#!/bin/sh\nexit 0\n");
         BbFixtures.executable(tools.resolve("bb-netns-run"), "#!/bin/sh\necho \"NETNS $*\"\n");
         var mvn = BbFixtures.executable(dir.resolve("stub/mvn"), "#!/bin/sh\necho \"HOST $*\"\n");
@@ -72,6 +86,10 @@ class BbBuildArgGuardIT {
         Files.writeString(co.resolve(".gitignore"), ".bb/\n");
         Files.createDirectories(co.resolve(SPRT).getParent());
         Files.writeString(co.resolve(SPRT), "class StreamPublishReshuffleTest {}\n");
+        if (reactor) {
+            writeReactor();
+        }
+
         for (var step : List.of(List.of("init", "-q"),
                                 List.of("add", "."),
                                 List.of("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "c"))) {
@@ -79,6 +97,13 @@ class BbBuildArgGuardIT {
 
             git.addAll(step);
             assertThat(BbFixtures.run(git, Map.of(), null, null).rc()).isZero();
+        }
+
+        for (var module : installed) {
+            var pom = co.resolve(".m2-local/g/x/" + module + "/1/" + module + "-1.pom");
+
+            Files.createDirectories(pom.getParent());
+            Files.writeString(pom, "<project/>\n");
         }
 
         env = new HashMap<>();
@@ -98,6 +123,39 @@ class BbBuildArgGuardIT {
         env.put("BB_TEST_MVN", mvn.toString());
         env.put("BB_PORT_GROUP", "0");
         env.putAll(extra);
+    }
+
+    private static final String NS = "<project xmlns=\"http://maven.apache.org/POM/4.0.0\"><modelVersion>4.0.0</modelVersion>";
+
+    private static String pom(String artifact, String... deps) {
+        var dependencies = new StringBuilder();
+
+        for (var dep : deps) {
+            dependencies.append("<dependency><groupId>g.x</groupId><artifactId>")
+                        .append(dep)
+                        .append("</artifactId></dependency>");
+        }
+
+        return NS
+             + "<parent><groupId>g.x</groupId><artifactId>root</artifactId><version>1</version></parent><artifactId>" + artifact
+             + "</artifactId>" + (deps.length == 0
+                                  ? ""
+                                  : "<dependencies>" + dependencies + "</dependencies>")
+             + "</project>\n";
+    }
+
+    private void writeReactor() throws Exception {
+        Files.writeString(co.resolve("pom.xml"),
+                          NS
+                         + "<groupId>g.x</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules>"
+                         + "<module>a</module><module>b</module><module>c</module><module>d</module></modules></project>\n");
+        var modules = Map.of("a", new String[0], "b", new String[]{"a"}, "c", new String[]{"b"}, "d", new String[0]);
+
+        for (var module : modules.entrySet()) {
+            Files.createDirectories(co.resolve(module.getKey()));
+            Files.writeString(co.resolve(module.getKey()).resolve("pom.xml"),
+                              pom(module.getKey(), module.getValue()));
+        }
     }
 
     private static final int LINES_PER_WORD = 100;
@@ -209,5 +267,144 @@ class BbBuildArgGuardIT {
 
         assertThat(run.stderr()).doesNotContain(FAILSAFE, HEAVY, NAMED, CAP1);
         assertThat(run.stdout()).contains("queued ticket=");
+    }
+
+    private static final String SIBLING = "add -am, or install them first";
+
+    private void assertRefused(BbFixtures.Outcome run, String... missing) throws Exception {
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isEqualTo(11);
+        assertThat(run.stderr()).contains(SIBLING).contains(missing);
+        assertThat(run.stdout()).doesNotContain("queued ticket=");
+        assertThat(co.resolve(".bb/queued")).doesNotExist();
+        try (var waiting = Files.list(Files.createDirectories(dir.resolve("q/waiting")))) {
+            assertThat(waiting.toList()).as("nothing queued").isEmpty();
+        }
+    }
+
+    private void assertQueued(BbFixtures.Outcome run) {
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        assertThat(run.stderr()).doesNotContain(SIBLING);
+        assertThat(run.stdout()).contains("queued ticket=");
+    }
+
+    @Test
+    void theUninstalledSiblingGuard_refusesAPlWithoutAm_namingTheMissingModule_andQueuesNothing() throws Exception {
+        reactor = true;
+        assertRefused(run(Map.of(), 0, "-B", "-pl", "b", "test"), "a=g.x:a:1");
+    }
+
+    @Test
+    void theUninstalledSiblingGuard_refusesALongArgList() throws Exception {
+        reactor = true;
+        assertRefused(run(Map.of(), LONG, "-B", "-pl", "b", "test"), "a=g.x:a:1");
+    }
+
+    @Test
+    void theUninstalledSiblingGuard_namesEveryMissingModule_notTheInstalledOnes() throws Exception {
+        reactor = true;
+        installed = List.of("a");
+        var run = run(Map.of(), 0, "-B", "-pl", "c", "test");
+
+        assertRefused(run, "b=g.x:b:1");
+        assertThat(run.stderr()).doesNotContain("a=g.x:a:1");
+    }
+
+    /// the first spelling sets the tree up, the others run bb-build again in it (a refusal leaves nothing behind)
+    @Test
+    void theUninstalledSiblingGuard_readsEverySpellingOfPl() throws Exception {
+        reactor = true;
+        assertRefused(run(Map.of(), 0, "-B", "-pl=b", "test"), "a=g.x:a:1");
+        for (var spelling : List.of(List.of("-pl", ":b"),
+                                    List.of("-pl", "g.x:b"),
+                                    List.of("--projects", "b"),
+                                    List.of("--projects=b"),
+                                    List.of("-plb"),
+                                    List.of("-pl", "?b"),
+                                    List.of("-pl", "b,d"),
+                                    List.of("-pl", "!a"))) {
+            var command = new ArrayList<>(List.of(dir.resolve("tools/bb-build").toString(),
+                                                  co.toString(),
+                                                  "-B"));
+
+            command.addAll(spelling);
+            command.add("test");
+            assertRefused(BbFixtures.run(command, env, null, null), "a=g.x:a:1");
+        }
+    }
+
+    @Test
+    void theUninstalledSiblingGuard_queuesWithAm() throws Exception {
+        reactor = true;
+        assertQueued(run(Map.of(), 0, "-B", "-pl", "b", "-am", "test"));
+    }
+
+    @Test
+    void theUninstalledSiblingGuard_queuesWithAlsoMake() throws Exception {
+        reactor = true;
+        assertQueued(run(Map.of(), 0, "-B", "--also-make", "-pl", "b", "test"));
+    }
+
+    @Test
+    void theUninstalledSiblingGuard_queuesWithAmd() throws Exception {
+        reactor = true;
+        assertQueued(run(Map.of(), 0, "-B", "-pl", "b", "-amd", "test"));
+    }
+
+    @Test
+    void theUninstalledSiblingGuard_queuesWhenTheSiblingIsInstalled() throws Exception {
+        reactor = true;
+        installed = List.of("a");
+        assertQueued(run(Map.of(), 0, "-B", "-pl", "b", "test"));
+    }
+
+    @Test
+    void theUninstalledSiblingGuard_queuesAModuleWithNoReactorDependencies() throws Exception {
+        reactor = true;
+        assertQueued(run(Map.of(), 0, "-B", "-pl", "a", "test"));
+    }
+
+    /// `-pl a,b`: b's sibling a is itself selected, so it is built in the reactor and needs no jar
+    @Test
+    void theUninstalledSiblingGuard_neverAsksForTheSelectedModulesThemselves() throws Exception {
+        reactor = true;
+        assertQueued(run(Map.of(), 0, "-B", "-pl", "a,b", "test"));
+    }
+
+    @Test
+    void theUninstalledSiblingGuard_leavesAWholeReactorBuildAlone() throws Exception {
+        reactor = true;
+        assertQueued(run(Map.of(), 0, "-B", "test"));
+    }
+
+    /// a form it cannot resolve is not refused: a note on stderr, the run queued
+    @Test
+    void theUninstalledSiblingGuard_doesNotRefuseASelectorItCannotResolve() throws Exception {
+        reactor = true;
+        var run = run(Map.of(), 0, "-B", "-pl", "nope", "test");
+
+        assertQueued(run);
+        assertThat(run.stderr()).contains("-pl check skipped: cannot resolve -pl selector nope");
+    }
+
+    /// --since builds its own `-pl` from the closure of the changed modules: unchanged by the guard, with nothing installed
+    @Test
+    void theUninstalledSiblingGuard_leavesSinceModeAlone() throws Exception {
+        reactor = true;
+        setUp(Map.of());
+        Files.writeString(co.resolve("c/new.txt"), "x\n");
+        var command = new ArrayList<>(List.of(dir.resolve("tools/bb-build").toString(),
+                                              "--since",
+                                              "HEAD",
+                                              co.toString(),
+                                              "test"));
+        var run = BbFixtures.run(command, env, null, null);
+        var matcher = QUEUED.matcher(run.stdout());
+
+        if (matcher.find()) {
+            tickets.add(matcher.group(1));
+        }
+
+        assertQueued(run);
+        assertThat(run.stdout()).contains("-pl a,b,c");
     }
 }

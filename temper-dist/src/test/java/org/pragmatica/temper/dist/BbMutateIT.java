@@ -48,6 +48,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 ///  - #100: the detail's tail (expect-list hint, flake note) dropped -> [#aSoloMutantBreakingOnlyAnUnlistedTest_isKilledElsewhere_namingTheTest]
 ///  - #100: the summary line without the KILLED-ELSEWHERE count or note -> [#theKilledElsewhereTally_andTheFlakeNote_showInTheSummaryAndTheResults]
 ///  - results.tsv header columns reordered -> [#resultsTsv_headerNamesTheColumnsInRowOrder]
+///  - #112: bb-build's `-pl` without `-am` check dropped (the real bb-build, not the fake, runs in its row) -> [#aBuildWithoutAm_withASiblingNotInstalled_stopsAtTheControl_withBbBuildsRefusal]
 class BbMutateIT {
     private static final Path TOOL = BbFixtures.OPS_BB.resolve("bb-mutate");
 
@@ -62,7 +63,7 @@ class BbMutateIT {
         assumeTrue(has("python3") && has("git"), "bb-mutate is python3 and drives git");
         dir = dir.toRealPath();
         home = Files.createDirectories(dir.resolve("home"));
-        co = dir.resolve("work/co/x");
+        co = dir.resolve("work/co/t-x");
         var fake = BbFixtures.executable(home.resolve("tools/bb-build"), resource("fake-bb-build.py"));
 
         assertThat(fake).exists();
@@ -487,11 +488,68 @@ class BbMutateIT {
         assertThat(out.log()).contains("ambiguous -> re-running singly");
     }
 
+    /// #112: bb-mutate adds `-pl` from the spec and `-am` only through `extra`. This row runs the REAL bb-build: B depends on A, A is not installed in
+    /// `.m2-local`, so the control's `-pl B test` is refused at submit (rc 11) and bb-mutate stops there, the refusal in the detail, no mutant launched.
+    @Test
+    void aBuildWithoutAm_withASiblingNotInstalled_stopsAtTheControl_withBbBuildsRefusal() throws Exception {
+        assumeTrue(BbFixtures.linux(), "bb-build needs GNU tools, flock and pgrep");
+        var tools = home.resolve("tools");
+
+        BbFixtures.executable(tools.resolve("bb-build"),
+                              Files.readString(BbFixtures.OPS_BB.resolve("bb-build")));
+        for (var f : List.of("bb-queue-lib.sh", "bb-portgroup.py", "bb-modules.py")) {
+            Files.copy(BbFixtures.OPS_BB.resolve(f), tools.resolve(f), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        }
+
+        BbFixtures.executable(tools.resolve("bb-cp-record"), "#!/bin/sh\nexit 0\n");
+        BbFixtures.executable(tools.resolve("bb-netns-run"), "#!/bin/sh\nexit 0\n");
+        var ns = "<project xmlns=\"http://maven.apache.org/POM/4.0.0\"><modelVersion>4.0.0</modelVersion>";
+        var parent = "<parent><groupId>g.x</groupId><artifactId>root</artifactId><version>1</version></parent>";
+
+        Files.writeString(co.resolve("pom.xml"),
+                          ns
+                         + "<groupId>g.x</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging>"
+                         + "<modules><module>A</module><module>B</module><module>C</module></modules></project>\n");
+        Files.writeString(co.resolve("A/pom.xml"), ns + parent + "<artifactId>A</artifactId></project>\n");
+        Files.writeString(co.resolve("C/pom.xml"), ns + parent + "<artifactId>C</artifactId></project>\n");
+        Files.writeString(co.resolve("B/pom.xml"),
+                          ns + parent
+                         + "<artifactId>B</artifactId><dependencies><dependency><groupId>g.x</groupId><artifactId>A</artifactId>"
+                         + "</dependency></dependencies></project>\n");
+        sh("""
+           set -e
+           cd "%s"
+           git add -A && git -c user.name=t -c user.email=t@t commit -qm poms
+           """.formatted(co));
+        buildJson = "{\"pl\":\"B\"}";
+        okRcs = List.of(2);
+        buildEnv = new HashMap<>(Map.of("BB_TEST_QUEUE_ROOT",
+                                        dir.resolve("q").toString(),
+                                        "BB_TEST_PRIORITIES",
+                                        dir.resolve("none-priorities").toString(),
+                                        "BB_TEST_PORT_MODULES",
+                                        dir.resolve("none-modules").toString(),
+                                        "BB_PORT_GROUP",
+                                        "0"));
+        var out = batch(modules(null), mutation("mB", "B", "BTest", "MUT"));
+
+        assertThat(out.rc()).isEqualTo(2);
+        assertThat(out.md()).contains("CONTROL CALL-REFUSED")
+                  .contains("bb-build exit 11")
+                  .contains("A=g.x:A:1")
+                  .contains("add -am, or install them first");
+        assertThat(out.log()).contains("[control] bb-build").doesNotContain("[mB] bb-build");
+        assertThat(out.outcomes()).doesNotContainKey("mB");
+        assertThat(home.resolve("builds.log")).as("no build ran").doesNotExist();
+        assertThat(dir.resolve("q/waiting")).as("nothing queued").isEmptyDirectory();
+    }
+
     // ---- harness
     private String specName = "spec.json";
     private String buildJson = "{}";
     private List<String> extra = List.of();
     private List<Integer> okRcs = List.of(0, 5);
+    private Map<String, String> buildEnv = Map.of();
 
     private record Result(int rc,
                           Map<String, String> outcomes,
@@ -581,6 +639,7 @@ class BbMutateIT {
         env.put("PATH", System.getenv("PATH"));
         env.put("HOME", home.toString());
         env.put("BB_OWNER", "t");
+        env.putAll(buildEnv);
         var argv = new java.util.ArrayList<>(List.of("python3",
                                                      script.toString(),
                                                      co.toString(),

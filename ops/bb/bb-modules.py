@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# bb-modules.py --installed <checkout> [mvn args...]  (#112) -- the submit check of bb-build for `-pl` without -am/-amd; see installed_check().
 # bb-modules.py <checkout> <base-ref>  (2026-11-19) -- prints the module set an incremental build must cover, on ONE stdout line:
 #   NONE            no changed path at all (the caller builds nothing)
 #   FULL <reason>   run the whole reactor; the reason: root-pom | mvn-config:<path> | parent:<pom> | unmapped:<path> | unreadable-reactor:<E> | unresolved-coordinate:<pom>:<text>
@@ -110,7 +111,86 @@ def select(co, base):
     s = sorted(x for x in pg.close(down, lambda d: ups[d]) if x != '.')
     return ','.join(s), ''
 
+def installed_check(co, args):
+    """('OK', '') | ('MISSING', 'path=g:a:v, ...') | ('SKIP', why) for `-pl` without -am/-amd (#112). The reactor modules the selected modules
+    depend on (top-level <dependencies>, transitively, selected ones excluded) must have <repo>/<g path>/<a>/<v>/<a>-<v>.pom: the repo is the
+    last -Dmaven.repo.local= of .mvn/maven.config + args, else <co>/.m2-local. A form it cannot resolve is SKIP, never a refusal."""
+    try:
+        cfg = [l.strip() for l in open(os.path.join(co, '.mvn', 'maven.config')) if l.strip()]
+    except OSError:
+        cfg = []
+    argv = cfg + list(args)
+    sel, am, repo, i = [], False, os.path.join(co, '.m2-local'), 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ('-pl', '--projects'):
+            i += 1
+            sel += argv[i].split(',') if i < len(argv) else []
+        elif a.startswith('--projects='):
+            sel += a.split('=', 1)[1].split(',')
+        elif a.startswith('-pl') and a != '-pl':
+            sel += a[3:].lstrip('=').split(',')
+        elif a in ('-am', '--also-make', '-amd', '--also-make-dependents'):
+            am = True
+        elif a in ('-f', '--file') or a.startswith('--file='):
+            return 'SKIP', '-f/--file is not modelled'
+        elif a.startswith('-Dmaven.repo.local='):
+            repo = os.path.join(co, a.split('=', 1)[1])
+        i += 1
+    sel = [s.strip().lstrip('?') for s in sel if s.strip()]
+    if am or not sel:
+        return 'OK', ''
+    versions = {}
+    def visit(d, r):
+        versions[d] = r.findtext(pg.NS + 'version') or r.findtext(pg.NS + 'parent/' + pg.NS + 'version') or ''
+    try:
+        mods = pg.load_reactor(co, visit)
+    except Exception as e:
+        return 'SKIP', 'could not read the reactor (%s)' % type(e).__name__
+    def resolve(s):
+        s = os.path.normpath(s.rstrip('/'))
+        if s in mods:
+            return s
+        if ':' in s:
+            g, a = s.split(':', 1)
+            hit = [d for d, (gid, aid, _) in mods.items() if aid == a and (not g or g == gid)]
+            return hit[0] if len(hit) == 1 else None
+        return None
+    inc = [s for s in sel if s[0] not in '!-']
+    exc = [s[1:] for s in sel if s[0] in '!-']
+    chosen = set()
+    for s in inc:
+        d = resolve(s)
+        if d is None:
+            return 'SKIP', 'cannot resolve -pl selector %s' % clean(s)
+        chosen.add(d)
+    out = set()
+    for s in exc:
+        d = resolve(s)
+        if d is None:
+            return 'SKIP', 'cannot resolve -pl selector %s' % clean(s)
+        out.add(d)
+    selected = (chosen if inc else set(mods)) - out
+    ups = pg.upstreams(mods)
+    need = sorted(pg.close(selected, lambda d: ups[d]) - selected)
+    missing = []
+    for d in need:
+        g, a, _ = mods[d]
+        v = versions[d]
+        if not g or not v or '${' in g + a + v:
+            return 'SKIP', 'cannot resolve the coordinate of %s' % clean(d)
+        if not os.path.isfile(os.path.join(repo, *g.split('.'), a, v, '%s-%s.pom' % (a, v))):
+            missing.append('%s=%s:%s:%s' % (clean(d), g, a, v))
+    return ('MISSING', ', '.join(missing)) if missing else ('OK', '')
+
 if __name__ == '__main__':
+    if len(sys.argv) >= 3 and sys.argv[1] == '--installed':
+        # bb-modules.py --installed <checkout> [mvn args...]: one line, OK | MISSING <path=g:a:v, ...> | SKIP <why>; exit 0
+        try:
+            print(' '.join(x for x in installed_check(os.path.abspath(sys.argv[2]), sys.argv[3:]) if x))
+        except Exception as e:
+            print('SKIP %s' % type(e).__name__)
+        sys.exit(0)
     if len(sys.argv) != 3:
         print('usage: bb-modules.py <checkout> <base-ref>', file=sys.stderr); sys.exit(2)
     try:
