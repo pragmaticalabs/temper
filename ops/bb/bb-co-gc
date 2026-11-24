@@ -1,0 +1,273 @@
+#!/usr/bin/env bash
+# bb-co-gc [--live] [--days N] -- remove idle checkouts from ~/work/co (issue #113). Nothing removed them before: on 2026-11-24 the
+# five bb hosts held 400-1000 checkouts of about 2.7 GB each and the soak runner stops submitting at 85% home use.
+#
+# DRY BY DEFAULT: without --live it only READS. It prints, per checkout, `candidate` (with size and newest activity) or `keep` with every
+# reason that holds, then a total. It takes no lock, creates no file and writes no log; the only write paths (lock, mv, rm, chmod, the log)
+# are the functions lock_run, log_line, remove_one and remove_leftover, and the main loop calls them only under `[ "$LIVE" = 1 ]`.
+# N = --days (default 3, an integer 1..3650).
+#
+# THE RULE. A checkout C (an entry of ~/work/co) is removed only when ALL of these hold; each reason that fails is printed by its name:
+#   1 ticket           no ticket in ~/work/queue/{waiting,running} names C (its co= field has C's name after .../work/co/)
+#   2 in-flight        C/.bb/queued is absent, and C/.bb/start is not present without C/.bb/rc (bb-build removes rc when a run starts and
+#                      writes it when the run ends, so start without rc is a run in flight, or a killed run nobody finished; either is kept.
+#                      Existence tests only: the run identity files are read by bb-queue-lib.sh run_current alone, a grep row in BbSameSecondIT)
+#   3 process          no process of this user has its cwd, its exe or an open file under C (/proc scan, as bb-mutate's kill path)
+#   4 recent           the newest activity is older than N days. Activity = max(the ticket log's last ended= for C, mtime of C/.bb/end,
+#                      mtime of C/.git/HEAD, mtime of C/.git/index); the .git files cover a checkout made but never built.
+#                      activity-unknown: none of these exists, so the age is unknown: kept, never guessed.
+#   5 keep-file        C/.bb/keep is absent (an owner's opt-out)
+#   6 not-direct-child C is a real directory (not a symlink, not a file) that is a direct child of ~/work/co with symlinks resolved.
+#                      A symlink under ~/work/co is never followed: nothing behind it is read, measured or removed.
+#   unsafe-name        a name outside [A-Za-z0-9._-] (a newline would corrupt every list here): kept.
+#
+# REMOVAL (--live) is two steps. 1) `mv -T C ~/work/co/.gc-<epoch>-<name>`: one atomic rename inside the same directory. 2) The moved
+# directory is checked again (a process under it, a ticket naming C, a run in flight, .bb/keep): if anything holds, it is moved BACK
+# (RESTORED in the log). Else `rm -rf --one-file-system` it. A crash between the two steps leaves only .gc-* directories; the next run
+# removes them (after the process check) before it looks at checkouts. A new checkout of the same name is a new directory: it never
+# meets the .gc-* one. --live holds flock on ~/work/.co-gc.lock for the whole run; a second run exits 75. Every removal and every
+# refusal is one line in ~/work/co-gc.log: UTC time, verb, path, size_mb, last activity, owner label (the ticket log's owner column).
+#
+# EXIT: 0 done (DRY: always when it could read); 2 usage; 65 refused before any write: a precondition does not hold (no ~/work/co or
+#   ~/work/queue/{waiting,running}, no /proc, no flock for --live, a ticket log whose header has no `checkout` and `ended` columns);
+#   70 a guard could not be evaluated (an unreadable ticket, the process scan failing): nothing is guessed, the run stops; 74 --live finished with a failed move or remove (named in the log; the next run retries it); 75 another run holds the lock.
+#
+# LIMITS (stated, not hidden):
+#   - Linux only (/proc, flock, GNU stat/date/readlink/mv -T). Elsewhere it refuses with 65.
+#   - It sees this user's DUMPABLE processes in this host's mount namespace; the others (sshd session monitors, `systemd --user`) cannot be
+#     read, are counted as blind=N in the total line, and are not seen by guard 3. A build inside a container is covered by guards 1 and 2 (its ticket and
+#     .bb markers), not by 3.
+#   - Between the re-check after the move and the rm only the rename protects: nothing that knows C's old path can reach the directory
+#     any more, and a ticket enqueued for C in that instant finds no directory and fails; it loses no data.
+#   - The ticket log is read by header name; a checkout whose name appears in no row relies on the other three activity signals.
+#   - A checkout stuck with a start and no rc (a killed build) is kept for ever by guard 2; DRY prints it as in-flight so it is visible.
+set -euo pipefail
+PROG=bb-co-gc
+
+usage() { echo "usage: bb-co-gc [--live] [--days N]   (N = 1..3650, default 3; DRY unless --live)" >&2; exit 2; }
+die() { local rc=$1; shift; echo "$PROG: $*" >&2; exit "$rc"; }
+
+LIVE=0; DAYS=3
+while [ $# -gt 0 ]; do
+  case $1 in
+    --live) LIVE=1 ;;
+    --days) shift; [ $# -gt 0 ] || usage; DAYS=$1 ;;
+    --days=*) DAYS=${1#--days=} ;;
+    -h|--help) usage ;;
+    *) usage ;;
+  esac
+  shift
+done
+case $DAYS in ''|*[!0-9]*) usage ;; esac
+DAYS=$((10#$DAYS))
+{ [ "$DAYS" -ge 1 ] && [ "$DAYS" -le 3650 ]; } || usage
+
+[ -n "${HOME:-}" ] || die 65 "HOME is not set"
+WORK=$HOME/work
+CO=$WORK/co
+Q=$WORK/queue
+TLOG=$WORK/bb-ticket-log.tsv
+LOG=$WORK/co-gc.log
+LOCK=$WORK/.co-gc.lock
+
+# ---- preconditions (read-only)
+[ -d /proc/self ] || die 65 "no /proc: the process guard cannot run (Linux only)"
+[ "$LIVE" = 0 ] || command -v flock > /dev/null 2>&1 || die 65 "flock is not installed"
+[ -d "$CO" ] || die 65 "$CO is not a directory"
+CO_REAL=$(cd -P "$CO" && pwd -P)
+[ "${CO_REAL##*/}" = co ] || die 65 "$CO resolves to $CO_REAL, which is not a directory named co"
+[ -d "$Q/waiting" ] && [ -d "$Q/running" ] || die 65 "no queue directories under $Q (waiting, running): the ticket guard cannot run"
+if [ -e "$TLOG" ]; then [ -f "$TLOG" ] && [ -r "$TLOG" ] || die 65 "$TLOG is not a readable file"; fi
+
+NOW=$(date +%s)
+LIMIT=$((DAYS * 86400))
+
+iso() { date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ; }
+mtime() { stat -c %Y -- "$1" 2> /dev/null || echo 0; }   # 0: missing
+
+# ---- the four read-only inputs
+# ticket_names: the checkout names of every waiting/running ticket, one per line.
+ticket_names() {
+  local f
+  for f in "$Q"/waiting/* "$Q"/running/*; do
+    [ -e "$f" ] || continue   # the glob matched nothing
+    { [ -f "$f" ] && [ -r "$f" ]; } || { echo "$PROG: cannot read ticket $f" >&2; return 70; }
+    sed -n 's/^co=//p' "$f" | tail -1
+  done | sed -n 's#.*/work/co/\([^/][^/]*\).*#\1#p' | sort -u
+}
+# log_activity: per checkout name `<name> TAB <last ended, ISO> TAB <owner of that row>` from the ticket log, columns found by header name.
+log_activity() {
+  [ -s "$TLOG" ] || return 0
+  awk -F'\t' '
+    NR == 1 { for (i = 1; i <= NF; i++) col[$i] = i
+              if (!col["checkout"] || !col["ended"]) { bad = 1; exit }
+              next }
+    { co = $(col["checkout"]); e = $(col["ended"])
+      if (e !~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z$/) next
+      if (!match(co, /\/work\/co\/[^\/]+/)) next
+      n = substr(co, RSTART + 9, RLENGTH - 9)
+      if (e > best[n]) { best[n] = e; own[n] = (col["owner"] ? $(col["owner"]) : "-") } }
+    END { if (bad) exit 3; for (n in best) print n "\t" best[n] "\t" own[n] }' "$TLOG"
+}
+# proc_paths: the real path of every cwd, exe and open file of every process of this user. A live process of this user whose cwd cannot
+# be read (not dumpable: sshd session monitors, `systemd --user`; their /proc/<pid>/cwd is root-owned) is printed as `BLIND:<pid>` and
+# counted in the total line: this guard cannot see it, which the tool says instead of hiding.
+proc_paths() {
+  local d me uid st
+  me=$(id -u)
+  for d in /proc/[0-9]*; do
+    if readlink -- "$d/cwd" 2> /dev/null; then
+      readlink -- "$d/exe" "$d"/fd/* 2> /dev/null || true
+    else
+      [ -e "$d" ] || continue                                  # it exited during the scan
+      uid=$(stat -c %u -- "$d" 2> /dev/null) || continue
+      [ "$uid" = "$me" ] || continue                           # another user's process, kernel threads included
+      st=$(sed 's/^.*) //; s/ .*//' "$d/stat" 2> /dev/null) || continue
+      [ -z "$st" ] || [ "$st" = Z ] || echo "BLIND:${d#/proc/}"
+    fi
+  done
+}
+# scan: SCAN = proc_paths, PROC_NAMES = the first component under ~/work/co of every path in it, BLIND = the unreadable processes.
+scan() {
+  SCAN=$(proc_paths) || exit 70
+  BLIND=$(grep -c '^BLIND:' <<< "$SCAN" || true)
+  PROC_NAMES=$(awk -v a="$CO_REAL/" -v b="$CO/" '
+    { p = (index($0, a) == 1) ? length(a) : ((index($0, b) == 1) ? length(b) : 0)
+      if (p) { s = substr($0, p + 1); sub(/\/.*/, "", s); sub(/ \(deleted\)$/, "", s); if (s != "") print s } }' <<< "$SCAN" | sort -u)
+}
+
+# ---- the guard: classify <name> sets REASONS (comma list; empty = removable), ACT (newest activity, epoch; 0 unknown), OWN (owner label)
+add() { REASONS=${REASONS:+$REASONS,}$1; }
+classify() {
+  local n=$1 d B a e f row
+  d=$CO_REAL/$n; B=$d/.bb
+  REASONS=; ACT=0; OWN=-
+  case $n in *[!A-Za-z0-9._-]*) REASONS=unsafe-name; return 0 ;; esac
+  # 6: a real directory, a direct child of the resolved ~/work/co; if not, nothing under it is touched
+  if [ -L "$CO/$n" ] || [ ! -d "$CO/$n" ] || [ "$(cd -P "$CO/$n" 2> /dev/null && pwd -P)" != "$d" ]; then REASONS=not-direct-child; return 0; fi
+  # 1
+  if grep -Fxq -- "$n" <<< "$TICKET_NAMES"; then add ticket; fi
+  # 2: bb-build removes rc when a run starts and writes it when the run ends, so start without rc is a run in flight (bb-build's own test)
+  if [ -e "$B/queued" ] || { [ -f "$B/start" ] && [ ! -f "$B/rc" ]; }; then add in-flight; fi
+  # 3
+  if grep -Fxq -- "$n" <<< "$PROC_NAMES"; then add process; fi
+  # 4
+  a=0
+  for f in "$B/end" "$d/.git/HEAD" "$d/.git/index"; do e=$(mtime "$f"); [ "$e" -le "$a" ] || a=$e; done
+  row=$(awk -F'\t' -v n="$n" '$1 == n { print $2 "\t" $3; exit }' <<< "$LOGACT")
+  if [ -n "$row" ]; then
+    e=$(date -u -d "${row%%$'\t'*}" +%s 2> /dev/null || echo 0)
+    [ "$e" -le "$a" ] || a=$e
+    OWN=${row#*$'\t'}; [ -n "$OWN" ] || OWN=-
+  fi
+  ACT=$a
+  if [ "$a" = 0 ]; then add activity-unknown; elif [ $((NOW - a)) -le "$LIMIT" ]; then add recent; fi
+  # 5
+  if [ -e "$B/keep" ] || [ -L "$B/keep" ]; then add keep-file; fi
+  return 0
+}
+size_kb() { du -sk -P -- "$1" 2> /dev/null | cut -f1 || true; }
+
+# ---- the only write paths (LIVE only)
+lock_run() {
+  exec 9>> "$LOCK"
+  flock -n 9 || { echo "$PROG: another run holds $LOCK" >&2; exit 75; }
+}
+log_line() { printf '%s %s\n' "$(iso "$(date +%s)")" "$*" >> "$LOG"; }
+# recheck_moved <name> <dir>: why the moved directory must go back, or nothing.
+recheck_moved() {
+  local n=$1 g=$2 r= B=$2/.bb
+  scan
+  grep -Fxq -- "${g##*/}" <<< "$PROC_NAMES" && r=process
+  TICKET_NAMES=$(ticket_names) || exit 70
+  grep -Fxq -- "$n" <<< "$TICKET_NAMES" && r=${r:+$r,}ticket
+  if [ -e "$B/queued" ] || { [ -f "$B/start" ] && [ ! -f "$B/rc" ]; }; then r=${r:+$r,}in-flight; fi
+  if [ -e "$B/keep" ] || [ -L "$B/keep" ]; then r=${r:+$r,}keep-file; fi
+  printf '%s' "$r"
+}
+rm_tree() {  # rm_tree <dir>: rm -rf; once more after making the tree writable (a read-only directory blocks its own contents)
+  rm -rf --one-file-system -- "$1" 2> /dev/null && return 0
+  chmod -R u+rwX -- "$1" 2> /dev/null || true
+  rm -rf --one-file-system -- "$1"
+}
+remove_one() {  # remove_one <name> <size_kb> <activity epoch> <owner>
+  local n=$1 g why
+  OUTCOME=failed
+  g=$CO_REAL/.gc-$(date +%s)-$n
+  if [ -e "$g" ] || [ -L "$g" ]; then log_line "SKIP path=$CO_REAL/$n reason=$g-exists"; FAILED=$((FAILED + 1)); return 0; fi
+  if ! mv -T -- "$CO_REAL/$n" "$g"; then log_line "MOVE-FAILED path=$CO_REAL/$n"; FAILED=$((FAILED + 1)); return 0; fi
+  why=$(recheck_moved "$n" "$g") || why=unverifiable   # a re-check that could not run restores too
+  if [ -n "$why" ]; then
+    if [ ! -e "$CO_REAL/$n" ] && [ ! -L "$CO_REAL/$n" ] && mv -T -- "$g" "$CO_REAL/$n"; then log_line "RESTORED path=$CO_REAL/$n reasons=$why"; OUTCOME=restored
+    else log_line "RESTORE-FAILED path=$CO_REAL/$n moved=$g reasons=$why"; FAILED=$((FAILED + 1)); fi
+    return 0
+  fi
+  if rm_tree "$g"; then
+    log_line "REMOVED path=$CO_REAL/$n size_mb=$(($2 / 1024)) last_activity=$(iso "$3") owner=$4 days=$DAYS"
+    REMOVED=$((REMOVED + 1)); FREED_KB=$((FREED_KB + $2)); OUTCOME=removed
+  else
+    log_line "RM-FAILED path=$CO_REAL/$n moved=$g"; FAILED=$((FAILED + 1))
+  fi
+}
+remove_leftover() {  # remove_leftover <.gc-name> <size_kb>
+  if rm_tree "$CO_REAL/$1"; then log_line "LEFTOVER-REMOVED path=$CO_REAL/$1 size_mb=$(($2 / 1024))"; FREED_KB=$((FREED_KB + $2))
+  else log_line "LEFTOVER-RM-FAILED path=$CO_REAL/$1"; FAILED=$((FAILED + 1)); fi
+}
+
+# ---- run
+TICKET_NAMES=$(ticket_names) || exit 70
+LOGACT=$(log_activity) || die 65 "$TLOG has no header with checkout and ended columns"
+scan
+FAILED=0; REMOVED=0; FREED_KB=0; CANDIDATES=0; CAND_KB=0; KEPT=0; LEFT=0
+KEEP_COUNTS=; OUTCOME=
+
+[ "$LIVE" = 0 ] || { lock_run; log_line "RUN live days=$DAYS"; }
+
+# leftovers of a crash between the move and the rm: .gc-<epoch>-<name>, real directories only
+for g in "$CO_REAL"/.gc-[0-9]*-*; do
+  [ -e "$g" ] || [ -L "$g" ] || continue
+  n=${g##*/}
+  case $n in .gc-[0-9]*-*[!A-Za-z0-9._-]*) continue ;; esac
+  if [ -L "$g" ] || [ ! -d "$g" ]; then echo "leftover-skipped $n reason=not-a-directory"; continue; fi
+  if grep -Fxq -- "$n" <<< "$PROC_NAMES"; then echo "leftover-busy $n reason=process"; continue; fi
+  kb=$(size_kb "$g"); kb=${kb:-0}; LEFT=$((LEFT + 1)); CAND_KB=$((CAND_KB + kb))
+  if [ "$LIVE" = 1 ]; then scan; if grep -Fxq -- "$n" <<< "$PROC_NAMES"; then echo "leftover-busy $n reason=process"; else remove_leftover "$n" "$kb"; echo "leftover-removed $n size_mb=$((kb / 1024))"; fi
+  else echo "leftover $n size_mb=$((kb / 1024)) (would be removed)"; fi
+done
+
+for p in "$CO"/*; do
+  [ -e "$p" ] || [ -L "$p" ] || continue
+  n=${p##*/}
+  classify "$n"
+  if [ -n "$REASONS" ]; then
+    KEPT=$((KEPT + 1)); KEEP_COUNTS="$KEEP_COUNTS,$REASONS"
+    if [ "$ACT" != 0 ]; then echo "keep $n reasons=$REASONS newest=$(iso "$ACT")"; else echo "keep $n reasons=$REASONS"; fi
+    continue
+  fi
+  kb=$(size_kb "$CO_REAL/$n"); kb=${kb:-0}
+  CANDIDATES=$((CANDIDATES + 1)); CAND_KB=$((CAND_KB + kb))
+  if [ "$LIVE" = 1 ]; then
+    scan   # the guard's inputs may be minutes old by now: read them again for this checkout
+    TICKET_NAMES=$(ticket_names) || exit 70
+    classify "$n"
+    if [ -n "$REASONS" ]; then echo "keep $n reasons=$REASONS (changed during the run)"; log_line "KEPT path=$CO_REAL/$n reasons=$REASONS"; continue; fi
+    remove_one "$n" "$kb" "$ACT" "$OWN"
+    case $OUTCOME in
+      removed) echo "removed $n size_mb=$((kb / 1024)) newest=$(iso "$ACT") owner=$OWN" ;;
+      restored) echo "keep $n reasons=changed-after-move (restored)" ;;
+      *) echo "failed $n (see $LOG)" ;;
+    esac
+  else
+    echo "candidate $n size_mb=$((kb / 1024)) newest=$(iso "$ACT") age_days=$(((NOW - ACT) / 86400)) owner=$OWN"
+  fi
+done
+
+# kept, by reason (a checkout failing several counts under each)
+counts=$(printf '%s\n' "${KEEP_COUNTS#,}" | tr ',' '\n' | grep -v '^$' | sort | uniq -c | awk '{ printf "%s%s=%d", (s++ ? " " : ""), $2, $1 }' || true)
+if [ "$LIVE" = 1 ]; then
+  echo "total: removed $REMOVED of $CANDIDATES candidates, freed $((FREED_KB / 1024)) MB, failed $FAILED, kept $KEPT (${counts:-none}), days=$DAYS, blind=$BLIND"
+  log_line "RUN end removed=$REMOVED candidates=$CANDIDATES freed_mb=$((FREED_KB / 1024)) failed=$FAILED kept=$KEPT"
+  [ "$FAILED" = 0 ] || exit 74
+else
+  echo "total: DRY $CANDIDATES candidates, $((CAND_KB / 1024)) MB ($((CAND_KB / 1048576)) GB) would be freed incl. $LEFT leftover .gc dirs; kept $KEPT (${counts:-none}); days=$DAYS; blind=$BLIND; nothing removed"
+fi

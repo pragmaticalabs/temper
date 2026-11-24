@@ -1,0 +1,10 @@
+# Hourly check that starts bb-co-gc-pressure.service (issue #113). Not installed by the repo; see bb-co-gc.service.
+[Unit]
+Description=bb checkout GC pressure check, hourly
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target
