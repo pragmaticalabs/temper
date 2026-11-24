@@ -146,7 +146,7 @@ class BbCoGcIT {
         assumeTrue(BbFixtures.linux(), "bb-co-gc reads /proc and uses GNU stat, date, mv, flock");
         var env = new HashMap<String, String>(extraEnv);
 
-        env.put("PATH", System.getenv("PATH"));
+        env.putIfAbsent("PATH", System.getenv("PATH"));
         env.put("HOME", home.toString());
         env.put("USER", System.getProperty("user.name"));
         var command = new java.util.ArrayList<String>();
@@ -470,7 +470,10 @@ class BbCoGcIT {
                                                                              + "/.gc-1700000000-dup reasons=keep-file");
     }
 
-    /// Finding 4: a removal is followed by a pause of --pace seconds (3 removals at 1 s cannot finish in under 2.5 s).
+    /// Finding 4: a removal is followed by a pause of --pace seconds. No wall clock (a loaded host takes seconds anyway): a recording `sleep`
+    /// stub first on PATH logs each call's argument and how many checkouts were left at that moment, so the pause is proved to follow each
+    /// removal and to be exactly --pace. (bb-co-gc paces after the LAST removal too: 3 calls for 3 removals.)
+    /// Mutation: pace() { :; } -> no calls; pace() { sleep 2; } -> argument 2; both red.
     @Test
     void removals_areSeparatedByThePace() throws Exception {
         skeleton();
@@ -478,13 +481,20 @@ class BbCoGcIT {
             checkout(n, 10);
         }
 
-        var t0 = System.nanoTime();
-        var run = gc("--live", "--days", "3", "--pace", "1");
-        var elapsedMs = (System.nanoTime() - t0) / 1_000_000;
+        var stubs = Files.createDirectories(home.resolve("stubbin"));
+        var stub = stubs.resolve("sleep");
+
+        Files.writeString(stub, "#!/bin/sh\necho \"$* co=$(ls \"" + co() + "\" | wc -l)\" >> \"" + home.resolve("sleep.calls") + "\"\n");
+        assertThat(stub.toFile().setExecutable(true)).isTrue();
+
+        var run = gcWith(Map.of("PATH", stubs + ":" + System.getenv("PATH")), "--live", "--days", "3", "--pace", "1");
 
         assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
         assertThat(run.stdout()).contains("total: removed 3 of 3 candidates");
-        assertThat(elapsedMs).as("three removals at --pace 1").isGreaterThanOrEqualTo(2500);
+        for (var n : List.of("a", "b", "c")) {
+            assertThat(co().resolve(n)).as("control: removed").doesNotExist();
+        }
+        assertThat(Files.readAllLines(home.resolve("sleep.calls"))).as(run.stdout()).containsExactly("1 co=2", "1 co=1", "1 co=0");
     }
 
     /// Finding 4: a running port-group ticket defers the whole live pass; nothing is read for removal, exit 0, one log line.
@@ -522,18 +532,21 @@ class BbCoGcIT {
         assertThat(run.stdout()).contains("removed idle ");
     }
 
-    /// Finding 5: the run takes the queue's lock before it checks tickets and moves. A holder of $Q/.lock makes it WAIT (here 3 s, within the
-    /// default 30 s), and then it removes.
+    /// Finding 5: the run takes the queue's lock before it checks tickets and moves. While a holder keeps $Q/.lock the run WAITS (the checkout
+    /// stays, the run is not done); once the holder lets go it removes. No wall-clock bound: the holder is released by the test, so a slow host
+    /// only delays, never reds; the 1 s dwell is the only time in it, and a run that ignores the lock removes within it.
+    /// Mutation: qlock() { return 0; } -> the checkout is gone during the dwell -> red.
     @Test
     void aHolderOfTheQueueLock_makesTheRunWaitThenItRemoves() throws Exception {
         skeleton();
         var idle = checkout("idle", 10);
         var held = home.resolve("held");
+        var release = home.resolve("release");
         var holder = new ProcessBuilder("flock",
                                         home.resolve("work/queue/.lock").toString(),
                                         "sh",
                                         "-c",
-                                        "touch " + held + "; sleep 3").start();
+                                        "touch " + held + "; while [ ! -e " + release + " ]; do sleep 0.1; done").start();
 
         try {
             for (var i = 0; i < 100 && !Files.exists(held); i++) {
@@ -541,13 +554,32 @@ class BbCoGcIT {
             }
 
             assumeTrue(Files.exists(held), "flock is needed to hold the queue lock");
-            var t0 = System.nanoTime();
-            var run = live();
-            var elapsedMs = (System.nanoTime() - t0) / 1_000_000;
 
-            assertThat(idle).as(run.stdout()).doesNotExist();
-            assertThat(elapsedMs).as("the mv waits for the holder").isGreaterThanOrEqualTo(1500);
+            var run = java.util.concurrent.CompletableFuture.supplyAsync(() -> {
+                try {
+                    return live();
+                } catch (Exception e) {
+                    throw new IllegalStateException(e);
+                }
+            });
+            var log = home.resolve("work/co-gc.log");
+
+            for (var i = 0; i < 600 && !(Files.exists(log) && Files.readString(log).contains("RUN live")); i++) {
+                Thread.sleep(50);
+            }
+
+            assertThat(Files.exists(log) && Files.readString(log).contains("RUN live")).as("control: the run started").isTrue();
+            Thread.sleep(1000);
+            assertThat(idle.resolve("module/target/payload.bin")).as("kept while the holder holds the lock").exists();
+            assertThat(run.isDone()).as("the run waits for the holder").isFalse();
+            Files.writeString(release, "go");
+
+            var done = run.get(120, TimeUnit.SECONDS);
+
+            assertThat(idle).as(done.stdout()).doesNotExist();
+            assertThat(done.stdout()).contains("removed idle ");
         } finally {
+            Files.writeString(release, "go");
             stop(holder);
         }
     }
