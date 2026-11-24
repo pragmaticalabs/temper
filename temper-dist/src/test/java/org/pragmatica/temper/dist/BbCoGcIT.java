@@ -307,6 +307,17 @@ class BbCoGcIT {
         assertThat(run.stdout()).contains("keep victim-files reasons=recent ", "keep victim-log reasons=recent ");
     }
 
+    /// Each of the three activity signals alone keeps a checkout: .git/index fresh while .git/HEAD, .bb/end and .bb/rc are 10 days old (the
+    /// control is the same shape with index old too, removed by assertKeptOnlyFor).
+    @Test
+    void reason4_aFreshGitIndexAlone_keepsTheCheckout() throws Exception {
+        skeleton();
+        var victim = checkout("victim", 10);
+
+        Files.setLastModifiedTime(victim.resolve(".git/index"), FileTime.from(Instant.now().minus(Duration.ofHours(5))));
+        assertKeptOnlyFor(victim, "recent");
+    }
+
     /// A checkout with no activity signal at all has an unknown age: kept, never guessed.
     @Test
     void anUnknownAge_isKept() throws Exception {
@@ -330,6 +341,18 @@ class BbCoGcIT {
         var victim = checkout("victim", 10);
 
         Files.writeString(victim.resolve(".bb/keep"), "");
+        assertKeptOnlyFor(victim, "keep-file");
+    }
+
+    /// A .bb/keep that is a dangling symlink is still the owner's opt-out: the marker is the name, not what it points at.
+    @Test
+    void reason5_aDanglingKeepSymlink_isKept() throws Exception {
+        skeleton();
+        var victim = checkout("victim", 10);
+        var link = Files.createSymbolicLink(victim.resolve(".bb/keep"), home.resolve("no-such-target"));
+
+        assertThat(Files.exists(link)).as("control: the link dangles (exists() follows it)").isFalse();
+        assertThat(Files.isSymbolicLink(link)).isTrue();
         assertKeptOnlyFor(victim, "keep-file");
     }
 
@@ -358,6 +381,31 @@ class BbCoGcIT {
         assertThat(run.stdout().lines().filter(l -> l.startsWith("keep link-")).toList()).hasSize(2)
                   .allMatch(l -> l.contains("reasons=not-direct-child"));
         assertThat(run.stdout()).doesNotContain("removed link-");
+    }
+
+    /// --days decides the window, in both spellings and for N other than 3: checkouts of 2, 5 and 12 days; each run shrinks the window and
+    /// removes exactly the checkouts it has now outlived (a run that ignored N would use 3 and remove 5 and 12 days at the first).
+    @Test
+    void days_setsTheWindow_inBothSpellings() throws Exception {
+        skeleton();
+        var d2 = checkout("age2", 2);
+        var d5 = checkout("age5", 5);
+        var d12 = checkout("age12", 12);
+        var first = gc("--live", "--days=10", "--pace", "0");
+
+        assertThat(first.rc()).as(first.stdout() + first.stderr()).isZero();
+        assertThat(d12).as(first.stdout()).doesNotExist();
+        assertThat(d5).exists();
+        assertThat(d2).exists();
+        var second = gc("--live", "--days", "4", "--pace", "0");
+
+        assertThat(second.rc()).as(second.stdout() + second.stderr()).isZero();
+        assertThat(d5).as(second.stdout()).doesNotExist();
+        assertThat(d2).exists();
+        var third = gc("--live", "--days=1", "--pace=0");
+
+        assertThat(third.rc()).as(third.stdout() + third.stderr()).isZero();
+        assertThat(d2).as(third.stdout()).doesNotExist();
     }
 
     // ---- removal, crash leftover, DRY
