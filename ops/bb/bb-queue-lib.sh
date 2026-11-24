@@ -129,6 +129,9 @@ still_ours() {
 # kill_set <id> <co>: the processes to stop for a RUNNING ticket, one "pid:starttime:kind" per line: the waiter(s) and everything below
 # them (w), every process whose cwd is the checkout or below (c) and everything below those (d). This shell, its ancestors and its
 # descendants are never in it (the caller may stand inside the checkout). Never a pattern kill: identities are collected, then signalled.
+# With a third argument `java`, of the c and d processes only those whose argv[0] is java: a driver, shell or editor whose cwd is the
+# checkout is not in the set (the bound runner of bb-build, #116).
+is_java() { local a=""; IFS= read -r -d '' a 2>/dev/null < "/proc/$1/cmdline" || true; case "$a" in java|*/java) ;; *) return 1;; esac; }
 kill_set() {
   local self=$$ anc="" p wt cw; p=$$
   while [ -n "$p" ] && [ "$p" -gt 1 ]; do anc="$anc $p"; p=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' '); done
@@ -136,10 +139,10 @@ kill_set() {
   { tree_of $(waiter_pids "$1") $(cwd_below "$2"); } | sort -un | grep -vxF -f <({ for p in $anc; do echo "$p"; done; tree_of $self; }) \
     | while read -r p; do
         proc_live "$p" || continue
-        case "$wt" in *" $p "*) echo "$p:$(pstart "$p"):w";; *) case "$cw" in *" $p "*) echo "$p:$(pstart "$p"):c";; *) echo "$p:$(pstart "$p"):d";; esac;; esac
+        case "$wt" in *" $p "*) echo "$p:$(pstart "$p"):w";; *) [ "${3:-}" != java ] || is_java "$p" || continue; case "$cw" in *" $p "*) echo "$p:$(pstart "$p"):c";; *) echo "$p:$(pstart "$p"):d";; esac;; esac
       done || true
 }
-# stop_ticket_processes <id> <co>: TERM the kill set, KILL what survives the grace, repeat (a dying parent can have spawned);
+# stop_ticket_processes <id> <co> [java]: TERM the kill set (the optional `java` is kill_set's), KILL what survives the grace, repeat (a dying parent can have spawned);
 # succeed only when nothing that is still ours is left. Before EVERY signal the identity is re-checked (still_ours): a PID whose start
 # time changed or that no longer qualifies is never signalled, and it is not a survivor either: our process is gone, the PID is someone
 # else's now. Prints two lines on stdout: the PIDs it signalled, and "notours=<pids>" (identity changed, not signalled), space separated.
@@ -149,7 +152,7 @@ stop_ticket_processes() {
   # waiter tree together: all die in one round and the waiter never writes the container's 137 as the build's rc. The docker kill
   # comes AFTER, as a mop-up (2026-11-11: killing the container first let the waiter record rc=137 and cancel reported "too late").
   for round in 1 2 3; do
-    set=$(kill_set "$1" "$2"); [ -n "$set" ] || break
+    set=$(kill_set "$1" "$2" "${3:-}"); [ -n "$set" ] || break
     for e in $set; do
       if still_ours "$e" "$2"; then kill -TERM "${e%%:*}" 2>/dev/null; all="$all ${e%%:*}"
       elif proc_live "${e%%:*}"; then no="$no ${e%%:*}"; fi
@@ -164,7 +167,7 @@ stop_ticket_processes() {
   timeout 20 docker kill "bb-$1" > /dev/null 2>&1 || true   # isolated ticket: the container (named bb-<id> by bb-netns-run), if still up
   printf '%s\n' "$(printf '%s\n' $all | sort -un | tr '\n' ' ' | sed 's/ $//')"
   printf 'notours=%s\n' "$(printf '%s\n' $no | sort -un | tr '\n' ' ' | sed 's/ $//')"
-  for e in $(kill_set "$1" "$2"); do still_ours "$e" "$2" && return 1; done
+  for e in $(kill_set "$1" "$2" "${3:-}"); do still_ours "$e" "$2" && return 1; done
   return 0
 }
 
@@ -217,14 +220,30 @@ pg_free_slot() {
   for i in $(seq "$n"); do case "$used" in *" $i "*) ;; *) echo "$i"; return 0;; esac; done
   echo 0
 }
-# grantable (under lock, after reap): order, minus the group tickets that may not start now.
+# mutant_waits (under lock): ids of the waiting mutant tickets (via=bb-mutate:*, MUTANT TICKETS in bb-build's header, #116) whose turn it is
+# NOT: their owner has a mutant ticket in running/, or one in waiting/ with a smaller created= (tie: the smaller id). created=, never
+# order_at=: by order_at= the older batch would win every turn. Read from the ticket files at each call, so at each grant test.
+mutant_waits() {
+  local f
+  for f in "$Q"/running/* "$Q"/waiting/*; do
+    [ -f "$f" ] || continue
+    case "$(field "$f" via)" in bb-mutate:*) ;; *) continue;; esac
+    case "$f" in
+      "$Q"/running/*) printf '%s - %s\n' -1 "$(field "$f" owner)" ;;
+      *) printf '%s %s %s\n' "$(field "$f" created | grep -x '[0-9][0-9]*' || echo 0)" "${f##*/}" "$(field "$f" owner)" ;;
+    esac
+  done | LC_ALL=C sort -k1,1n -k2,2 | awk 'seen[$3]++ { print $2 }'
+}
+# grantable (under lock, after reap): order, minus the mutant tickets whose turn it is not, minus the group tickets that may not start now.
+# A mutant ticket left out here takes no part in pick: no blocked_since=, never the oldest of an override, no port-group drain.
 grantable() {
-  local id f n ni=0 ng=0 drain=0; n=$(pg_slots)
+  local id f n ni=0 ng=0 drain=0 waits; n=$(pg_slots); waits=" $(mutant_waits | tr '\n' ' ') "
   for f in "$Q"/running/*; do
     [ -f "$f" ] && [ "$(field "$f" group)" = 1 ] || continue
     ng=$((ng + 1)); [ "$(field "$f" iso)" = 1 ] && ni=$((ni + 1))
   done
   for id in $(order); do
+    case "$waits" in *" $id "*) continue;; esac
     f=$Q/waiting/$id
     if [ "$(field "$f" group)" = 1 ]; then
       if [ "$(field "$f" iso)" = 1 ]; then
@@ -275,6 +294,9 @@ driver_gone() {
   case "$(sed 's/^.*) //; s/ .*//' "/proc/$p/stat" 2>/dev/null)" in Z|X) return 0;; esac
   return 1
 }
+# start_ns <start>: epoch nanoseconds of a process start time (pstart's clock ticks since boot). Never later than the true start while the
+# wall clock is not stepped: btime is whole seconds and the ticks are whole ticks, both floors.
+start_ns() { echo $(( $(awk '$1 == "btime" { print $2 }' /proc/stat) * 1000000000 + $1 * (1000000000 / $(getconf CLK_TCK)) )); }
 # mutate_driver <pid> <start>: 0 when <pid> runs with start time <start>, its command line is `python* [-opts] .../bb-mutate ...`, and it is an
 # ANCESTOR of the calling bb-build (so naming someone else's running driver is refused).
 mutate_driver() {
