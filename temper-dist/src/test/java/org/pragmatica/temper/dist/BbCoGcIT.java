@@ -98,6 +98,33 @@ class BbCoGcIT {
         return Map.of("BB_CO_GC_PROC", proc.toString());
     }
 
+    /// A fake /proc holding `self` (the tool's precondition) and nothing else, so no process of the host this test runs on (a gpg-agent whose cwd
+    /// is unreadable made every candidate `blind` on bigboy, 2026-11-25) reaches the guard. Every row gets this unless it names its own tree.
+    private Path fakeProc() throws IOException {
+        var proc = home.resolve("fakeproc-none");
+
+        Files.createDirectories(proc.resolve("self"));
+
+        return proc;
+    }
+
+    /// A fake /proc with `self` and, for each pid the test itself started, a `cwd` symlink to the directory that process really works in: the
+    /// first thing guard 3 reads (the tool then also reads exe and fd/*, absent here, which it tolerates). The mapping is the test's own claim
+    /// about its child; the assert on `isAlive` and the process's real cwd are in the row.
+    private Path fakeProcWithCwd(Map<Long, Path> cwdOf) throws IOException {
+        var proc = home.resolve("fakeproc-cwd");
+
+        Files.createDirectories(proc.resolve("self"));
+
+        for (var e : cwdOf.entrySet()) {
+            var pid = Files.createDirectories(proc.resolve(Long.toString(e.getKey())));
+
+            Files.createSymbolicLink(pid.resolve("cwd"), e.getValue().toRealPath());
+        }
+
+        return proc;
+    }
+
     private BbFixtures.Outcome liveWith(Map<String, String> env) throws Exception {
         var run = gcWith(env, "--live", "--days", "3", "--pace", "0");
 
@@ -147,6 +174,7 @@ class BbCoGcIT {
         var env = new HashMap<String, String>(extraEnv);
 
         env.putIfAbsent("PATH", System.getenv("PATH"));
+        env.putIfAbsent("BB_CO_GC_PROC", fakeProc().toString());
         env.put("HOME", home.toString());
         env.put("USER", System.getProperty("user.name"));
         var command = new java.util.ArrayList<String>();
@@ -167,8 +195,12 @@ class BbCoGcIT {
 
     /// Runs live with a clean `control`, then asserts the victim is kept for exactly `reason` and untouched, and the control is gone.
     private void assertKeptOnlyFor(Path victim, String reason) throws Exception {
+        assertKeptOnlyFor(victim, reason, Map.of());
+    }
+
+    private void assertKeptOnlyFor(Path victim, String reason, Map<String, String> env) throws Exception {
         var control = checkout("control", 10);
-        var run = live();
+        var run = liveWith(env);
 
         assertThat(control).doesNotExist();
         assertThat(run.stdout()).contains("removed control ");
@@ -217,7 +249,7 @@ class BbCoGcIT {
         }
     }
 
-    /// Reason 3: a process with its cwd under the checkout keeps it.
+    /// Reason 3: a process with its cwd under the checkout keeps it. The fake /proc holds exactly the sleeper: a cwd link to the checkout.
     @Test
     void reason3_aProcessWorkingInTheCheckout_keepsIt() throws Exception {
         skeleton();
@@ -226,10 +258,33 @@ class BbCoGcIT {
 
         try {
             assertThat(sleeper.isAlive()).as("control: the sleeper runs in the checkout").isTrue();
-            assertKeptOnlyFor(victim, "process");
+            var proc = fakeProcWithCwd(Map.of(sleeper.pid(), victim.resolve("module")));
+
+            assertKeptOnlyFor(victim, "process", Map.of("BB_CO_GC_PROC", proc.toString()));
         } finally {
-            sleeper.destroyForcibly();
-            sleeper.waitFor(10, TimeUnit.SECONDS);
+            stop(sleeper);
+        }
+    }
+
+    /// The same keep against the REAL /proc: the one row that reads the host's own process table (the seam's default), so the scan of real
+    /// cwd/exe/fd entries is exercised once. It asserts only that `process` is among the reasons: a host's unrelated unreadable process
+    /// (a gpg-agent, 2026-11-25) adds `blind`, which this row must not depend on. With the process guard removed the reasons lack `process`.
+    @Test
+    void reason3_aRealProcessInTheRealProc_isSeenByTheScan() throws Exception {
+        skeleton();
+        var victim = checkout("victim", 10);
+        var sleeper = BbFixtures.process("sleep", "120").directory(victim.resolve("module").toFile()).start();
+
+        try {
+            assertThat(sleeper.isAlive()).as("control: the sleeper runs in the checkout").isTrue();
+            var run = liveWith(Map.of("BB_CO_GC_PROC", "/proc"));
+
+            assertThat(victim.resolve("module/target/payload.bin")).as(run.stdout()).exists();
+            assertThat(run.stdout().lines().filter(l -> l.startsWith("keep victim ")).toList()).as(run.stdout())
+                      .hasSize(1)
+                      .allMatch(l -> List.of(l.replaceFirst(".* reasons=(\\S+).*", "$1").split(",")).contains("process"));
+        } finally {
+            stop(sleeper);
         }
     }
 
