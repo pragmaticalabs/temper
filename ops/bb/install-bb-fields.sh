@@ -77,7 +77,7 @@ readonly BB_BUILD_PRE90=ad84d8ec0f36096b0de9b4f29142f730   # the #88 version: th
 readonly BB_BUILD_PRE91=12f2c9b52c09724be2a07e8058bc6a43   # the #91 version: the waiter passes reap's count to pick; an rc-0 run that ran 0 testcases stays rc 0 (issue #86)
 readonly BB_BUILD_PRE102=0b01f3522843051950e95ba6e52ec5e3   # the #86/#91 version: the args guards pipe printf into grep -q, so a long arg list can make a guard miss its match under pipefail (issue #102)
 readonly BB_BUILD_PRE112=b10f1e002113eafa50a05b8f4fe58eae   # the #102 version: -pl without -am is queued although a reactor dependency is not installed (issue #112)
-readonly BB_BUILD_NEW=d09d2183aa791d4157a7941684e9b20b
+readonly BB_BUILD_NEW=f1478564c91a6ab3544d1a7c9efec568
 # bb-jbct-bootstrap: absent on every host before its first install; bb-build calls it, so it is installed first.
 readonly BB_JBCTBOOT_NEW=3e5396ecee48b99949456cf805df1e60
 # bb-result: absent on every host before its first install. No trailing comment on a pin line: bb-drift reads it by pattern.
@@ -111,7 +111,7 @@ readonly BB_PORTGROUP_PREV=a93ade2ff7dddcc75cee3d4169a08499   # the 2026-11-09 h
 readonly BB_PORTGROUP_PRESINCE=884caf3cf37b12cf5cf1d97e96f76a4c   # before the pom walk and closures were factored out for bb-modules.py
 readonly BB_PORTGROUP_NEW=8ad1c6dbe2044f984814c2b19645c48b
 readonly BB_MODULES_PRE112=9c668381f2a161c24a9b5d55cccc4945   # the #102 version, without --installed (issue #112); absent on every host before its first install
-readonly BB_MODULES_NEW=bf8ab7f8f68ad0bf16497d8cb5b42167
+readonly BB_MODULES_NEW=f5aa74084700341590702b06dcc96738
 # The bb-test lane helpers: absent on every host before their first install. No trailing comment on a pin line: bb-drift reads it by pattern.
 readonly BB_CPRECORD_NEW=3a75a8750a940c983170a43c6c8611b0
 # BB_TEST_PRE76: the #80/#81 bb-test (its launch reads and writes ~/work/queue, issue #76); live on the hosts

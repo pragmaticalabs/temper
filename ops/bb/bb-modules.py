@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# bb-modules.py --installed <checkout> [mvn args...]  (#112) -- the submit check of bb-build for `-pl` without -am/-amd; see installed_check().
+# bb-modules.py --installed <checkout> [mvn args...]  (#112) -- the submit check of bb-build for `-pl` without -am/-amd; the rule is in bb-build's header (UNINSTALLED SIBLING) and installed_check().
 # bb-modules.py <checkout> <base-ref>  (2026-11-19) -- prints the module set an incremental build must cover, on ONE stdout line:
 #   NONE            no changed path at all (the caller builds nothing)
 #   FULL <reason>   run the whole reactor; the reason: root-pom | mvn-config:<path> | parent:<pom> | unmapped:<path> | unreadable-reactor:<E> | unresolved-coordinate:<pom>:<text>
@@ -37,15 +37,12 @@ def changed_paths(co, base):
 def clean(x):
     return re.sub(r'[^A-Za-z0-9._/:@+-]', '?', x)
 
-def extra_edges(root):
-    # every artifactId maven could order the reactor by, beyond top-level <dependencies>: dependencies anywhere (all profiles, active or not;
-    # plugin dependencies; dependencyManagement too: fail toward more), build plugins and extensions, and the parent. Types and classifiers
-    # (test-jar, tests) never narrow a match: the artifactId alone is the edge.
-    # Returns (artifactIds, unresolved coordinate texts): a groupId or artifactId that keeps `${` after substituting the pom's own <properties>.
+def substituter(root):
+    # text -> text with the pom's own <properties> (and project.artifactId/groupId) substituted, stripped; an unknown ${x} stays as written
     ns = pg.NS
     props = {p.tag[len(ns):]: (p.text or '').strip() for p in root.findall(ns + 'properties/*')}
-    props.setdefault('project.artifactId', root.findtext(ns + 'artifactId') or '')
-    props.setdefault('project.groupId', root.findtext(ns + 'groupId') or root.findtext(ns + 'parent/' + ns + 'groupId') or '')
+    props.setdefault('project.artifactId', (root.findtext(ns + 'artifactId') or '').strip())
+    props.setdefault('project.groupId', (root.findtext(ns + 'groupId') or root.findtext(ns + 'parent/' + ns + 'groupId') or '').strip())
     def sub(text):
         text = (text or '').strip()
         for _ in range(10):
@@ -54,6 +51,15 @@ def extra_edges(root):
                 break
             text = new
         return text
+    return sub
+
+def extra_edges(root):
+    # every artifactId maven could order the reactor by, beyond top-level <dependencies>: dependencies anywhere (all profiles, active or not;
+    # plugin dependencies; dependencyManagement too: fail toward more), build plugins and extensions, and the parent. Types and classifiers
+    # (test-jar, tests) never narrow a match: the artifactId alone is the edge.
+    # Returns (artifactIds, unresolved coordinate texts): a groupId or artifactId that keeps `${` after substituting the pom's own <properties>.
+    ns = pg.NS
+    sub = substituter(root)
     ids, bad = set(), []
     for t in ('dependency', 'plugin', 'extension'):
         for x in root.iter(ns + t):
@@ -111,16 +117,27 @@ def select(co, base):
     s = sorted(x for x in pg.close(down, lambda d: ups[d]) if x != '.')
     return ','.join(s), ''
 
+# maven's default lifecycle, in order (#112): which phase a run reaches decides what it resolves
+PHASES = ['validate', 'initialize', 'generate-sources', 'process-sources', 'generate-resources', 'process-resources', 'compile', 'process-classes',
+          'generate-test-sources', 'process-test-sources', 'generate-test-resources', 'process-test-resources', 'test-compile', 'process-test-classes',
+          'test', 'prepare-package', 'package', 'pre-integration-test', 'integration-test', 'post-integration-test', 'verify', 'install', 'deploy']
+VALUE_OPTS = {'-T', '--threads', '-P', '--activate-profiles', '-s', '--settings', '-gs', '--global-settings', '-t', '--toolchains', '-gt',
+              '--global-toolchains', '-rf', '--resume-from', '-l', '--log-file', '-b', '--builder', '-D'}
+
 def installed_check(co, args):
-    """('OK', '') | ('MISSING', 'path=g:a:v, ...') | ('SKIP', why) for `-pl` without -am/-amd (#112). The reactor modules the selected modules
-    depend on (top-level <dependencies>, transitively, selected ones excluded) must have <repo>/<g path>/<a>/<v>/<a>-<v>.pom: the repo is the
+    """('OK', '') | ('MISSING', 'path=g:a:v, ...') | ('SKIP', why) for `-pl` without -am/-amd (#112). Checked only when a lifecycle phase at or after
+    `compile` is among the args (a plugin goal alone never resolves what this checks). The reactor modules a selected module needs must have
+    <repo>/<g path>/<a>/<v>/<a>-<v>.pom: its direct dependencies (before `test-compile` the `test` scope is left out; from `test-compile` on all
+    scopes count; none for a pom-packaging selected module, which resolves nothing), then, for each such module that is not itself selected, its
+    compile and runtime dependencies, transitively. A dependency is a reactor module only when (groupId, artifactId) both match, groupId
+    substituted from the pom's own <properties>; one still holding `${` while its artifactId names a reactor module is SKIP. The repo is the
     last -Dmaven.repo.local= of .mvn/maven.config + args, else <co>/.m2-local. A form it cannot resolve is SKIP, never a refusal."""
     try:
         cfg = [l.strip() for l in open(os.path.join(co, '.mvn', 'maven.config')) if l.strip()]
     except OSError:
         cfg = []
     argv = cfg + list(args)
-    sel, am, repo, i = [], False, os.path.join(co, '.m2-local'), 0
+    sel, am, repo, i, reach = [], False, os.path.join(co, '.m2-local'), 0, -1
     while i < len(argv):
         a = argv[i]
         if a in ('-pl', '--projects'):
@@ -136,24 +153,40 @@ def installed_check(co, args):
             return 'SKIP', '-f/--file is not modelled'
         elif a.startswith('-Dmaven.repo.local='):
             repo = os.path.join(co, a.split('=', 1)[1])
+        elif a in VALUE_OPTS:
+            i += 1
+        elif a in PHASES:
+            reach = max(reach, PHASES.index(a))
         i += 1
     sel = [s.strip().lstrip('?') for s in sel if s.strip()]
     if am or not sel:
         return 'OK', ''
-    versions = {}
+    if reach < PHASES.index('compile'):
+        return 'OK', ''
+    allscopes = reach >= PHASES.index('test-compile')
+    coords, packaging, deps = {}, {}, {}   # module path -> (g, a, v) | packaging | [(g, a, scope)]; groupId, artifactId, version stripped
     def visit(d, r):
-        versions[d] = r.findtext(pg.NS + 'version') or r.findtext(pg.NS + 'parent/' + pg.NS + 'version') or ''
+        ns = pg.NS
+        sub = substituter(r)
+        g = (r.findtext(ns + 'groupId') or r.findtext(ns + 'parent/' + ns + 'groupId') or '').strip()
+        v = (r.findtext(ns + 'version') or r.findtext(ns + 'parent/' + ns + 'version') or '').strip()
+        coords[d] = (g, (r.findtext(ns + 'artifactId') or '').strip(), v)
+        packaging[d] = (r.findtext(ns + 'packaging') or 'jar').strip()
+        deps[d] = [(sub(x.findtext(ns + 'groupId')), sub(x.findtext(ns + 'artifactId')), sub(x.findtext(ns + 'scope')) or 'compile')
+                   for x in r.findall(ns + 'dependencies/' + ns + 'dependency')]
     try:
         mods = pg.load_reactor(co, visit)
     except Exception as e:
         return 'SKIP', 'could not read the reactor (%s)' % type(e).__name__
+    by_ga = {(g, a): d for d, (g, a, _) in coords.items()}
+    aids = {a for _, a, _ in coords.values()}
     def resolve(s):
         s = os.path.normpath(s.rstrip('/'))
         if s in mods:
             return s
         if ':' in s:
             g, a = s.split(':', 1)
-            hit = [d for d, (gid, aid, _) in mods.items() if aid == a and (not g or g == gid)]
+            hit = [d for d, (gid, aid, _) in coords.items() if aid == a and (not g or g == gid)]
             return hit[0] if len(hit) == 1 else None
         return None
     inc = [s for s in sel if s[0] not in '!-']
@@ -171,12 +204,36 @@ def installed_check(co, args):
             return 'SKIP', 'cannot resolve -pl selector %s' % clean(s)
         out.add(d)
     selected = (chosen if inc else set(mods)) - out
-    ups = pg.upstreams(mods)
-    need = sorted(pg.close(selected, lambda d: ups[d]) - selected)
+    need, todo = set(), []
+    def edges(d, scopes):
+        # the reactor modules d depends on, within `scopes`; None = a coordinate it cannot place (SKIP)
+        hit = []
+        for g, a, scope in deps[d]:
+            if scopes is not None and scope not in scopes:
+                continue
+            if (g, a) in by_ga:
+                hit.append(by_ga[(g, a)])
+            elif '${' in g + a and (a in aids or '${' in a):
+                return None
+        return hit
+    for d in selected:
+        if packaging[d] != 'pom':
+            found = edges(d, None if allscopes else {'compile', 'provided', 'system', 'runtime'})
+            if found is None:
+                return 'SKIP', 'cannot resolve a dependency coordinate of %s' % clean(d)
+            todo += found
+    while todo:
+        d = todo.pop()
+        if d in selected or d in need:
+            continue
+        need.add(d)
+        found = edges(d, {'compile', 'runtime'})
+        if found is None:
+            return 'SKIP', 'cannot resolve a dependency coordinate of %s' % clean(d)
+        todo += found
     missing = []
-    for d in need:
-        g, a, _ = mods[d]
-        v = versions[d]
+    for d in sorted(need):
+        g, a, v = coords[d]
         if not g or not v or '${' in g + a + v:
             return 'SKIP', 'cannot resolve the coordinate of %s' % clean(d)
         if not os.path.isfile(os.path.join(repo, *g.split('.'), a, v, '%s-%s.pom' % (a, v))):

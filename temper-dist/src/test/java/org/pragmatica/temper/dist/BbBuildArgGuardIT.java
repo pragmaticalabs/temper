@@ -27,10 +27,20 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 ///
 /// #112 UNINSTALLED SIBLING (rc 11): `-pl` without -am/-amd is refused at submit, nothing queued, when a reactor module the selected ones depend on has
 /// no pom in the checkout's `.m2-local`. Reactor: root -> a, b (depends on a), c (depends on b), d (no deps); version 1, group g.x.
+/// Phase and scope: only a lifecycle phase at or after `compile` is checked; before `test-compile` the `test` scope is left out; a pom-packaged selected module
+/// resolves nothing; past the selected module only compile/runtime edges are followed; a dependency matches a reactor module by (groupId, artifactId).
 /// Probes (each mutation of ops/bb/bb-modules.py `installed_check` turns the named rows red):
 ///  - drop `-am`/`--also-make` from the tuple -> [#theUninstalledSiblingGuard_queuesWithAm]
 ///  - drop `-amd`/`--also-make-dependents` from the tuple -> [#theUninstalledSiblingGuard_queuesWithAmd]
 ///  - drop the `isfile` test (every needed module counts as missing) -> [#theUninstalledSiblingGuard_queuesWhenTheSiblingIsInstalled]
+///  - match a dependency by artifactId alone (not (groupId, artifactId)) -> [#theUninstalledSiblingGuard_doesNotCountAnExternalArtifactWhoseArtifactIdNamesAReactorModule]
+///  - drop the lifecycle-phase gate (any `-pl` run is checked) -> [#theUninstalledSiblingGuard_neverRefusesAPluginGoalAlone]
+///  - drop the `test`-scope cut before test-compile -> [#theUninstalledSiblingGuard_queuesACompileWhenOnlyATestScopeSiblingIsMissing]
+///  - count the dependencies of a pom-packaged selected module like a jar module's -> [#theUninstalledSiblingGuard_queuesAPomPackagedModule]
+///  - drop the transitive step (direct dependencies only) -> [#theUninstalledSiblingGuard_followsTheDependenciesOfADependencyTransitively]
+///  - follow every scope past the selected module -> [#theUninstalledSiblingGuard_doesNotFollowATestScopeEdgeOfADependency]
+///  - drop the `.strip()` of groupId, artifactId and version -> [#theUninstalledSiblingGuard_stripsWhitespaceAroundCoordinates],
+///    [#theUninstalledSiblingGuard_findsAnInstalledSiblingWhoseCoordinatesArePadded]
 ///  - drop `- selected` (the selected modules count as needed) -> [#theUninstalledSiblingGuard_queuesAModuleWithNoReactorDependencies],
 ///    [#theUninstalledSiblingGuard_neverAsksForTheSelectedModulesThemselves]
 ///
@@ -49,6 +59,8 @@ class BbBuildArgGuardIT {
     private Map<String, String> env;
     private boolean reactor;
     private List<String> installed = List.of();
+    private final Map<String, String> poms = new HashMap<>();
+    private boolean pomModule;
 
     @BeforeEach
     void linuxOnly() {
@@ -144,17 +156,51 @@ class BbBuildArgGuardIT {
              + "</project>\n";
     }
 
+    private static String dep(String group, String artifact, String scope) {
+        return "<dependency><groupId>" + group
+             + "</groupId><artifactId>" + artifact
+             + "</artifactId>" + (scope.isEmpty()
+                                  ? ""
+                                  : "<scope>" + scope + "</scope>")
+             + "</dependency>";
+    }
+
+    /// a module pom of the fixture reactor with raw `<dependency>` elements; `extra` is raw text put before `<artifactId>` (a padded `<version>`)
+    private static String pomWith(String artifact, String packaging, String extra, String... deps) {
+        return NS
+             + "<parent><groupId>g.x</groupId><artifactId>root</artifactId><version>1</version></parent>" + extra
+             + "<artifactId>" + artifact
+             + "</artifactId>" + (packaging.isEmpty()
+                                  ? ""
+                                  : "<packaging>" + packaging + "</packaging>")
+             + "<dependencies>" + String.join("", deps)
+             + "</dependencies></project>\n";
+    }
+
     private void writeReactor() throws Exception {
         Files.writeString(co.resolve("pom.xml"),
                           NS
                          + "<groupId>g.x</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules>"
-                         + "<module>a</module><module>b</module><module>c</module><module>d</module></modules></project>\n");
+                         + "<module>a</module><module>b</module><module>c</module><module>d</module>" + (pomModule
+                                                                                                         ? "<module>p</module>"
+                                                                                                         : "")
+                         + "</modules></project>\n");
         var modules = Map.of("a", new String[0], "b", new String[]{"a"}, "c", new String[]{"b"}, "d", new String[0]);
 
         for (var module : modules.entrySet()) {
             Files.createDirectories(co.resolve(module.getKey()));
             Files.writeString(co.resolve(module.getKey()).resolve("pom.xml"),
                               pom(module.getKey(), module.getValue()));
+        }
+
+        if (pomModule) {
+            Files.createDirectories(co.resolve("p"));
+            Files.writeString(co.resolve("p/pom.xml"), pomWith("p", "pom", "", dep("g.x", "a", "")));
+        }
+
+        for (var override : poms.entrySet()) {
+            Files.writeString(co.resolve(override.getKey()),
+                              override.getValue());
         }
     }
 
@@ -368,6 +414,124 @@ class BbBuildArgGuardIT {
     void theUninstalledSiblingGuard_neverAsksForTheSelectedModulesThemselves() throws Exception {
         reactor = true;
         assertQueued(run(Map.of(), 0, "-B", "-pl", "a,b", "test"));
+    }
+
+    /// runs bb-build again in the tree the first `run` set up (a refusal leaves nothing behind)
+    private BbFixtures.Outcome again(String... args) throws Exception {
+        var command = new ArrayList<>(List.of(dir.resolve("tools/bb-build").toString(),
+                                              co.toString(),
+                                              "-B"));
+
+        command.addAll(List.of(args));
+        var run = BbFixtures.run(command, env, null, null);
+        var matcher = QUEUED.matcher(run.stdout());
+
+        if (matcher.find()) {
+            tickets.add(matcher.group(1));
+        }
+
+        return run;
+    }
+
+    /// a dependency is a reactor module only when groupId AND artifactId match: external g2:a is not the reactor's g.x:a
+    @Test
+    void theUninstalledSiblingGuard_doesNotCountAnExternalArtifactWhoseArtifactIdNamesAReactorModule() throws Exception {
+        reactor = true;
+        poms.put("b/pom.xml", pomWith("b", "", "", dep("g2", "a", "")));
+        assertQueued(run(Map.of(), 0, "-B", "-pl", "b", "test"));
+    }
+
+    /// a groupId written as a property of the pom is substituted before it is matched
+    @Test
+    void theUninstalledSiblingGuard_substitutesAPropertyGroupId() throws Exception {
+        reactor = true;
+        poms.put("b/pom.xml", pomWith("b", "", "", dep("${project.groupId}", "a", "")));
+        assertRefused(run(Map.of(), 0, "-B", "-pl", "b", "test"), "a=g.x:a:1");
+    }
+
+    /// a groupId still holding `${` while the artifactId names a reactor module cannot be placed: not refused, a note
+    @Test
+    void theUninstalledSiblingGuard_doesNotRefuseAGroupIdItCannotSubstitute() throws Exception {
+        reactor = true;
+        poms.put("b/pom.xml", pomWith("b", "", "", dep("${no.such.group}", "a", "")));
+        var run = run(Map.of(), 0, "-B", "-pl", "b", "test");
+
+        assertQueued(run);
+        assertThat(run.stderr()).contains("-pl check skipped: cannot resolve a dependency coordinate of b");
+    }
+
+    /// before test-compile only the non-test scopes are resolved: a missing test-scope sibling does not stop `compile`
+    @Test
+    void theUninstalledSiblingGuard_queuesACompileWhenOnlyATestScopeSiblingIsMissing() throws Exception {
+        reactor = true;
+        poms.put("b/pom.xml", pomWith("b", "", "", dep("g.x", "a", "test")));
+        assertQueued(run(Map.of(), 0, "-B", "-pl", "b", "compile"));
+    }
+
+    /// from test-compile on every scope is resolved
+    @Test
+    void theUninstalledSiblingGuard_refusesATestRunWhenATestScopeSiblingIsMissing() throws Exception {
+        reactor = true;
+        poms.put("b/pom.xml", pomWith("b", "", "", dep("g.x", "a", "test")));
+        assertRefused(run(Map.of(), 0, "-B", "-pl", "b", "test"), "a=g.x:a:1");
+        assertRefused(again("-pl", "b", "test-compile"), "a=g.x:a:1");
+    }
+
+    /// a plugin goal with no lifecycle phase resolves nothing this check looks for: never refused, whatever it is (`-P test` is a profile, not a phase)
+    @Test
+    void theUninstalledSiblingGuard_neverRefusesAPluginGoalAlone() throws Exception {
+        reactor = true;
+        assertQueued(run(Map.of(), 0, "-B", "-pl", "b", "jbct:check"));
+        assertQueued(again("-pl", "b", "jbct:format"));
+        assertQueued(again("-pl", "b", "clean"));
+        assertQueued(again("-pl", "b", "-P", "test", "jbct:check"));
+        assertRefused(again("-pl", "b", "-P", "test", "verify"), "a=g.x:a:1");
+    }
+
+    /// a pom-packaged selected module resolves nothing of its own: its dependency on the missing `a` and its own missing artifact do not refuse
+    @Test
+    void theUninstalledSiblingGuard_queuesAPomPackagedModule() throws Exception {
+        reactor = true;
+        pomModule = true;
+        assertQueued(run(Map.of(), 0, "-B", "-pl", "p", "test"));
+    }
+
+    /// `-pl c`: c needs b, b needs a: both must be installed, a is named though c does not depend on it directly
+    @Test
+    void theUninstalledSiblingGuard_followsTheDependenciesOfADependencyTransitively() throws Exception {
+        reactor = true;
+        installed = List.of("b");
+        var run = run(Map.of(), 0, "-B", "-pl", "c", "test");
+
+        assertRefused(run, "a=g.x:a:1");
+        assertThat(run.stderr()).doesNotContain("b=g.x:b:1");
+    }
+
+    /// past the selected module only compile and runtime edges are followed: b's test-scope `a` is not resolved for c
+    @Test
+    void theUninstalledSiblingGuard_doesNotFollowATestScopeEdgeOfADependency() throws Exception {
+        reactor = true;
+        installed = List.of("b");
+        poms.put("b/pom.xml", pomWith("b", "", "", dep("g.x", "a", "test")));
+        assertQueued(run(Map.of(), 0, "-B", "-pl", "c", "test"));
+    }
+
+    /// maven trims groupId, artifactId and version: padded coordinates still match, and the message holds the trimmed ones
+    @Test
+    void theUninstalledSiblingGuard_stripsWhitespaceAroundCoordinates() throws Exception {
+        reactor = true;
+        poms.put("a/pom.xml", pomWith(" a ", "", "<groupId> g.x </groupId><version> 1 </version>"));
+        poms.put("b/pom.xml", pomWith("b", "", "", dep(" g.x ", " a ", "")));
+        assertRefused(run(Map.of(), 0, "-B", "-pl", "b", "test"), "a=g.x:a:1");
+    }
+
+    @Test
+    void theUninstalledSiblingGuard_findsAnInstalledSiblingWhoseCoordinatesArePadded() throws Exception {
+        reactor = true;
+        installed = List.of("a");
+        poms.put("a/pom.xml", pomWith(" a ", "", "<groupId> g.x </groupId><version> 1 </version>"));
+        poms.put("b/pom.xml", pomWith("b", "", "", dep(" g.x ", " a ", "")));
+        assertQueued(run(Map.of(), 0, "-B", "-pl", "b", "test"));
     }
 
     @Test

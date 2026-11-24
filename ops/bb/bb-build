@@ -8,7 +8,7 @@
 # before maven started; 19 = maven ended 0 but a selected test class ran 0 testcases, see ZERO-TESTCASE REFUSAL). Call rc: 0 queued; 2 usage; 3 already running/queued here; 4 owner; 6 #1553 guard;
 # 7 identical build running/queued elsewhere; 8 identical build already finished (paths printed); 19 BB_QUEUE=0 with a counted selector
 # (ZERO-TESTCASE REFUSAL); 10 -Dtest without
-# -Dit.test on forge-tests (failsafe ignores -Dtest); 11 -pl without -am/-amd while a reactor dependency is not installed (UNINSTALLED SIBLING, below). BB_DEDUP=0
+# -Dit.test on forge-tests (failsafe ignores -Dtest); 11 -pl without -am/-amd, a lifecycle phase at or after `compile`, and a reactor module the run resolves not installed (UNINSTALLED SIBLING, below). BB_DEDUP=0
 # skips dedup. DEDUP IDENTITY (#80, 2026-11-21): a finished identical build is still the checkout's result only while .bb/ticket names ITS ticket (not while
 # .bb/start equals its started=: two runs granted in one second shared a start, and dedup answered with the newer run's result). A checkout with no
 # .bb/ticket (run before this change) is not current: no dedup, the safe direction. BB_QUEUE=0 runs the pre-queue script (bb-build-direct) -- it also bypasses the port group -- after removing .bb/ticket (that run writes .bb/start only, so an older ticket must not stay current).
@@ -65,15 +65,22 @@
 # reactor; NONE (no change at all) prints "nothing changed", queues nothing and exits 0. The ticket gains since=<base> and modules=<n|FULL>
 # right after group_reason= (same optional-line rule as the owner fields). The dedup key hashes the EXPANDED args. Refused (rc 2): a missing
 # or unreadable base, a missing bb-modules.py, or caller args that already carry -pl/-am/-amd/-f (two selections of the modules).
-# UNINSTALLED SIBLING (#112, call rc 11, nothing queued; checked after the guards below, before dedup and enqueue): args carry `-pl`/`--projects` and none of
-# -am/--also-make/-amd/--also-make-dependents. bb-modules.py --installed reads the checkout's poms: the reactor modules the selected modules depend on
-# (top-level <dependencies>, transitively; the selected ones themselves excluded; a `!x` exclusion leaves x out of the selected set, so it must be installed)
-# need <repo>/<groupId path>/<artifactId>/<version>/<artifactId>-<version>.pom, repo = the last -Dmaven.repo.local= of .mvn/maven.config + args, else
+# UNINSTALLED SIBLING (#112, call rc 11, nothing queued; checked after the guards below, before dedup and enqueue). THE RULE: refused only when ALL hold:
+# the args carry `-pl`/`--projects` and none of -am/--also-make/-amd/--also-make-dependents; they carry a lifecycle phase at or after `compile` (a plugin goal
+# `x:y` alone, such as jbct:check or jbct:format, or `clean`, is never refused); and a reactor module the selected ones resolve has no pom in the repo.
+# bb-modules.py --installed reads the checkout's poms. Resolved: a selected jar/war module's direct <dependencies> (from `test-compile` on every scope, before
+# it every scope but `test`; a pom-packaged selected module resolves none), and, for each such module that is not itself selected, ITS compile- and runtime-scope
+# <dependencies>, transitively; `!x`/`-x` leaves x out of the selected set, so it counts. A dependency is a reactor module only when (groupId, artifactId) both
+# match (groupId substituted from the pom's own <properties>, or inherited from the parent; a groupId still holding `${` while its artifactId names a reactor
+# module is SKIP, so the run queues); groupId, artifactId and version are whitespace-stripped. Each needed module must have
+# <repo>/<groupId path>/<artifactId>/<version>/<artifactId>-<version>.pom, repo = the last -Dmaven.repo.local= of .mvn/maven.config + args, else
 # <checkout>/.m2-local. Any missing: refused naming them, "add -am, or install them first" (maven would fail in seconds at dependency resolution with 0
 # testcases, a lane round lost). -pl forms: `-pl a,b`, `-pl=a`, `-pla`, `--projects[=]a`, `?a`, `:artifactId`, `g:a`, `!x`/`-x`. NOT refused (a note on stderr): a
 # form it cannot resolve (unknown selector, `-f`, a coordinate left holding `${`, unreadable poms). Not checked: group mode, --since (its own -pl already covers
 # the closure), BB_QUEUE=0, -pl given only in .mvn/maven.config. LIMITS: a stale installed sibling passes (as in plain maven); only the .pom is looked for (not the
-# jar); -amd alone passes although it does not add upstreams (the caller's choice of flag is trusted); a plugin or parent-only edge is not modelled.
+# jar); -amd alone passes although it does not add upstreams (the caller's choice of flag is trusted); a plugin or parent-only edge is not modelled; a
+# runtime-scope direct dependency counts before test-compile although maven does not resolve it at `compile` (over-refusal, rare); a goal that resolves
+# dependencies without a lifecycle phase (dependency:tree) is not checked.
 # JBCT BOOTSTRAP (2026-11-19, feat/bb-jbct-bootstrap): a run that asks for a jbct:* goal, an org.pragmatica-lite:jbct-maven-plugin:* goal or the jbct
 # profile, in a checkout whose .m2-local lacks the jbct-maven-plugin jar of its effective version (the root pom's plugin entry), first runs CI's bootstrap
 # (`mvn install -B -DskipTests -pl <ci.yml list at HEAD> -am`) inside the same ticket, same cap and port group, before the main maven
