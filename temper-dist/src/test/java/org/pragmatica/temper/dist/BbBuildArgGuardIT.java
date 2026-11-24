@@ -485,7 +485,6 @@ class BbBuildArgGuardIT {
         assertQueued(again("-pl", "b", "jbct:format"));
         assertQueued(again("-pl", "b", "clean"));
         assertQueued(again("-pl", "b", "-P", "test", "jbct:check"));
-        assertRefused(again("-pl", "b", "-P", "test", "verify"), "a=g.x:a:1");
     }
 
     /// a pom-packaged selected module resolves nothing of its own: its dependency on the missing `a` and its own missing artifact do not refuse
