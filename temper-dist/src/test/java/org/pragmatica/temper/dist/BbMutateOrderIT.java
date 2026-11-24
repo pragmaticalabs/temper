@@ -434,21 +434,21 @@ class BbMutateOrderIT {
 
         try (var mutants = new Sampler(() -> count("running", "mo", "^via=bb-mutate:"));
              var all = new Sampler(() -> count("running", "mo", "^id="))) {
-            plain("mo", "po-1");
-            plain("mo", "po-2");
+            plain("mo", "mo-ord-1");
+            plain("mo", "mo-ord-2");
             drive("mp", "mp-1").ticket();
             assertThat(within(60,
-                              () -> runs().containsAll(List.of("po-1", "po-2", "mp-1")))).as("what is behind the waiting mutant tickets runs: " + runs())
+                              () -> runs().containsAll(List.of("mo-ord-1", "mo-ord-2", "mp-1")))).as("what is behind the waiting mutant tickets runs: " + runs())
                       .isTrue();
             assertThat(runs().stream()
-                           .filter(run -> run.startsWith("mo-"))).as("running mutant builds of mo").hasSize(1);
+                           .filter(run -> run.matches("mo-[0-9]"))).as("running mutant builds of mo").hasSize(1);
             Files.delete(dir.resolve("hold"));
             assertThat(within(180, () -> ids("done").size() == 7)).as(ids("waiting").toString()).isTrue();
             assertThat(mutants.max()).as("running mutant tickets of mo").isEqualTo(1);
             assertThat(all.max()).as("running tickets of mo").isGreaterThanOrEqualTo(2);
         }
 
-        assertThat(runs().stream().filter(run -> run.startsWith("mo-"))).containsExactlyElementsOf(tickets.keySet()
+        assertThat(runs().stream().filter(run -> run.matches("mo-[0-9]"))).containsExactlyElementsOf(tickets.keySet()
                                                                                                          .stream()
                                                                                                          .sorted(Comparator.comparing(run -> field("done",
                                                                                                                                                    tickets.get(run),
@@ -541,6 +541,7 @@ class BbMutateOrderIT {
         var starved = goldenQueue();
         var t = now();
 
+        Files.writeString(dir.resolve("max-reactors"), "9\n");  // at host cap 1 the one launch stops every ticket, eligible or not
         ticket(starved, "running", "1-1", "mo", true, t, "");
         ticket(starved, "waiting", "2-1", "mo", true, t + 1, "cap=1\nblocked_since=1\n");
         ticket(starved, "waiting", "3-1", "ord", false, t + 2, "cap=5\n");
@@ -694,8 +695,8 @@ class BbMutateOrderIT {
         assertThat(within(120,
                           () -> count("running", "mo", "^via=bb-mutate:") == 1 && count("waiting", "mo", "^via=bb-mutate:") == 1)).as(mutateLog("mo-a") + mutateLog("mo-b"))
                   .isTrue();
-        plain("mo", "po-1");
-        assertThat(within(60, () -> runs().contains("po-1"))).as("the ordinary ticket behind the waiting one runs").isTrue();
+        plain("mo", "mo-ord-1");
+        assertThat(within(60, () -> runs().contains("mo-ord-1"))).as("the ordinary ticket behind the waiting one runs").isTrue();
         assertThat(count("running", "mo", "^via=bb-mutate:")).isEqualTo(1);
         assertThat(count("waiting", "mo", "^via=bb-mutate:")).isEqualTo(1);
     }
@@ -1131,7 +1132,7 @@ class BbMutateOrderIT {
         rows.put("no bb-mutate at all",
                  plain("mo",
                        "mo-8",
-                       Map.of("BB_ORDER_AT", Long.toString(now() - SECOND), "BB_VIA", "bb-mutate:spec:m1")));
+                       Map.of("BB_ORDER_AT", Long.toString(now() - SECOND), "BB_VIA", "bb-mutate:spec:m1", "BB_MUTANT_BOUND", "60")));
         assertThat(rows.entrySet()).allSatisfy(row -> {
             assertThat(row.getValue().rc()).as(row.getKey() + ": " + row.getValue().out())
                       .isEqualTo(2);

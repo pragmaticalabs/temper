@@ -25,6 +25,9 @@ mutated = [m["name"] for m in sc["modules"] if "MUT" in open(f"{co}/{m['name']}/
 if sc.get("refuseWhen") == len(mutated):
     sys.stderr.write("bb-build: refused\n")
     sys.exit(1)
+for f in ("rc", "end", "start"):  # as bb-build's call does: what .bb holds from here on is this build's
+    if os.path.exists(b + "/" + f):
+        os.remove(b + "/" + f)
 faults = [m.get("fault") for m in sc["modules"] if m["name"] in mutated]
 if "nostart" not in faults:
     open(b + "/start", "w").write(str(int(time.time())) + "\n")

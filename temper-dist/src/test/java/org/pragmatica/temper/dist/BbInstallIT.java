@@ -315,7 +315,6 @@ class BbInstallIT {
         assertThat(first.stdout().lines().toList()).containsExactly("installed builder@h1 bb-cp-record before=absent after=" + pin("BB_CPRECORD_NEW"),
                                                                     "installed builder@h1 bb-test before=absent after=" + pin("BB_TEST_NEW"),
                                                                     "installed builder@h1 bb-testcount before=absent after=" + pin("BB_TESTCOUNT_NEW"),
-                                                                    "installed builder@h1 bb-mutate before=absent after=" + pin("BB_MUTATE_NEW"),
                                                                     "installed builder@h1 bb-tickets before=absent after=" + pin("BB_TICKETS_NEW"),
                                                                     "installed builder@h1 bb-hold before=absent after=" + pin("BB_HOLD_NEW"),
                                                                     "installed builder@h1 bb-wait before=absent after=" + pin("BB_WAIT_NEW"),
@@ -330,7 +329,8 @@ class BbInstallIT {
                                                                     "installed builder@h1 bb-queue before=" + BbFixtures.BB_QUEUE_OLD
                                                                    + " after=" + pin("BB_QUEUE_NEW"),
                                                                     "installed builder@h1 bb-build before=" + BbFixtures.BB_BUILD_OLD
-                                                                   + " after=" + pin("BB_BUILD_NEW"));
+                                                                   + " after=" + pin("BB_BUILD_NEW"),
+                                                                    "installed builder@h1 bb-mutate before=absent after=" + pin("BB_MUTATE_NEW"));
         assertThat(tools.resolve("bb-build")).hasBinaryContent(Files.readAllBytes(OPS_BB.resolve("bb-build")));
         assertThat(tools.resolve("bb-tickets")).hasBinaryContent(Files.readAllBytes(OPS_BB.resolve("bb-tickets")));
         for (var f : NEW_FILES) {
