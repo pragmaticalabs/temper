@@ -14,6 +14,7 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.TreeMap;
 import java.util.concurrent.TimeUnit;
 
@@ -75,6 +76,36 @@ class BbCoGcIT {
                           "id=" + id + "\nowner=someone\nco=" + home.resolve("work/co/" + checkoutName) + "\nsha=abc\n");
     }
 
+    private void ticket(String state, String id, String checkoutName, String extraLine) throws IOException {
+        Files.writeString(home.resolve("work/queue/" + state + "/" + id),
+                          "id=" + id
+                         + "\nowner=someone\nco=" + home.resolve("work/co/" + checkoutName)
+                         + "\nsha=abc\n" + extraLine
+                         + "\n");
+    }
+
+    /// A process of this user that cannot be read (prctl DUMPABLE=0: its /proc/<pid>/cwd is root-owned), named `comm`. Skips the row where it is readable.
+    private Process blindProcess(String comm) throws Exception {
+        var py = new ProcessBuilder("python3",
+                                    "-c",
+                                    "import ctypes,sys,time\nl=ctypes.CDLL(None)\nl.prctl(4,0,0,0,0)\nl.prctl(15,sys.argv[1].encode(),0,0,0)\nprint('up',flush=True)\ntime.sleep(120)",
+                                    comm).directory(home.toFile())
+                                         .redirectErrorStream(true)
+                                         .start();
+        var up = new java.io.BufferedReader(new java.io.InputStreamReader(py.getInputStream())).readLine();
+
+        assumeTrue("up".equals(up), "python3 with ctypes is needed for the blind-process rows");
+        assumeTrue(!Files.isReadable(Path.of("/proc/" + py.pid() + "/cwd")),
+                   "a dumpable=0 process must be unreadable to this user");
+
+        return py;
+    }
+
+    private static void stop(Process p) throws InterruptedException {
+        p.destroyForcibly();
+        p.waitFor(10, TimeUnit.SECONDS);
+    }
+
     private void ticketLog(String checkoutName, String owner, Instant ended) throws IOException {
         var log = home.resolve("work/bb-ticket-log.tsv");
 
@@ -103,8 +134,12 @@ class BbCoGcIT {
     }
 
     private BbFixtures.Outcome gc(String... args) throws Exception {
+        return gcWith(Map.of(), args);
+    }
+
+    private BbFixtures.Outcome gcWith(Map<String, String> extraEnv, String... args) throws Exception {
         assumeTrue(BbFixtures.linux(), "bb-co-gc reads /proc and uses GNU stat, date, mv, flock");
-        var env = new HashMap<String, String>();
+        var env = new HashMap<String, String>(extraEnv);
 
         env.put("PATH", System.getenv("PATH"));
         env.put("HOME", home.toString());
@@ -118,7 +153,7 @@ class BbCoGcIT {
     }
 
     private BbFixtures.Outcome live() throws Exception {
-        var run = gc("--live", "--days", "3");
+        var run = gc("--live", "--days", "3", "--pace", "0");
 
         assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
 
@@ -344,6 +379,218 @@ class BbCoGcIT {
                                           "leftover .gc-1700000000-crashed ",
                                           "nothing removed");
         assertThat(run.stdout()).contains("total: DRY 2 candidates");
+    }
+
+    // ---- #114 review findings
+    /// Finding 1: a process this guard cannot read, named like nothing on the allowlist, may sit in any checkout: every candidate is kept as `blind`.
+    @Test
+    void aBlindProcessNotOnTheAllowlist_keepsEveryCandidate() throws Exception {
+        skeleton();
+        var victim = checkout("victim", 10);
+        var control = checkout("control", 10);
+        var blind = blindProcess("rogue");
+
+        try {
+            var run = live();
+
+            assertThat(victim.resolve("module/target/payload.bin")).as(run.stdout()).exists();
+            assertThat(control.resolve("module/target/payload.bin")).as(run.stdout()).exists();
+            assertThat(run.stdout()).contains("keep victim reasons=blind ",
+                                              "keep control reasons=blind ",
+                                              "unlisted-blind=1")
+                      .doesNotContain("removed ");
+        } finally {
+            stop(blind);
+        }
+    }
+
+    /// The allowlist is the whole difference: the same unreadable process named `sshd` (a login's session monitor) keeps nothing.
+    @Test
+    void aBlindProcessOnTheAllowlist_keepsNothing() throws Exception {
+        skeleton();
+        var control = checkout("control", 10);
+        var blind = blindProcess("sshd");
+
+        try {
+            var run = live();
+
+            assertThat(control).as(run.stdout()).doesNotExist();
+            assertThat(run.stdout()).contains("removed control ", "unlisted-blind=0").containsPattern("blind=[1-9]");
+        } finally {
+            stop(blind);
+        }
+    }
+
+    /// Finding 2: a leftover .gc dir gets the second look of a fresh move: keep, queued and a ticket each send it back to its name; none is removed.
+    @Test
+    void aLeftoverHeldByKeepQueuedOrATicket_isRestoredNotRemoved() throws Exception {
+        skeleton();
+        var names = List.of("held-keep", "held-queued", "held-ticket", "plain");
+
+        for (var n : names) {
+            Files.move(checkout(n, 10), co().resolve(".gc-1700000000-" + n));
+        }
+
+        Files.writeString(co().resolve(".gc-1700000000-held-keep/.bb/keep"), "");
+        Files.writeString(co().resolve(".gc-1700000000-held-queued/.bb/queued"), "1");
+        ticket("waiting", "w1", "held-ticket");
+        var dry = gc("--days", "3");
+
+        assertThat(dry.stdout()).contains("leftover-kept .gc-1700000000-held-keep reasons=keep-file (would be moved back to held-keep)",
+                                          "leftover-kept .gc-1700000000-held-queued reasons=in-flight (would be moved back to held-queued)",
+                                          "leftover-kept .gc-1700000000-held-ticket reasons=ticket (would be moved back to held-ticket)",
+                                          "leftover .gc-1700000000-plain ");
+        var run = live();
+
+        for (var n : names.subList(0, 3)) {
+            assertThat(co().resolve(n).resolve("module/target/payload.bin")).as(n + "\n" + run.stdout()).exists();
+            assertThat(co().resolve(".gc-1700000000-" + n)).doesNotExist();
+        }
+
+        assertThat(co().resolve(".gc-1700000000-plain")).doesNotExist();
+        assertThat(run.stdout()).contains("leftover-restored .gc-1700000000-held-keep to held-keep reasons=keep-file",
+                                          "leftover-restored .gc-1700000000-held-queued to held-queued reasons=in-flight",
+                                          "leftover-restored .gc-1700000000-held-ticket to held-ticket reasons=ticket",
+                                          "leftover-removed .gc-1700000000-plain ");
+        assertThat(Files.readString(home.resolve("work/co-gc.log"))).contains("LEFTOVER-RESTORED path=" + co().toRealPath()
+                                                                             + "/held-keep ")
+                  .contains("LEFTOVER-REMOVED path=" + co().toRealPath() + "/.gc-1700000000-plain ")
+                  .doesNotContain("LEFTOVER-REMOVED path=" + co().toRealPath() + "/.gc-1700000000-held");
+    }
+
+    /// A held leftover whose name is taken again cannot go back: it stays where it is, logged on each run, and is never removed.
+    @Test
+    void aHeldLeftoverWhoseNameIsTaken_staysInPlaceForEver() throws Exception {
+        skeleton();
+        var leftover = Files.move(checkout("dup", 10), co().resolve(".gc-1700000000-dup"));
+
+        Files.writeString(leftover.resolve(".bb/keep"), "");
+        checkout("dup", 1);
+        for (var i = 0; i < 2; i++) {
+            var run = live();
+
+            assertThat(leftover.resolve("module/target/payload.bin")).as(run.stdout()).exists();
+            assertThat(run.stdout()).contains("leftover-kept .gc-1700000000-dup reasons=keep-file (stays in place; never removed)");
+        }
+
+        assertThat(Files.readString(home.resolve("work/co-gc.log"))).contains("LEFTOVER-KEPT path=" + co().toRealPath()
+                                                                             + "/.gc-1700000000-dup reasons=keep-file");
+    }
+
+    /// Finding 4: a removal is followed by a pause of --pace seconds (3 removals at 1 s cannot finish in under 2.5 s).
+    @Test
+    void removals_areSeparatedByThePace() throws Exception {
+        skeleton();
+        for (var n : List.of("a", "b", "c")) {
+            checkout(n, 10);
+        }
+
+        var t0 = System.nanoTime();
+        var run = gc("--live", "--days", "3", "--pace", "1");
+        var elapsedMs = (System.nanoTime() - t0) / 1_000_000;
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        assertThat(run.stdout()).contains("total: removed 3 of 3 candidates");
+        assertThat(elapsedMs).as("three removals at --pace 1").isGreaterThanOrEqualTo(2500);
+    }
+
+    /// Finding 4: a running port-group ticket defers the whole live pass; nothing is read for removal, exit 0, one log line.
+    @Test
+    void aRunningPortGroupTicket_defersTheLivePass() throws Exception {
+        skeleton();
+        var idle = checkout("idle", 10);
+
+        ticket("running", "r1", "busy", "group=1");
+        var run = live();
+
+        assertThat(run.stdout()).contains("deferred: builds running (running=1 group=1 cap=3)");
+        assertThat(idle.resolve("module/target/payload.bin")).exists();
+        assertThat(Files.readString(home.resolve("work/co-gc.log"))).contains("DEFERRED builds running running=1 group=1 cap=3")
+                  .doesNotContain("RUN live");
+    }
+
+    /// Finding 4: more than half the host cap running defers it (2 of cap 3); exactly half does not (2 of cap 4).
+    @Test
+    void moreThanHalfTheHostCapRunning_defers_exactlyHalfDoesNot() throws Exception {
+        skeleton();
+        var idle = checkout("idle", 10);
+
+        ticket("running", "r1", "busy1");
+        ticket("running", "r2", "busy2");
+        Files.writeString(home.resolve("work/max-reactors"), "3\n");
+        var deferred = live();
+
+        assertThat(deferred.stdout()).contains("deferred: builds running (running=2 group=0 cap=3)");
+        assertThat(idle.resolve("module/target/payload.bin")).exists();
+        Files.writeString(home.resolve("work/max-reactors"), "4\n");
+        var run = live();
+
+        assertThat(idle).as(run.stdout()).doesNotExist();
+        assertThat(run.stdout()).contains("removed idle ");
+    }
+
+    /// Finding 5: the run takes the queue's lock before it checks tickets and moves. A holder of $Q/.lock makes it WAIT (here 3 s, within the
+    /// default 30 s), and then it removes.
+    @Test
+    void aHolderOfTheQueueLock_makesTheRunWaitThenItRemoves() throws Exception {
+        skeleton();
+        var idle = checkout("idle", 10);
+        var held = home.resolve("held");
+        var holder = new ProcessBuilder("flock",
+                                        home.resolve("work/queue/.lock").toString(),
+                                        "sh",
+                                        "-c",
+                                        "touch " + held + "; sleep 3").start();
+
+        try {
+            for (var i = 0; i < 100 && !Files.exists(held); i++) {
+                Thread.sleep(50);
+            }
+
+            assumeTrue(Files.exists(held), "flock is needed to hold the queue lock");
+            var t0 = System.nanoTime();
+            var run = live();
+            var elapsedMs = (System.nanoTime() - t0) / 1_000_000;
+
+            assertThat(idle).as(run.stdout()).doesNotExist();
+            assertThat(elapsedMs).as("the mv waits for the holder").isGreaterThanOrEqualTo(1500);
+        } finally {
+            stop(holder);
+        }
+    }
+
+    /// Past BB_CO_GC_LOCK_WAIT the candidate is SKIPPED (not removed, not a failure, logged), and the next run takes it.
+    @Test
+    void aQueueLockHeldPastTheWait_skipsTheCandidate() throws Exception {
+        skeleton();
+        var idle = checkout("idle", 10);
+        var held = home.resolve("held");
+        var holder = new ProcessBuilder("flock",
+                                        home.resolve("work/queue/.lock").toString(),
+                                        "sh",
+                                        "-c",
+                                        "touch " + held + "; sleep 8").start();
+
+        try {
+            for (var i = 0; i < 100 && !Files.exists(held); i++) {
+                Thread.sleep(50);
+            }
+
+            assumeTrue(Files.exists(held), "flock is needed to hold the queue lock");
+            var run = gcWith(Map.of("BB_CO_GC_LOCK_WAIT", "1"), "--live", "--days", "3", "--pace", "0");
+
+            assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+            assertThat(idle.resolve("module/target/payload.bin")).as(run.stdout()).exists();
+            assertThat(run.stdout()).contains("skip idle reason=queue-lock-busy", "skipped 1");
+            assertThat(Files.readString(home.resolve("work/co-gc.log"))).contains("SKIP path=" + co().toRealPath()
+                                                                                 + "/idle reason=queue-lock-busy");
+        } finally {
+            stop(holder);
+        }
+
+        var later = live();
+
+        assertThat(idle).as(later.stdout()).doesNotExist();
     }
 
     // ---- snapshot
