@@ -250,6 +250,9 @@ class BbInstallIT {
         assertThat(pin("BB_TEST_PRE86")).isEqualTo(BbFixtures.md5(prev("bb-test.pre86")));
         assertThat(pin("BB_BUILD_PRE91")).isEqualTo(BbFixtures.md5(prev("bb-build.pre91")));
         assertThat(pin("BB_BUILD_PRE102")).isEqualTo(BbFixtures.md5(prev("bb-build.pre102")));
+        assertThat(pin("BB_LIB_PRE116")).isEqualTo(BbFixtures.md5(prev("bb-queue-lib.sh.pre116")));
+        assertThat(pin("BB_BUILD_PRE116")).isEqualTo(BbFixtures.md5(prev("bb-build.pre116")));
+        assertThat(pin("BB_MUTATE_PRE116")).isEqualTo(BbFixtures.md5(prev("bb-mutate.pre116")));
     }
 
     /// The bb-test lane helpers go in before bb-build (which calls bb-cp-record); a host holding a stranger's bb-test is refused, naming the one pin and
@@ -1014,10 +1017,10 @@ class BbInstallIT {
         assertThat(tools.resolve("bb-mutate.bak-" + pin("BB_MUTATE_PRE100"))).hasBinaryContent(prev("bb-mutate.pre100"));
     }
 
-    /// A stranger's bb-mutate is refused with the five accepted pins named oldest first (OLD, PREVIA, PRE97, PRE100, NEW), the order accepted_of
+    /// A stranger's bb-mutate is refused with the six accepted pins named oldest first (OLD, PREVIA, PRE97, PRE100, PRE116, NEW), the order accepted_of
     /// defines, and nothing is written.
     @Test
-    void aStrangersBbMutate_isRefused_namingTheFivePinsOldestFirst_andNothingIsWritten() throws Exception {
+    void aStrangersBbMutate_isRefused_namingTheSixPinsOldestFirst_andNothingIsWritten() throws Exception {
         var tools = host("h1");
 
         Files.writeString(tools.resolve("bb-mutate"), "someone else's mutation harness\n");
@@ -1030,6 +1033,7 @@ class BbInstallIT {
                                                                  + "|" + pin("BB_MUTATE_PREVIA")
                                                                  + "|" + pin("BB_MUTATE_PRE97")
                                                                  + "|" + pin("BB_MUTATE_PRE100")
+                                                                 + "|" + pin("BB_MUTATE_PRE116")
                                                                  + "|" + pin("BB_MUTATE_NEW"));
         assertThat(listing(tools)).isEqualTo(before);
     }
@@ -1171,6 +1175,30 @@ class BbInstallIT {
         assertThat(tools.resolve("bb-build.bak-" + pin("BB_BUILD_PRE102"))).hasBinaryContent(prev("bb-build.pre102"));
     }
 
+    /// A host holding main's bb-queue-lib.sh, bb-build and bb-mutate before #116 (no order_at=) is accepted for all three and upgraded.
+    /// Mutation: drop BB_LIB_PRE116, BB_BUILD_PRE116 or BB_MUTATE_PRE116 from accepted_of -> the host is refused, exit 65, red.
+    @Test
+    void aHostAtTheInstallSetBefore116_isAcceptedAndUpgraded() throws Exception {
+        var tools = host("h1");
+        var pins = Map.of("bb-queue-lib.sh", "BB_LIB", "bb-build", "BB_BUILD", "bb-mutate", "BB_MUTATE");
+
+        for (var file : pins.keySet()) {
+            Files.write(tools.resolve(file), prev(file + ".pre116"));
+        }
+
+        var run = install("builder@h1");
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        assertThat(run.stdout()).doesNotContain("refused");
+        for (var file : pins.keySet()) {
+            var old = pin(pins.get(file) + "_PRE116");
+
+            assertThat(run.stdout()).contains("installed builder@h1 " + file + " before=" + old + " after=" + pin(pins.get(file) + "_NEW"));
+            assertThat(tools.resolve(file)).hasBinaryContent(Files.readAllBytes(OPS_BB.resolve(file)));
+            assertThat(tools.resolve(file + ".bak-" + old)).hasBinaryContent(prev(file + ".pre116"));
+        }
+    }
+
     /// A host after the owner's install-bb-79.sh (#63 + #79: bb-build 2810f93c, bb-portgroup.py and bb-modules.py at main's
     /// values) and still on the pre-#70 bb-result, bb-queue-lib.sh, bb-queue is accepted for every file and is updated.
     /// Mutation: drop BB_BUILD_PRESESSION from accepted_of -> the post-install host is refused, red.
@@ -1264,6 +1292,7 @@ class BbInstallIT {
                                                                  + "|" + pin("BB_BUILD_PRE90")
                                                                  + "|" + pin("BB_BUILD_PRE91")
                                                                  + "|" + pin("BB_BUILD_PRE102")
+                                                                 + "|" + pin("BB_BUILD_PRE116")
                                                                  + "|" + pin("BB_BUILD_NEW"));
         assertThat(listing(good)).isEqualTo(goodBefore);
         assertThat(listing(diverged)).isEqualTo(divergedBefore);
@@ -1306,6 +1335,7 @@ class BbInstallIT {
                            + "|" + pin("BB_LIB_PRE80")
                            + "|" + pin("BB_LIB_PRE88")
                            + "|" + pin("BB_LIB_PRE90")
+                           + "|" + pin("BB_LIB_PRE116")
                            + "|" + pin("BB_LIB_NEW"))
                   .contains("bb-queue installed=" + BbFixtures.md5("unrelated tool\n".getBytes())
                            + " expected=" + BbFixtures.BB_QUEUE_OLD

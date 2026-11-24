@@ -8,7 +8,8 @@
 # before maven started; 19 = maven ended 0 but a selected test class ran 0 testcases, see ZERO-TESTCASE REFUSAL). Call rc: 0 queued; 2 usage; 3 already running/queued here; 4 owner; 6 #1553 guard;
 # 7 identical build running/queued elsewhere; 8 identical build already finished (paths printed); 19 BB_QUEUE=0 with a counted selector
 # (ZERO-TESTCASE REFUSAL); 10 -Dtest without
-# -Dit.test on forge-tests (failsafe ignores -Dtest). BB_DEDUP=0
+# -Dit.test on forge-tests (failsafe ignores -Dtest); 20 the owner already has a mutant ticket queued or running on this host (MUTANT
+# TICKETS below; only a call with BB_ORDER_AT can get it). BB_DEDUP=0
 # skips dedup. DEDUP IDENTITY (#80, 2026-11-21): a finished identical build is still the checkout's result only while .bb/ticket names ITS ticket (not while
 # .bb/start equals its started=: two runs granted in one second shared a start, and dedup answered with the newer run's result). A checkout with no
 # .bb/ticket (run before this change) is not current: no dedup, the safe direction. BB_QUEUE=0 runs the pre-queue script (bb-build-direct) -- it also bypasses the port group -- after removing .bb/ticket (that run writes .bb/start only, so an older ticket must not stay current).
@@ -24,6 +25,23 @@
 # mounted read-only, checkout and $HOME at the same paths, own loopback), so identical fixed ports cannot collide and up to N
 # (~/work/port-group-slots, default 3) group tickets run at once per host, each holding a slot (bb-queue shows it). No change to the
 # tests. BB_PG_ISOLATE=0 at enqueue = the old host-exclusive behaviour for that ticket (ticket has no iso=1).
+# MUTANT TICKETS (#116): bb-mutate passes BB_ORDER_AT (epoch NANOseconds, the submit time of its whole run, taken once before the control
+# build), BB_DRIVER_PID and BB_DRIVER_START (its pid and /proc start time) with BB_VIA=bb-mutate:<spec>:<label>. The ticket then carries
+# order_at= driver_pid= driver_start=, and:
+#   ORDER: order() in the lib sorts it by order_at= instead of created= WITHIN its priority (a higher priority still goes first). It is still
+#     gated (load, memory, caps, port group) at its own grant, and created= (starvation override, ticket log) is its true enqueue time.
+#   ACCEPTED ONLY when ALL hold, else call rc 2 and nothing queued: BB_ORDER_AT is 19 digits and not later than now; BB_VIA matches
+#     ^bb-mutate:[A-Za-z0-9._-]{1,20}:[A-Za-z0-9._-]+$; the driver pid runs with that start time, its command line is `python* .../bb-mutate` and it
+#     is an ancestor process of this call. WHAT THAT DOES NOT COVER: BB_VIA alone is an env value anyone can set; the driver check ties the
+#     call to a live process NAMED bb-mutate, not to a reviewed bb-mutate: a same-uid caller may write its own file of that name and choose
+#     any past time. It stops a stray or inherited BB_ORDER_AT, not a deliberate same-uid forgery. A past time has no lower bound.
+#   ONE PER OWNER: such a call is refused (call rc 20) while any ticket of BB_OWNER with via=bb-mutate:* is in waiting/ or running/ on THIS
+#     host, tested in the flock hold that writes the ticket. Not covered: other hosts; calls without BB_ORDER_AT (a bb-mutate started before
+#     this version: it would record a refusal as a mutant's CALL-REFUSED, so it is counted but not refused).
+#   DRIVER GONE: the ticket's waiter checks the driver at every poll (5 s), in the lock hold of its grant test, and moves a WAITING ticket
+#     whose driver is gone to done/ (state=abandoned, .bb/rc 9). A RUNNING ticket is NEVER touched on driver death: its build runs to its
+#     own end and holds the owner's one mutant place until then.
+# The three variables are unset before the waiter starts, so a build never inherits them.
 # LOAD GATE (2026-11-11): a ticket is also granted only while load5/cores < 1.2 (BB_LOAD_MAX); the oldest grantable ticket goes
 # once it waited > 1200 s (BB_LOAD_STARVE_SECS) while < 2 queue launches run (BB_LOAD_STARVE_REACTORS). MEMORY FLOOR (#53): a grant also
 # needs MemAvailable >= the per-host floor; the oldest ticket overrides it only while no ticket runs at all. pick() in the lib decides.
@@ -282,6 +300,7 @@ if [ "${1:-}" = __run ]; then
   while :; do
     flock 8
     [ -f "$T" ] || exit 0   # cancelled or reaped while we slept
+    if driver_gone "$T"; then abandon "$T" "driver process gone"; exit 0; fi   # header: MUTANT TICKETS; before the grant test, in its lock hold
     RL=$(reap)   # reap's launch count, passed to pick within this lock hold (#90)
     if [ "$(pick "$RL" "$ID")" = "$ID" ]; then break; fi   # backfill + starvation bound, see pick() in bb-queue-lib.sh
     if [ "$LIMIT" -gt 0 ] && [ "$WAITED" -ge "$LIMIT" ]; then
@@ -399,6 +418,16 @@ if [ -n "$SINCE" ]; then
   esac
 fi
 case "${BB_REQUIRE_DOCKER:-1}" in 0|1) ;; *) echo "refusing: BB_REQUIRE_DOCKER must be 0 or 1 (or unset)" >&2; exit 2;; esac
+MUTANT_FIELDS=""   # non-empty = a mutant ticket (header: MUTANT TICKETS)
+if [ -n "${BB_ORDER_AT+x}" ]; then
+  [[ $BB_ORDER_AT =~ ^[1-9][0-9]{18}$ ]] || { echo "refusing: BB_ORDER_AT must be epoch nanoseconds (19 digits)" >&2; exit 2; }
+  [ "$BB_ORDER_AT" -le "$(date +%s%N)" ] || { echo "refusing: BB_ORDER_AT $BB_ORDER_AT is in the future" >&2; exit 2; }
+  [[ ${BB_VIA:-} =~ ^bb-mutate:[A-Za-z0-9._-]{1,20}:[A-Za-z0-9._-]+$ && ${#BB_VIA} -le 64 ]] || { echo "refusing: BB_ORDER_AT is accepted only from bb-mutate (BB_VIA is not a bb-mutate marker)" >&2; exit 2; }
+  [[ ${BB_DRIVER_PID:-} =~ ^[1-9][0-9]{0,9}$ && ${BB_DRIVER_START:-} =~ ^[1-9][0-9]{0,18}$ ]] && mutate_driver "$BB_DRIVER_PID" "$BB_DRIVER_START" \
+    || { echo "refusing: BB_ORDER_AT is accepted only from bb-mutate (BB_DRIVER_PID/BB_DRIVER_START name no running bb-mutate above this call)" >&2; exit 2; }
+  MUTANT_FIELDS=$(printf 'order_at=%s\ndriver_pid=%s\ndriver_start=%s' "$BB_ORDER_AT" "$BB_DRIVER_PID" "$BB_DRIVER_START")$'\n'
+  unset BB_ORDER_AT BB_DRIVER_PID BB_DRIVER_START
+fi
 B=$CO/.bb; mkdir -p "$B"
 if [ ! -f "$B/rc" ] && [ -f "$B/start" ]; then
   # .bb/start without .bb/rc: a build still running, or a finished build whose .bb/rc a lane deleted (CTO 2026-11-13: three verifier
@@ -488,6 +517,13 @@ if [ -n "$KEY" ] && [ "${BB_DEDUP:-1}" != 0 ]; then
   done
 fi
 
+if [ -n "$MUTANT_FIELDS" ]; then   # ONE PER OWNER (header: MUTANT TICKETS); this lock hold also writes the ticket
+  for f in "$Q"/waiting/* "$Q"/running/*; do
+    [ -f "$f" ] && [ "$(field "$f" owner)" = "$BB_OWNER" ] || continue
+    case "$(field "$f" via)" in bb-mutate:*) echo "refusing (rc 20): $BB_OWNER already has mutant ticket ${f##*/} in $(basename "${f%/*}")/" >&2; exit 20;; esac
+  done
+fi
+
 # Ticket owner fields (T3): each optional, each validated; a bad value is dropped with a notice and never blocks the build.
 OWNER_FIELDS=""
 [ -z "$SINCE" ] || OWNER_FIELDS+="since=$SINCE"$'\n'"modules=$MODS"$'\n'
@@ -525,7 +561,7 @@ echo "$ID" > "$B/queued"
     "$ID" "$BB_OWNER" "$CO" "$SHA" "$KEY" "$CAP" "$LIMIT" "$(date +%s%N)"
   printf 'group=%s\ngroup_reason=%s\n' "${GROUP%% *}" "${GROUP#* }"
   [ "${GROUP%% *}" = 1 ] && [ "${BB_PG_ISOLATE:-1}" != 0 ] && command -v docker > /dev/null && printf 'iso=1\n'
-  printf '%s' "$OWNER_FIELDS"
+  printf '%s%s' "$OWNER_FIELDS" "$MUTANT_FIELDS"
   printf 'args='; printf '%q ' "$@"; printf '\n'; } > "$T"
 setsid nohup bash "$SELF" __run "$ID" "$@" < /dev/null > /dev/null 2>&1 8>&- &
 for _ in $(seq 50); do waiter_alive "$ID" && break; sleep 0.1; done

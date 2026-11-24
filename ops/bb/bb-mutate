@@ -41,6 +41,14 @@ absent; maven's own rc never is 124) with .bb/end, so the next bb-build is accep
 the ticket. The tree is restored and the run continues. A batch that times out is re-run singly. --timeout MIN now
 bounds only queue wait (and the whole control build); a mutant that never starts within it aborts the run (exit 4).
 results.tsv / results.md are rewritten (atomically) after every mutant.
+
+QUEUE TURN (#116; the rules are MUTANT TICKETS in bb-build's header): every build of a run (control, singles, batches, re-runs) is a
+mutant ticket. All carry one order_at, this run's submit time taken once before the control build, so they sort by when the RUN was
+submitted; each is still gated at its own grant. An owner has at most one mutant ticket queued or running per host: while another
+driver of the owner holds it, bb-build answers rc 20 and this driver retries every POLL s. That wait counts against --timeout, as queue
+wait does (expiry: exit 4, or a failed control, exactly as for queue wait), and never against a mutant's bound, which starts at its own
+Maven start. No order among an owner's waiting drivers is guaranteed. A driver that dies leaves a WAITING ticket to be dropped by its
+waiter (rc 9) and a RUNNING one to finish; the mutated tree stays as it is.
 """
 import json, os, re, signal, subprocess, sys, time, shutil
 import xml.etree.ElementTree as ET
@@ -313,6 +321,8 @@ def kill_job(co, ticket, label):
     return left
 
 
+RC_TURN = 20  # bb-build: the owner already has a mutant ticket on this host
+ORDER_AT = 0  # set by main: this run's submit time, epoch nanoseconds
 SPEC_BASE = ""  # set by main: the spec file's basename, for the BB_VIA marker
 
 
@@ -323,6 +333,15 @@ def via_marker(label):
     spec = clean(os.path.splitext(SPEC_BASE)[0])[:20] or "spec"
     head = "bb-mutate:" + spec + ":"
     return head + (clean(label)[:64 - len(head)] or "m")
+
+
+def driver_start():
+    """this process's start time (/proc/self/stat field 22, what pstart in bb-queue-lib.sh reads); '' without /proc"""
+    try:
+        with open("/proc/self/stat") as f:
+            return f.read().rpartition(")")[2].split()[19]
+    except OSError:
+        return ""
 
 
 def run_build(co, owner, build, timeout_s, label, bound=None, fae=False):
@@ -337,11 +356,23 @@ def run_build(co, owner, build, timeout_s, label, bound=None, fae=False):
     t0 = time.time()
     os.utime(marker, ns=(time.time_ns(), time.time_ns()))
     marker_ns = os.stat(marker).st_mtime_ns
-    env = dict(os.environ, BB_OWNER=owner, BB_DEDUP="0", BB_VIA=via_marker(label))
+    env = dict(os.environ, BB_OWNER=owner, BB_DEDUP="0", BB_VIA=via_marker(label),
+               BB_ORDER_AT=str(ORDER_AT), BB_DRIVER_PID=str(os.getpid()), BB_DRIVER_START=driver_start())
     env.pop("HCLOUD_TOKEN", None)
     args = mvn_args(build, fae)
     log(f"[{label}] bb-build {co} {' '.join(args)}")
-    cp = subprocess.run([BB_BUILD, co] + args, stdin=subprocess.DEVNULL, capture_output=True, text=True, env=env)
+    waiting = False
+    while True:
+        cp = subprocess.run([BB_BUILD, co] + args, stdin=subprocess.DEVNULL, capture_output=True, text=True, env=env)
+        if cp.returncode != RC_TURN:
+            break
+        if time.time() - t0 > timeout_s:
+            return dict(kind="ABORT" if bound is not None else "TIMEOUT", rc=None, cases=[], bad=[], files=[], secs=time.time() - t0,
+                        mvn_secs=None, detail=f"another mutant ticket of {owner} held the host for {int(timeout_s)}s (--timeout); nothing was queued")
+        if not waiting:
+            log(f"[{label}] waiting for its turn: {cp.stderr.strip()[-200:]}")
+            waiting = True
+        time.sleep(POLL)
     log(f"[{label}] bb-build exit={cp.returncode} {cp.stdout.strip()[-300:]} {cp.stderr.strip()[-300:]}")
     if cp.returncode != 0:
         return dict(kind="CALL-REFUSED", rc=None, cases=[], bad=[], files=[], secs=time.time() - t0,
@@ -403,7 +434,8 @@ def classify(res, m):
 
 # ---------------------------------------------------------------- main
 def main():
-    global LOG, SPEC_BASE
+    global LOG, SPEC_BASE, ORDER_AT
+    ORDER_AT = time.time_ns()
     argv = sys.argv[1:]
     mode, timeout_min = "single", 75
     pos = []
@@ -521,7 +553,7 @@ def main():
                 for g in batches[bi:]:
                     for m in g: rec(m, "NOT-RUN", detail="aborted: queue-wait timeout on " + label)
                 state["verdict"] = "ABORTED after queue-wait timeout"; flush()
-                die(4, f"queue-wait timeout on {label}; aborting (job killed, tree restored)")
+                die(4, f"queue-wait timeout on {label}; aborting (tree restored): {res['detail']}")
             if res["kind"] == "CALL-REFUSED":  # no build ran: credited `-`
                 for m in group: rec(m, "CALL-REFUSED", secs=res["secs"], detail=res["detail"])
                 continue
@@ -551,7 +583,7 @@ def main():
                 for g in batches[bi:]:
                     for m2 in g:
                         if m2["id"] not in results: rec(m2, "NOT-RUN", detail="aborted: queue-wait timeout on " + m["id"])
-                die(4, f"queue-wait timeout on {m['id']}; aborting (job killed, tree restored)")
+                die(4, f"queue-wait timeout on {m['id']}; aborting (tree restored): {r2['detail']}")
             finish(m, r2, own[m["id"]], rec, "solo")
 
         if singles_needed:
