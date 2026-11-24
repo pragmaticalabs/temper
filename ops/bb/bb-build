@@ -48,7 +48,7 @@
 #     whose driver is gone to done/ (state=abandoned, .bb/rc 9). A RUNNING ticket is never touched on driver death.
 #   BOUND: the waiter starts a runner (`bb-build __bound`) with the job: a job still running bound= seconds after its start is stopped (its process
 #     tree, its container, java processes whose cwd is the checkout; nothing else, so not a driver or shell standing there), with a live driver or without; the
-#     ticket gets bound_hit=, rc=124 and .bb/rc 124 (when the job wrote none). It tests once a second and retries a stop that left survivors.
+#     ticket gets bound_hit=, rc=124 and .bb/rc 124 (when the job wrote none). It tests once a second, on whole seconds rounded up (never before the bound), and retries a stop that left survivors.
 #     A runner outlives its waiter; NOT COVERED: the runner itself killed, and tickets without bound= (a bb-mutate of before #116).
 # The four variables are unset before the waiter (or, under BB_QUEUE=0, bb-build-direct) starts, so a build never inherits them.
 # LOAD GATE (2026-11-11): a ticket is also granted only while load5/cores < 1.2 (BB_LOAD_MAX); the oldest grantable ticket goes
@@ -401,7 +401,7 @@ if [ "${1:-}" = __run ]; then
   C=$!   # the job subshell lives as long as maven / bb-test's java / bb-netns-run (and survives a kill -9 of this waiter)
   exec 8>&-   # the lock covers the slot decision and the ledger write only, never the launch's run time (released when the subshell closes fd 8)
   W=""; BOUND=$(field "$T" bound)   # header: MUTANT TICKETS, BOUND
-  if [ -n "$BOUND" ]; then bash "$SELF" __bound "$ID" "$CO" "$C" "$(pstart "$C")" $((NOW + BOUND)) < /dev/null > /dev/null 2>&1 & W=$!; fi
+  if [ -n "$BOUND" ]; then bash "$SELF" __bound "$ID" "$CO" "$C" "$(pstart "$C")" $((NOW + BOUND + 1)) < /dev/null > /dev/null 2>&1 & W=$!; fi
   wait "$C"; BRC=$?   # the build's exit status: the verdict. Never re-read from $B/rc, which a lane can delete or rewrite
   if [ -n "$W" ] && [ -n "$(field "$T" bound_hit)" ]; then wait "$W"; [ "$BRC" -le 128 ] || BRC=124; fi   # stopped by its bound: 124, recorded once nothing of the job is left
   LF="" REJ=""   # LAUNCH FIELDS (header): read before the lock, so a slow or hostile file never holds the queue; set -e: every read is || true

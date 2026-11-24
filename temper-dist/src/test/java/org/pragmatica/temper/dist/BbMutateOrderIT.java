@@ -964,8 +964,10 @@ class BbMutateOrderIT {
         hitAtItsBound(id, bound);
     }
 
+    /// Both fields are whole seconds rounded down, so only a difference of bound + 1 shows that the whole bound had passed.
+    /// Mutation: the deadline NOW + BOUND (it stops a job up to 1 s before its bound) -> red.
     private void hitAtItsBound(String id, int bound) {
-        assertThat(Long.parseLong(field("done", id, "bound_hit")) - Long.parseLong(field("done", id, "started"))).isBetween((long) bound,
+        assertThat(Long.parseLong(field("done", id, "bound_hit")) - Long.parseLong(field("done", id, "started"))).isBetween(bound + 1L,
                                                                                                                            bound + 60L);
     }
 
