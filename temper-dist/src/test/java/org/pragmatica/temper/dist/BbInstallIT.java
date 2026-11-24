@@ -251,6 +251,8 @@ class BbInstallIT {
         assertThat(pin("BB_TEST_PRE86")).isEqualTo(BbFixtures.md5(prev("bb-test.pre86")));
         assertThat(pin("BB_BUILD_PRE91")).isEqualTo(BbFixtures.md5(prev("bb-build.pre91")));
         assertThat(pin("BB_BUILD_PRE102")).isEqualTo(BbFixtures.md5(prev("bb-build.pre102")));
+        assertThat(pin("BB_BUILD_PRE112")).isEqualTo(BbFixtures.md5(prev("bb-build.pre112")));
+        assertThat(pin("BB_MODULES_PRE112")).isEqualTo(BbFixtures.md5(prev("bb-modules.py.pre112")));
     }
 
     /// The bb-test lane helpers go in before bb-build (which calls bb-cp-record); a host holding a stranger's bb-test is refused, naming the one pin and
@@ -944,7 +946,7 @@ class BbInstallIT {
 
         assertThat(run.rc()).as(run.stdout() + run.stderr()).isEqualTo(65);
         assertThat(run.stdout().lines().toList()).containsExactly("refused builder@h1 bb-modules.py installed=" + BbFixtures.md5("a diverged modules helper\n".getBytes())
-                                                                 + " expected=" + pin("BB_MODULES_NEW"));
+                                                                 + " expected=" + pin("BB_MODULES_PRE112") + "|" + pin("BB_MODULES_NEW"));
         assertThat(listing(tools)).isEqualTo(before);
     }
 
@@ -1066,6 +1068,7 @@ class BbInstallIT {
         Files.write(tools.resolve("bb-test"), prev("bb-test.pre76"));
         Files.write(tools.resolve("bb-hold"), prev("bb-hold.pre90"));
         Files.write(tools.resolve("bb-await"), prev("bb-await.pre90"));
+        Files.write(tools.resolve("bb-modules.py"), prev("bb-modules.py.pre112"));
         for (var e : live.entrySet()) {
             assertThat(BbFixtures.md5(Files.readAllBytes(tools.resolve(e.getKey())))).as(e.getKey())
                       .isEqualTo(e.getValue());
@@ -1175,6 +1178,30 @@ class BbInstallIT {
         assertThat(tools.resolve("bb-build.bak-" + pin("BB_BUILD_PRE102"))).hasBinaryContent(prev("bb-build.pre102"));
     }
 
+    /// A host holding main's bb-build and bb-modules.py before #112 (b10f1e00 / 9c668381: no -pl-without-am submit check) is accepted and upgraded.
+    /// Mutation: drop BB_BUILD_PRE112 or BB_MODULES_PRE112 from accepted_of -> the host is refused, exit 65, red.
+    @Test
+    void aHostAtTheMain112InstallSet_isAcceptedAndUpgraded() throws Exception {
+        var tools = host("h1");
+
+        Files.write(tools.resolve("bb-build"), prev("bb-build.pre112"));
+        Files.write(tools.resolve("bb-modules.py"), prev("bb-modules.py.pre112"));
+        assertThat(BbFixtures.md5(Files.readAllBytes(tools.resolve("bb-build")))).isEqualTo("b10f1e002113eafa50a05b8f4fe58eae");
+        assertThat(BbFixtures.md5(Files.readAllBytes(tools.resolve("bb-modules.py")))).isEqualTo("9c668381f2a161c24a9b5d55cccc4945");
+        var run = install("builder@h1");
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        assertThat(run.stdout()).doesNotContain("refused")
+                  .contains("installed builder@h1 bb-build before=" + pin("BB_BUILD_PRE112")
+                           + " after=" + pin("BB_BUILD_NEW"))
+                  .contains("installed builder@h1 bb-modules.py before=" + pin("BB_MODULES_PRE112")
+                           + " after=" + pin("BB_MODULES_NEW"));
+        assertThat(BbFixtures.md5(Files.readAllBytes(tools.resolve("bb-build")))).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-build")));
+        assertThat(BbFixtures.md5(Files.readAllBytes(tools.resolve("bb-modules.py")))).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-modules.py")));
+        assertThat(tools.resolve("bb-build.bak-" + pin("BB_BUILD_PRE112"))).hasBinaryContent(prev("bb-build.pre112"));
+        assertThat(tools.resolve("bb-modules.py.bak-" + pin("BB_MODULES_PRE112"))).hasBinaryContent(prev("bb-modules.py.pre112"));
+    }
+
     /// A host after the owner's install-bb-79.sh (#63 + #79: bb-build 2810f93c, bb-portgroup.py and bb-modules.py at main's
     /// values) and still on the pre-#70 bb-result, bb-queue-lib.sh, bb-queue is accepted for every file and is updated.
     /// Mutation: drop BB_BUILD_PRESESSION from accepted_of -> the post-install host is refused, red.
@@ -1199,6 +1226,7 @@ class BbInstallIT {
         Files.write(tools.resolve("bb-result"), prev("bb-result.precp"));
         Files.write(tools.resolve("bb-queue-lib.sh"), prev("bb-queue-lib.sh.preledger"));
         Files.write(tools.resolve("bb-queue"), prev("bb-queue.preledger"));
+        Files.write(tools.resolve("bb-modules.py"), prev("bb-modules.py.pre112"));
         for (var e : live.entrySet()) {
             assertThat(BbFixtures.md5(Files.readAllBytes(tools.resolve(e.getKey())))).as(e.getKey())
                       .isEqualTo(e.getValue());
@@ -1268,6 +1296,7 @@ class BbInstallIT {
                                                                  + "|" + pin("BB_BUILD_PRE90")
                                                                  + "|" + pin("BB_BUILD_PRE91")
                                                                  + "|" + pin("BB_BUILD_PRE102")
+                                                                 + "|" + pin("BB_BUILD_PRE112")
                                                                  + "|" + pin("BB_BUILD_NEW"));
         assertThat(listing(good)).isEqualTo(goodBefore);
         assertThat(listing(diverged)).isEqualTo(divergedBefore);
