@@ -222,10 +222,10 @@ class BbCoGcIT {
     void reason3_aProcessWorkingInTheCheckout_keepsIt() throws Exception {
         skeleton();
         var victim = checkout("victim", 10);
-        var sleeper = new ProcessBuilder("sleep", "120").directory(victim.resolve("module").toFile()).start();
+        var sleeper = BbFixtures.process("sleep", "120").directory(victim.resolve("module").toFile()).start();
 
         try {
-            assumeTrue(sleeper.isAlive());
+            assertThat(sleeper.isAlive()).as("control: the sleeper runs in the checkout").isTrue();
             assertKeptOnlyFor(victim, "process");
         } finally {
             sleeper.destroyForcibly();
@@ -542,18 +542,18 @@ class BbCoGcIT {
         var idle = checkout("idle", 10);
         var held = home.resolve("held");
         var release = home.resolve("release");
-        var holder = new ProcessBuilder("flock",
-                                        home.resolve("work/queue/.lock").toString(),
-                                        "sh",
-                                        "-c",
-                                        "touch " + held + "; while [ ! -e " + release + " ]; do sleep 0.1; done").start();
+        var holder = BbFixtures.process("flock",
+                                           home.resolve("work/queue/.lock").toString(),
+                                           "sh",
+                                           "-c",
+                                           "touch " + held + "; while [ ! -e " + release + " ]; do sleep 0.1; done").start();
 
         try {
             for (var i = 0; i < 100 && !Files.exists(held); i++) {
                 Thread.sleep(50);
             }
 
-            assumeTrue(Files.exists(held), "flock is needed to hold the queue lock");
+            assertThat(held).as("control: flock holds the queue lock").exists();
 
             var run = java.util.concurrent.CompletableFuture.supplyAsync(() -> {
                 try {
@@ -590,18 +590,18 @@ class BbCoGcIT {
         skeleton();
         var idle = checkout("idle", 10);
         var held = home.resolve("held");
-        var holder = new ProcessBuilder("flock",
-                                        home.resolve("work/queue/.lock").toString(),
-                                        "sh",
-                                        "-c",
-                                        "touch " + held + "; sleep 8").start();
+        var holder = BbFixtures.process("flock",
+                                           home.resolve("work/queue/.lock").toString(),
+                                           "sh",
+                                           "-c",
+                                           "touch " + held + "; sleep 8").start();
 
         try {
             for (var i = 0; i < 100 && !Files.exists(held); i++) {
                 Thread.sleep(50);
             }
 
-            assumeTrue(Files.exists(held), "flock is needed to hold the queue lock");
+            assertThat(held).as("control: flock holds the queue lock").exists();
             var run = gcWith(Map.of("BB_CO_GC_LOCK_WAIT", "1"), "--live", "--days", "3", "--pace", "0");
 
             assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
