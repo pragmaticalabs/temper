@@ -534,7 +534,7 @@ class BbCoGcIT {
 
     /// Finding 5: the run takes the queue's lock before it checks tickets and moves. While a holder keeps $Q/.lock the run WAITS (the checkout
     /// stays, the run is not done); once the holder lets go it removes. No wall-clock bound: the holder is released by the test, so a slow host
-    /// only delays, never reds; the 1 s dwell is the only time in it, and a run that ignores the lock removes within it.
+    /// only delays, never reds; the 15 s poll only ends early, when a run that ignores the lock has removed.
     /// Mutation: qlock() { return 0; } -> the checkout is gone during the dwell -> red.
     @Test
     void aHolderOfTheQueueLock_makesTheRunWaitThenItRemoves() throws Exception {
@@ -569,7 +569,11 @@ class BbCoGcIT {
             }
 
             assertThat(Files.exists(log) && Files.readString(log).contains("RUN live")).as("control: the run started").isTrue();
-            Thread.sleep(1000);
+            // A run that ignores the lock removes as soon as its /proc scan is done (seconds on a loaded host): wait for that, up to 15 s.
+            for (var i = 0; i < 300 && !run.isDone() && Files.exists(idle.resolve("module/target/payload.bin")); i++) {
+                Thread.sleep(50);
+            }
+
             assertThat(idle.resolve("module/target/payload.bin")).as("kept while the holder holds the lock").exists();
             assertThat(run.isDone()).as("the run waits for the holder").isFalse();
             Files.writeString(release, "go");
