@@ -79,7 +79,7 @@ readonly BB_BUILD_PRE91=12f2c9b52c09724be2a07e8058bc6a43   # the #91 version: th
 readonly BB_BUILD_PRE102=0b01f3522843051950e95ba6e52ec5e3   # the #86/#91 version: the args guards pipe printf into grep -q, so a long arg list can make a guard miss its match under pipefail (issue #102)
 readonly BB_BUILD_PRE112=b10f1e002113eafa50a05b8f4fe58eae   # the #102 version: -pl without -am is queued although a reactor dependency is not installed (issue #112)
 readonly BB_BUILD_PRE116=f1478564c91a6ab3544d1a7c9efec568   # the version before #116: mutant tickets carry no order_at= and have no one-per-owner rule
-readonly BB_BUILD_NEW=f1478564c91a6ab3544d1a7c9efec568
+readonly BB_BUILD_NEW=80f3c18feec911b7fb4e3ae6871d0269
 # bb-jbct-bootstrap: absent on every host before its first install; bb-build calls it, so it is installed first.
 readonly BB_JBCTBOOT_NEW=3e5396ecee48b99949456cf805df1e60
 # bb-result: absent on every host before its first install. No trailing comment on a pin line: bb-drift reads it by pattern.

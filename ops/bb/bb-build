@@ -42,7 +42,7 @@
 #   DRIVER GONE: the ticket's waiter checks the driver at every poll (5 s), in the lock hold of its grant test, and moves a WAITING ticket
 #     whose driver is gone to done/ (state=abandoned, .bb/rc 9). A RUNNING ticket is NEVER touched on driver death: its build runs to its
 #     own end and holds the owner's one mutant place until then.
-# The three variables are unset before the waiter starts, so a build never inherits them.
+# The three variables are unset before the waiter (or, under BB_QUEUE=0, bb-build-direct) starts, so a build never inherits them.
 # LOAD GATE (2026-11-11): a ticket is also granted only while load5/cores < 1.2 (BB_LOAD_MAX); the oldest grantable ticket goes
 # once it waited > 1200 s (BB_LOAD_STARVE_SECS) while < 2 queue launches run (BB_LOAD_STARVE_REACTORS). MEMORY FLOOR (#53): a grant also
 # needs MemAvailable >= the per-host floor; the oldest ticket overrides it only while no ticket runs at all. pick() in the lib decides.
@@ -302,6 +302,7 @@ if [ "${1:-}" != __run ] && [ "${BB_QUEUE:-1}" = 0 ]; then
   A=("$@"); if [ "${A[0]:-}" = --since ]; then A=("${A[@]:3}"); else A=("${A[@]:1}"); fi   # the maven args after [--since <sha>] <checkout>
   selected_testcases / / select 0 ${A[@]+"${A[@]}"} \
     || { echo "refusing (rc 19): BB_QUEUE=0 cannot count a -Dtest/-Dit.test selection (bb-build-direct writes .bb/rc from its own detached job; ZERO-TESTCASE REFUSAL, #86); run it through the queue" >&2; exit 19; }
+  unset BB_ORDER_AT BB_DRIVER_PID BB_DRIVER_START   # no ticket here: nothing to order
   exec "$(dirname "$SELF")/bb-build-direct" "$@"
 fi
 . "$(dirname "$SELF")/bb-queue-lib.sh"
@@ -443,8 +444,8 @@ if [ -n "${BB_ORDER_AT+x}" ]; then
   [[ ${BB_DRIVER_PID:-} =~ ^[1-9][0-9]{0,9}$ && ${BB_DRIVER_START:-} =~ ^[1-9][0-9]{0,18}$ ]] && mutate_driver "$BB_DRIVER_PID" "$BB_DRIVER_START" \
     || { echo "refusing: BB_ORDER_AT is accepted only from bb-mutate (BB_DRIVER_PID/BB_DRIVER_START name no running bb-mutate above this call)" >&2; exit 2; }
   MUTANT_FIELDS=$(printf 'order_at=%s\ndriver_pid=%s\ndriver_start=%s' "$BB_ORDER_AT" "$BB_DRIVER_PID" "$BB_DRIVER_START")$'\n'
-  unset BB_ORDER_AT BB_DRIVER_PID BB_DRIVER_START
 fi
+unset BB_ORDER_AT BB_DRIVER_PID BB_DRIVER_START   # also without BB_ORDER_AT: a stray BB_DRIVER_* must not reach the waiter or maven
 B=$CO/.bb; mkdir -p "$B"
 if [ ! -f "$B/rc" ] && [ -f "$B/start" ]; then
   # .bb/start without .bb/rc: a build still running, or a finished build whose .bb/rc a lane deleted (CTO 2026-11-13: three verifier
