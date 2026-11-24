@@ -78,7 +78,7 @@ readonly BB_BUILD_PRE90=ad84d8ec0f36096b0de9b4f29142f730   # the #88 version: th
 readonly BB_BUILD_PRE91=12f2c9b52c09724be2a07e8058bc6a43   # the #91 version: the waiter passes reap's count to pick; an rc-0 run that ran 0 testcases stays rc 0 (issue #86)
 readonly BB_BUILD_PRE102=0b01f3522843051950e95ba6e52ec5e3   # the #86/#91 version: the args guards pipe printf into grep -q, so a long arg list can make a guard miss its match under pipefail (issue #102)
 readonly BB_BUILD_PRE116=b10f1e002113eafa50a05b8f4fe58eae   # the version before #116: mutant tickets carry no order_at= and have no one-per-owner rule
-readonly BB_BUILD_NEW=bd0712d1b678363546f8f9d9eea11075
+readonly BB_BUILD_NEW=4b558a6217a713b266ba2579da3b3c90
 # bb-jbct-bootstrap: absent on every host before its first install; bb-build calls it, so it is installed first.
 readonly BB_JBCTBOOT_NEW=3e5396ecee48b99949456cf805df1e60
 # bb-result: absent on every host before its first install. No trailing comment on a pin line: bb-drift reads it by pattern.

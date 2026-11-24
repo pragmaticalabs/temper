@@ -407,6 +407,35 @@ class BbMutateIT {
         assertThat(out.credited()).containsEntry("mA", "solo").containsEntry("mX", "-");
     }
 
+    /// bb-build rc 20 (the owner's mutant ticket is taken, #116) is a wait, not a refused call: the mutant is retried and runs. The results header
+    /// and the verdict are those of a run without a wait. Mutation: drop the RC_TURN retry in run_build -> CALL-REFUSED, red.
+    @Test
+    void aMutantWhoseTurnIsTaken_isRetried_andRunsWithTheSameResults() throws Exception {
+        var out = batch(withKey(withKey(modules(null), "turnWhen", 1), "turns", 1), mutation("mA", "A", "ATest", "MUT"));
+
+        assertThat(Files.readAllLines(home.resolve("turns.log"))).hasSize(1).allMatch(line -> line.matches("[0-9]{19}"));
+        assertThat(out.log()).contains("[mA] waiting for its turn");
+        assertThat(out.outcomes()).containsEntry("mA", "RED");
+        assertThat(out.credited()).containsEntry("mA", "solo");
+        assertThat(builds()).containsExactly("[] false", "[A] false");
+        assertThat(out.tsvHeader()).isEqualTo("id\toutcome\tcredited\texpected_failed\tall_failures\ttestcases\trc\tsecs\tdetail");
+        assertThat(out.md()).containsPattern("control OK \\(4 testcases\\); per-mutant bound [0-9]+s; complete");
+    }
+
+    /// A turn that never comes ends by --timeout as the queue wait does: exit 4, the rest NOT-RUN, and no mutant build ran.
+    @Test
+    void aTurnThatNeverComes_abortsWithinTheTimeout_andRunsNothing() throws Exception {
+        extra = List.of("--timeout", "0.1");
+        okRcs = List.of(4);
+        var out = batch(withKey(withKey(modules(null), "turnWhen", 1), "turns", 1000),
+                        mutation("mA", "A", "ATest", "MUT"),
+                        mutation("mB", "A", "ATest", "MUT"));
+
+        assertThat(out.log()).contains("held the host for 6s (--timeout); nothing was queued");
+        assertThat(out.outcomes()).containsEntry("mA", "NOT-RUN").containsEntry("mB", "NOT-RUN");
+        assertThat(builds()).containsExactly("[] false");
+    }
+
     /// The queue wait expires for a batch that never starts: the run is aborted (exit 4) and every member is NOT-RUN with no build credited.
     @Test
     void aRunAbortedByTheQueueWait_leavesTheRestNotRunCreditedDash() throws Exception {
