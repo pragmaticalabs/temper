@@ -408,33 +408,35 @@ class BbMutateIT {
         assertThat(out.credited()).containsEntry("mA", "solo").containsEntry("mX", "-");
     }
 
-    /// bb-build rc 20 (the owner's mutant ticket is taken, #116) is a wait, not a refused call: the mutant is retried and runs. The results header
-    /// and the verdict are those of a run without a wait. Mutation: drop the RC_TURN retry in run_build -> CALL-REFUSED, red.
+    /// A build that bb-build's bound runner stopped (.bb/rc 124, #116) reads exactly as one this driver stopped at the bound: same outcome, credit and
+    /// detail, in a lone run. Control: the two builds differ (one leaves its rc, the other none), so each path was taken. Mutation: drop the
+    /// RC_BOUND branch in run_build -> the stopped build reads as a build without results, red.
     @Test
-    void aMutantWhoseTurnIsTaken_isRetried_andRunsWithTheSameResults() throws Exception {
-        var out = batch(withKey(withKey(modules(null), "turnWhen", 1), "turns", 1), mutation("mA", "A", "ATest", "MUT"));
+    void aBuildStoppedByTheBoundRunner_readsAsTheDriversOwnTimeout() throws Exception {
+        killableBuilds();
+        buildJson = "{\"mutantTimeoutSecs\":1}";
+        var driver = batch(modules("hang"), mutation("mA", "A", "ATest", "MUT"));
+        var runner = batch(modules("bounded"), mutation("mA", "A", "ATest", "MUT"));
 
-        assertThat(Files.readAllLines(home.resolve("turns.log"))).hasSize(1).allMatch(line -> line.matches("[0-9]{19}"));
-        assertThat(out.log()).contains("[mA] waiting for its turn");
-        assertThat(out.outcomes()).containsEntry("mA", "RED");
-        assertThat(out.credited()).containsEntry("mA", "solo");
-        assertThat(builds()).containsExactly("[] false", "[A] false");
-        assertThat(out.tsvHeader()).isEqualTo("id\toutcome\tcredited\texpected_failed\tall_failures\ttestcases\trc\tsecs\tdetail");
-        assertThat(out.md()).containsPattern("control OK \\(4 testcases\\); per-mutant bound [0-9]+s; complete");
+        assertThat(driver.log()).contains("wrote .bb/end and .bb/rc=124 (killed by bb-mutate)");
+        assertThat(runner.log()).doesNotContain("killed by bb-mutate");
+        assertThat(runner.outcomes()).containsEntry("mA", "TIMEOUT").isEqualTo(driver.outcomes());
+        assertThat(runner.credited()).containsEntry("mA", "solo").isEqualTo(driver.credited());
+        assertThat(runner.detail("mA")).isEqualTo("exceeded 1s from its own Maven start; job killed (counted detected)").isEqualTo(driver.detail("mA"));
+        assertThat(runner.rc()).isZero();
     }
 
-    /// A turn that never comes ends by --timeout as the queue wait does: exit 4, the rest NOT-RUN, and no mutant build ran.
+    /// Every build carries its bound to bb-build (#116): a mutant's own, the control's --timeout; and the run's one submit time.
     @Test
-    void aTurnThatNeverComes_abortsWithinTheTimeout_andRunsNothing() throws Exception {
-        extra = List.of("--timeout", "0.1");
-        okRcs = List.of(4);
-        var out = batch(withKey(withKey(modules(null), "turnWhen", 1), "turns", 1000),
-                        mutation("mA", "A", "ATest", "MUT"),
-                        mutation("mB", "A", "ATest", "MUT"));
+    void everyBuild_carriesItsBound_andTheRunsSubmitTime() throws Exception {
+        extra = List.of("--timeout", "2");
+        buildJson = "{\"mutantTimeoutSecs\":77}";
+        batch(modules(null), mutation("mA", "A", "ATest", "MUT"), mutation("mC", "C", "CTest", "MUT"));
+        var bounds = Files.readAllLines(home.resolve("bounds.log")).stream().map(line -> line.split(" ")).toList();
 
-        assertThat(out.log()).contains("held the host for 6s (--timeout); nothing was queued");
-        assertThat(out.outcomes()).containsEntry("mA", "NOT-RUN").containsEntry("mB", "NOT-RUN");
-        assertThat(builds()).containsExactly("[] false");
+        assertThat(bounds.stream().map(line -> line[0])).startsWith("120", "77").hasSize(builds().size());
+        assertThat(bounds.stream().skip(1).map(line -> line[0])).containsOnly("77");
+        assertThat(bounds.stream().map(line -> line[1]).distinct()).singleElement().asString().matches("[0-9]{19}");
     }
 
     /// The queue wait expires for a batch that never starts: the run is aborted (exit 4) and every member is NOT-RUN with no build credited.
@@ -609,8 +611,7 @@ class BbMutateIT {
         }
     }
 
-    /// scenario with one more top-level key, put right after the opening brace (so keys stack: the first form of this matched `{"modules"`
-    /// and silently dropped the second key, leaving "turns" at its default of 1 in aTurnThatNeverComes, whose second call then ran)
+    /// scenario with one more top-level key, put right after the opening brace (so keys stack)
     private static String withKey(String scenario, String key, int value) {
         assertThat(scenario).startsWith("{");
 

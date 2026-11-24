@@ -5,6 +5,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -22,15 +23,21 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 
-/// Mutant tickets (#116, CTO ruling B'): one mutant ticket per owner queued or running on a host, ordered by its batch's submit time
-/// (order_at=), dropped while waiting when its driver is gone. The real bb-build, bb-queue-lib.sh and bb-mutate run on a throwaway queue;
-/// maven is a script. A DRIVER is either the real bb-mutate or a stand-in named bb-mutate that makes one bb-build call and stays alive.
+/// Mutant tickets (#116, CTO ruling of 2026-11-24): pick decides. Per host at most one mutant ticket of an owner RUNS, and of the owner's waiting
+/// ones the smallest created= is next; a ticket that is not eligible takes no part in pick. order_at= (the batch's submit time, never before
+/// its driver's start) places the eligible one against other owners' tickets. A waiting ticket is dropped when its driver is gone; a running one
+/// ends at its bound, driver or no driver. The real bb-build, bb-queue-lib.sh and bb-mutate run on a throwaway queue; maven is a script. A DRIVER
+/// is either the real bb-mutate or a stand-in named bb-mutate that makes one bb-build call and stays alive.
 ///
 /// Probes (each red on its own row):
-///  - never-in-the-future check removed -> [#aFutureOrderAt_isRefused_andNothingIsQueued]
+///  - mutant_waits sorts by order_at instead of created -> [#twoBatchesOfOneOwner_alternateBuildByBuild]
+///  - mutant_waits ignores running/ -> [#parallelSubmitsOfOneOwner_neverRunTwoMutantTickets]
+///  - pick's `oldest` taken over every waiting ticket -> [#anIneligibleTicket_isNotTakenByTheStarvationOverride]
+///  - the bound runner is not started -> [#aKilledDriversRunningBuild_endsAtItsBound_andNotBefore]
+///  - the order_at >= driver start check removed -> [#anOrderAtOutsideTheDriversLifetime_isRefused_andNothingIsQueued]
+///  - never-in-the-future check removed -> [#anOrderAtOutsideTheDriversLifetime_isRefused_andNothingIsQueued]
 ///  - created_s() prefers order_at -> [#orderAt_neverReachesTheLoadStarvationOverride]
 ///  - order() ignores order_at -> [#aMutantTicket_sortsByItsBatchSubmitTime_aheadOfALaterTicket]
-///  - one-ticket check removed -> [#aSecondMutantCallOfAnOwner_isRefusedRc20_whileOneIsWaitingOrRunning]
 ///  - driver check removed from the waiter -> [#aKilledDriver_leavesNoWaitingTicket_andItsRunningBuildFinishes]
 ///  - mutate_driver check removed -> [#aCallWhoseDriverIsMissingOrForeign_isRefused_andNothingIsQueued]
 class BbMutateOrderIT {
@@ -38,30 +45,41 @@ class BbMutateOrderIT {
 
     private static final String DRIVER = """
         #!/usr/bin/env python3
-        # stand-in driver: <checkout> <call file> [NAME=value (SELF = this pid) | NAME (removed)]...
+        # stand-in driver: <checkout> <call file> [NAME=value (SELF = this pid, START[-1] = its start in ns) | NAME (removed)]...
+        # takes its order_at, writes <call file>.up, waits while <call file>.gate exists, then makes its call
         import os, subprocess, sys, time
         co, call, changes = sys.argv[1], sys.argv[2], sys.argv[3:]
         start = open("/proc/self/stat").read().rpartition(")")[2].split()[19]
-        env = dict(os.environ, BB_VIA="bb-mutate:spec:m1", BB_ORDER_AT=str(time.time_ns()), BB_DRIVER_PID=str(os.getpid()), BB_DRIVER_START=start)
+        btime = next(int(l.split()[1]) for l in open("/proc/stat") if l.startswith("btime "))
+        ns = btime * 10**9 + int(start) * (10**9 // os.sysconf("SC_CLK_TCK"))
+        known = {"SELF": str(os.getpid()), "START": str(ns), "START-1": str(ns - 1)}
+        env = dict(os.environ, BB_VIA="bb-mutate:spec:m1", BB_ORDER_AT=str(time.time_ns()), BB_DRIVER_PID=str(os.getpid()), BB_DRIVER_START=start,
+                   BB_MUTANT_BOUND="600")
         for c in changes:
             k, sep, v = c.partition("=")
             env.pop(k, None)
             if sep:
-                env[k] = str(os.getpid()) if v == "SELF" else v
+                env[k] = known.get(v, v)
+        open(call + ".up.tmp", "w").write(env.get("BB_ORDER_AT", ""))
+        os.rename(call + ".up.tmp", call + ".up")
+        while os.path.exists(call + ".gate"):
+            time.sleep(0.1)
         cp = subprocess.run([os.environ["HOME"] + "/tools/bb-build", co, "run"], stdin=subprocess.DEVNULL, capture_output=True, text=True, env=env)
         open(call + ".tmp", "w").write(f"{cp.returncode}\\n{cp.stdout}\\n{cp.stderr}")
         os.rename(call + ".tmp", call)
         time.sleep(1200)
         """;
 
-    /// maven: records its BB_* environment (env.<checkout>, whole before the next line), then its start order (a checkout named in runs.log has its env file), waits while <dir>/hold or <dir>/hold.<checkout> exists, then reports one testcase
-    /// of module A, failing when the module's file is mutated.
+    /// maven: records its BB_* environment (env.<checkout>, whole before the next line), then its start order (a checkout named in runs.log has its
+    /// env file), waits while <dir>/hold or <dir>/hold.<checkout> exists, or <dir>/hold.mut1 and the file holds MUT1, or <dir>/step without
+    /// <dir>/step.<n> (n = its place in runs.log), then writes the surefire report of module A, failing when the module's file is mutated.
     private static final String LAUNCH = """
         #!/bin/bash
         n=${PWD##*/}
-        env | grep -E '^BB_(ORDER_AT|DRIVER_|VIA|OWNER)' > "$HOLD_DIR/env.$n.tmp"; mv "$HOLD_DIR/env.$n.tmp" "$HOLD_DIR/env.$n"
-        echo "$n" >> "$HOLD_DIR/runs.log"
-        while [ -e "$HOLD_DIR/hold" ] || [ -e "$HOLD_DIR/hold.$n" ]; do sleep 0.2; done
+        env | grep -E '^BB_(ORDER_AT|DRIVER_|MUTANT_|VIA|OWNER)' > "$HOLD_DIR/env.$n.tmp"; mv "$HOLD_DIR/env.$n.tmp" "$HOLD_DIR/env.$n"
+        echo "$n" >> "$HOLD_DIR/runs.log"; k=$(wc -l < "$HOLD_DIR/runs.log")
+        while [ -e "$HOLD_DIR/hold" ] || [ -e "$HOLD_DIR/hold.$n" ] || { [ -e "$HOLD_DIR/hold.mut1" ] && grep -q MUT1 A/src/f.txt; } \\
+          || { [ -e "$HOLD_DIR/step" ] && [ ! -e "$HOLD_DIR/step.$k" ]; }; do sleep 0.2; done
         f=0; b=""; if grep -q MUT A/src/f.txt; then f=1; b='<failure message="x">x</failure>'; fi
         mkdir -p A/target/surefire-reports
         echo "<testsuite name=\\"ATest\\" tests=\\"1\\" failures=\\"$f\\" errors=\\"0\\" skipped=\\"0\\"><testcase classname=\\"ATest\\" name=\\"t1\\" time=\\"0\\">$b</testcase></testsuite>" \\
@@ -87,7 +105,7 @@ class BbMutateOrderIT {
         }
 
         tools = Files.createDirectories(dir.resolve("tools"));
-        for (var tool : List.of("bb-build", "bb-mutate")) {
+        for (var tool : List.of("bb-build", "bb-mutate", "bb-queue")) {
             BbFixtures.executable(tools.resolve(tool),
                                   Files.readString(BbFixtures.OPS_BB.resolve(tool)));
         }
@@ -224,23 +242,53 @@ class BbMutateOrderIT {
     }
 
     private Call drive(Path script, String owner, String checkout, String... changes) throws Exception {
-        var call = dir.resolve(checkout + ".call");
+        return answer(checkout, launch(script, owner, checkout, changes));
+    }
+
+    private Process launch(Path script, String owner, String checkout, String... changes) throws Exception {
         var command = new ArrayList<>(List.of("python3",
                                               script.toString(),
                                               checkout(checkout).toString(),
-                                              call.toString()));
+                                              call(checkout).toString()));
 
         command.addAll(List.of(changes));
-        var process = start(command, env(owner), dir.resolve(checkout + ".driver.log"));
 
+        return start(command, env(owner), dir.resolve(checkout + ".driver.log"));
+    }
+
+    private Path call(String checkout) {
+        return dir.resolve(checkout + ".call");
+    }
+
+    private Call answer(String checkout, Process process) throws Exception {
         assertThat(within(60,
-                          () -> Files.exists(call))).as(Files.readString(dir.resolve(checkout + ".driver.log")))
+                          () -> Files.exists(call(checkout)))).as(Files.readString(dir.resolve(checkout + ".driver.log")))
                   .isTrue();
-        var text = Files.readString(call);
+        var text = Files.readString(call(checkout));
 
         return new Call(Integer.parseInt(text.substring(0, text.indexOf('\n'))),
                         text,
                         process.pid());
+    }
+
+    /// A driver that has taken its order_at (its submit time) and makes its call only at [#enqueue].
+    private Process submit(String owner, String checkout, String... changes) throws Exception {
+        Files.writeString(dir.resolve(checkout + ".call.gate"), "");
+        var process = launch(driver, owner, checkout, changes);
+
+        assertThat(within(60, () -> Files.exists(dir.resolve(checkout + ".call.up")))).isTrue();
+
+        return process;
+    }
+
+    private long orderAt(String checkout) throws Exception {
+        return Long.parseLong(Files.readString(dir.resolve(checkout + ".call.up")));
+    }
+
+    private Call enqueue(String checkout, Process submitted) throws Exception {
+        Files.delete(dir.resolve(checkout + ".call.gate"));
+
+        return answer(checkout, submitted);
     }
 
     /// An ordinary bb-build call (no driver, no BB_ORDER_AT) plus `more` in its environment.
@@ -358,38 +406,157 @@ class BbMutateOrderIT {
                   .strip();
     }
 
-    // ---------------------------------------------------------------- proof 1
-    /// Proof 1: while an owner's mutant ticket waits or runs, the next such call is refused with rc 20 and queues nothing. Controls: another
-    /// owner's mutant call and the same owner's ordinary call are queued; once the ticket is done, the owner's next mutant call is queued.
+    // ---------------------------------------------------------------- the turn
+    /// At most one RUNNING mutant ticket of an owner, under parallel submits: four drivers of one owner call bb-build at once on a host with room for
+    /// five launches, and one of their tickets runs. Controls: tickets enqueued BEHIND the three waiting ones (two ordinary ones of the same owner, a
+    /// mutant one of another owner) do run meanwhile, so the waiting ones were passed over by the rule and not by a cap; and the lock-held sampler
+    /// sees two running tickets of that owner. Afterwards the four run one at a time, by created=.
     @Test
-    void aSecondMutantCallOfAnOwner_isRefusedRc20_whileOneIsWaitingOrRunning() throws Exception {
-        blocker();
-        Files.writeString(dir.resolve("hold.mo-1"), "");
-        var first = drive("mo", "mo-1").ticket();
+    void parallelSubmitsOfOneOwner_neverRunTwoMutantTickets() throws Exception {
+        Files.writeString(dir.resolve("max-reactors"), "9\n");
+        Files.writeString(dir.resolve("hold"), "");
+        var drivers = new ArrayList<Process>();
 
-        assertThat(in("waiting", first)).isTrue();
-        var waiting = drive("mo", "mo-2");
+        for (var i = 1; i <= 4; i++) {
+            drivers.add(submit("mo", "mo-" + i));
+        }
 
-        assertThat(waiting.rc()).as(waiting.out()).isEqualTo(20);
-        assertThat(waiting.out()).contains(first + " in waiting/");
-        assertThat(ids("waiting")).containsExactly(first);
-        assertThat(dir.resolve("work/co/mo-2/.bb/queued")).doesNotExist();
-        var other = drive("mp", "mp-1").ticket();
-        var ordinary = plain("mo", "mo-3");
+        for (var i = 1; i <= 4; i++) {
+            Files.delete(dir.resolve("mo-" + i + ".call.gate"));
+        }
 
-        assertThat(ids("waiting")).containsExactlyInAnyOrder(first, other, ordinary);
-        release("blk-1");
-        assertThat(within(60, () -> in("running", first))).isTrue();
-        var running = drive("mo", "mo-4");
+        var tickets = new HashMap<String, String>();
 
-        assertThat(running.rc()).as(running.out()).isEqualTo(20);
-        assertThat(running.out()).contains(first + " in running/");
-        release("mo-1");
-        assertThat(within(60, () -> in("done", first))).isTrue();
-        assertThat(drive("mo", "mo-5").rc()).isZero();
+        for (var i = 1; i <= 4; i++) {
+            tickets.put("mo-" + i,
+                        answer("mo-" + i, drivers.get(i - 1)).ticket());
+        }
+
+        try (var mutants = new Sampler(() -> count("running", "mo", "^via=bb-mutate:"));
+             var all = new Sampler(() -> count("running", "mo", "^id="))) {
+            plain("mo", "po-1");
+            plain("mo", "po-2");
+            drive("mp", "mp-1").ticket();
+            assertThat(within(60,
+                              () -> runs().containsAll(List.of("po-1", "po-2", "mp-1")))).as("what is behind the waiting mutant tickets runs: " + runs())
+                      .isTrue();
+            assertThat(runs().stream()
+                           .filter(run -> run.startsWith("mo-"))).as("running mutant builds of mo").hasSize(1);
+            Files.delete(dir.resolve("hold"));
+            assertThat(within(180, () -> ids("done").size() == 7)).as(ids("waiting").toString()).isTrue();
+            assertThat(mutants.max()).as("running mutant tickets of mo").isEqualTo(1);
+            assertThat(all.max()).as("running tickets of mo").isGreaterThanOrEqualTo(2);
+        }
+
+        assertThat(runs().stream().filter(run -> run.startsWith("mo-"))).containsExactlyElementsOf(tickets.keySet()
+                                                                                                         .stream()
+                                                                                                         .sorted(Comparator.comparing(run -> field("done",
+                                                                                                                                                   tickets.get(run),
+                                                                                                                                                   "created")))
+                                                                                                         .toList());
+        assertThat(tickets.values()).allMatch(id -> field("done", id, "rc").equals("0"));
     }
 
-    private Process mutate(Path tool, String owner, String name, String build, int mutants) throws Exception {
+    /// Writes one ticket of a static queue.
+    private void ticket(Path root, String state, String id, String owner, boolean mutant, long created, String more) throws Exception {
+        Files.writeString(root.resolve(state).resolve(id),
+                          "id=" + id + "\nowner=" + owner + "\nco=" + dir + "/none\ncreated=" + created + "\n" + (mutant
+                                                                                                                  ? "via=bb-mutate:spec:m1\n"
+                                                                                                                  : "") + more + "args=run\n");
+    }
+
+    private List<String> grantable(Path root) throws Exception {
+        return lib(tools.resolve("bb-queue-lib.sh"), root, "grantable").lines()
+                  .toList();
+    }
+
+    private String pick(Path root, int launches) throws Exception {
+        return lib(tools.resolve("bb-queue-lib.sh"), root, "pick " + launches + " none");
+    }
+
+    /// The owner's next mutant ticket is the one with the smallest created= (tie: the smallest id), whatever the order_at=, and none while one runs.
+    /// Controls: with another owner on one of the two, both are grantable and order_at= sorts them; an ordinary ticket of the owner is always
+    /// grantable; a mutant ticket without order_at= (a bb-mutate before #116) counts, waiting and running.
+    @Test
+    void theTurn_goesByCreatedThenId_neverByOrderAt_andNotWhileOneRuns() throws Exception {
+        var root = goldenQueue();
+        var t = now();
+
+        ticket(root, "waiting", "5-1", "mo", true, t + 100, "order_at=" + (t + 900) + "\n");
+        ticket(root, "waiting", "4-1", "mo", true, t + 200, "order_at=" + (t + 10) + "\n");
+        ticket(root, "waiting", "6-1", "mo", false, t + 2000, "");
+        assertThat(grantable(root)).containsExactly("5-1", "6-1");
+        ticket(root, "waiting", "4-1", "mp", true, t + 200, "order_at=" + (t + 10) + "\n");
+        assertThat(grantable(root)).containsExactly("4-1", "5-1", "6-1");
+        ticket(root, "waiting", "4-1", "mo", true, t + 100, "order_at=" + (t + 950) + "\n");
+        assertThat(grantable(root)).containsExactly("4-1", "6-1");
+        ticket(root, "waiting", "3-1", "mo", true, t + 50, "");
+        assertThat(grantable(root)).containsExactly("3-1", "6-1");
+        ticket(root, "running", "1-1", "mo", true, t, "");
+        assertThat(grantable(root)).containsExactly("6-1");
+        ticket(root, "running", "1-1", "mo", false, t, "");
+        assertThat(grantable(root)).containsExactly("3-1", "6-1");
+    }
+
+    /// An ineligible ticket skipped for its cap gets no blocked_since=. Controls: in the same pick an ordinary ticket of that cap gets it, and so does
+    /// the mutant ticket itself once its owner's running one is gone.
+    @Test
+    void anIneligibleTicket_accruesNoBlockedSince() throws Exception {
+        var root = goldenQueue();
+        var t = now();
+
+        ticket(root, "running", "1-1", "mo", true, t, "");
+        ticket(root, "waiting", "2-1", "mo", true, t + 1, "cap=1\n");
+        ticket(root, "waiting", "3-1", "ord", false, t + 2, "cap=1\n");
+        assertThat(pick(root, 1)).isEmpty();
+        assertThat(Files.readString(root.resolve("waiting/3-1"))).contains("\nblocked_since=");
+        assertThat(Files.readString(root.resolve("waiting/2-1"))).doesNotContain("blocked_since=");
+        Files.delete(root.resolve("running/1-1"));
+        assertThat(pick(root, 1)).isEmpty();
+        assertThat(Files.readString(root.resolve("waiting/2-1"))).contains("\nblocked_since=");
+    }
+
+    /// Under a held load gate the starvation override takes the oldest ELIGIBLE ticket: an older ineligible mutant ticket is neither taken nor does its
+    /// age let anything else through. Control: with its owner's running ticket gone, the same ticket is the one taken.
+    @Test
+    void anIneligibleTicket_isNotTakenByTheStarvationOverride() throws Exception {
+        var root = goldenQueue();
+        var t = now();
+
+        Files.writeString(dir.resolve("loadavg"), "9999.00 9999.00 9999.00 1/1 1\n");
+        ticket(root, "running", "1-1", "mo", true, t - 7300 * SECOND, "");
+        ticket(root, "waiting", "2-1", "mo", true, t - 7200 * SECOND, "cap=5\n");
+        ticket(root, "waiting", "3-1", "ord", false, t - 3600 * SECOND, "cap=5\n");
+        assertThat(pick(root, 0)).isEqualTo("3-1");
+        ticket(root, "waiting", "3-1", "ord", false, t, "cap=5\n");
+        assertThat(pick(root, 0)).as("no ELIGIBLE ticket has starved").isEmpty();
+        Files.delete(root.resolve("running/1-1"));
+        assertThat(pick(root, 0)).isEqualTo("2-1");
+    }
+
+    /// An ineligible ticket blocks no ticket behind it: neither by an expired blocked_since= it got while it was eligible (the starvation bound), nor as
+    /// a port-group ticket that waits for the group to drain. Controls: with its owner's running ticket gone, the same queues grant nothing.
+    @Test
+    void anIneligibleTicket_blocksNoTicketBehindIt() throws Exception {
+        var starved = goldenQueue();
+        var t = now();
+
+        ticket(starved, "running", "1-1", "mo", true, t, "");
+        ticket(starved, "waiting", "2-1", "mo", true, t + 1, "cap=1\nblocked_since=1\n");
+        ticket(starved, "waiting", "3-1", "ord", false, t + 2, "cap=5\n");
+        assertThat(pick(starved, 1)).isEqualTo("3-1");
+        Files.delete(starved.resolve("running/1-1"));
+        assertThat(pick(starved, 1)).isEmpty();
+
+        ticket(starved, "running", "1-1", "mo", true, t, "");
+        ticket(starved, "waiting", "2-1", "mo", true, t + 1, "cap=1\ngroup=1\n");
+        ticket(starved, "waiting", "3-1", "ord", false, t + 2, "cap=5\ngroup=1\niso=1\n");
+        assertThat(pick(starved, 1)).isEqualTo("3-1");
+        Files.delete(starved.resolve("running/1-1"));
+        assertThat(pick(starved, 1)).isEmpty();
+    }
+
+    private Process mutate(Path tool, String owner, String name, String build, int mutants, String... more) throws Exception {
         var mutations = new ArrayList<String>();
 
         for (var i = 1; i <= mutants; i++) {
@@ -401,14 +568,16 @@ class BbMutateOrderIT {
         Files.writeString(dir.resolve(name + ".json"),
                           "{\"build\":" + build + ",\"mutations\":[" + String.join(",", mutations) + "]}");
 
-        return start(List.of("python3",
-                             tool.toString(),
-                             checkout(name).toString(),
-                             dir.resolve(name + ".json").toString(),
-                             dir.resolve("out-" + name).toString(),
-                             "--single"),
-                     env(owner),
-                     dir.resolve(name + ".driver.log"));
+        var command = new ArrayList<>(List.of("python3",
+                                              tool.toString(),
+                                              checkout(name).toString(),
+                                              dir.resolve(name + ".json").toString(),
+                                              dir.resolve("out-" + name).toString(),
+                                              "--single"));
+
+        command.addAll(List.of(more));
+
+        return start(command, env(owner), dir.resolve(name + ".driver.log"));
     }
 
     private String mutateLog(String name) {
@@ -419,13 +588,16 @@ class BbMutateOrderIT {
                                : "");
     }
 
-    /// The owner's mutant tickets in waiting/ and running/, counted under the queue lock.
-    private int mutantTickets() {
+    /// The tickets of `owner` in `state`/ with a line matching `pattern`, counted under the queue lock.
+    private int count(String state, String owner, String pattern) {
         var count = unchecked(() -> BbFixtures.run(List.of("bash",
                                                            "-c",
-                                                           "exec 8> \"$1/.lock\"; flock 8; grep -ls '^via=bb-mutate:' \"$1\"/waiting/* \"$1\"/running/* | wc -l",
+                                                           "exec 8> \"$1/.lock\"; flock 8; grep -ls \"^owner=$3\\$\" \"$1/$2\"/* | xargs -r grep -ls -e \"$4\" | wc -l",
                                                            "bash",
-                                                           queue.toString()),
+                                                           queue.toString(),
+                                                           state,
+                                                           owner,
+                                                           pattern),
                                                    env("mo"),
                                                    dir,
                                                    null));
@@ -433,47 +605,151 @@ class BbMutateOrderIT {
         return Integer.parseInt(count.stdout().strip());
     }
 
-    /// Proof 1 with two real bb-mutate runs of one owner: the count of its mutant tickets, sampled under the queue lock for the whole of both
-    /// runs, is never above 1, and both runs finish with every mutant RED.
-    @Test
-    void twoRunsOfOneOwner_neverHoldTwoMutantTickets_andBothFinish() throws Exception {
-        var max = new AtomicInteger();
-        var samples = new AtomicInteger();
-        var stop = new AtomicBoolean();
-        var sampler = Thread.ofVirtual().start(() -> {
-            while (!stop.get()) {
-                max.accumulateAndGet(mutantTickets(), Math::max);
-                samples.incrementAndGet();
-            }
-        });
+    /// The maximum of a value read in a loop from construction to the first [#max].
+    private static final class Sampler implements AutoCloseable {
+        private final AtomicInteger max = new AtomicInteger();
+        private final AtomicInteger samples = new AtomicInteger();
+        private final AtomicBoolean stop = new AtomicBoolean();
+        private final Thread thread;
 
-        Files.writeString(dir.resolve("hold"), "");
-        var a = mutate(tools.resolve("bb-mutate"), "mo", "mo-a", "{\"pl\":\"A\"}", 2);
-        var b = mutate(tools.resolve("bb-mutate"), "mo", "mo-b", "{\"pl\":\"A\"}", 1);
+        Sampler(Supplier<Integer> value) {
+            thread = Thread.ofVirtual().start(() -> {
+                while (!stop.get()) {
+                    max.accumulateAndGet(value.get(), Math::max);
+                    samples.incrementAndGet();
+                }
+            });
+        }
 
-        assertThat(within(120, () -> (mutateLog("mo-a") + mutateLog("mo-b")).contains("waiting for its turn"))).isTrue();
-        assertThat(within(60, () -> runs().size() == 1)).isTrue();
-        Files.delete(dir.resolve("hold"));
-        assertThat(a.waitFor(300, TimeUnit.SECONDS) && b.waitFor(300, TimeUnit.SECONDS)).isTrue();
-        stop.set(true);
-        sampler.join();
-        assertThat(List.of(a.exitValue(), b.exitValue())).as(mutateLog("mo-a") + mutateLog("mo-b")).containsOnly(0);
-        assertThat(outcomes("mo-a")).containsExactly("m1 RED", "m2 RED");
-        assertThat(outcomes("mo-b")).containsExactly("m1 RED");
-        assertThat(samples.get()).isGreaterThan(20);
-        assertThat(max.get()).isEqualTo(1);
+        int max() throws InterruptedException {
+            close();
+            assertThat(samples.get()).isGreaterThan(20);
+
+            return max.get();
+        }
+
+        @Override
+        public void close() throws InterruptedException {
+            stop.set(true);
+            thread.join();
+        }
     }
 
-    /// The control of the test above: the same two runs of the bb-mutate before #116 (which passes no BB_ORDER_AT, so bb-build never refuses it)
-    /// do hold two tickets at once, so the sampler can see two.
+    /// The order in which the builds of two real bb-mutate runs start on a host with one slot: `a` (3 builds), submitted first, and `b` (2 builds),
+    /// submitted while a's control runs. Every build is held until released; after a release the load gate holds every grant until each run that has
+    /// builds left has its next ticket waiting, so each grant chooses between the two.
+    private List<String> startOrder(String ownerA, String ownerB) throws Exception {
+        var builds = Map.of(ownerA + "-a", 3, ownerB + "-b", 2);
+
+        Files.writeString(dir.resolve("step"), "");
+        var a = mutate(tools.resolve("bb-mutate"), ownerA, ownerA + "-a", "{\"pl\":\"A\"}", 2);
+
+        assertThat(within(120, () -> runs().size() == 1)).as(mutateLog(ownerA + "-a")).isTrue();
+        var b = mutate(tools.resolve("bb-mutate"), ownerB, ownerB + "-b", "{\"pl\":\"A\"}", 1);
+
+        assertThat(within(120, () -> ids("waiting").size() == 1)).as(mutateLog(ownerB + "-b")).isTrue();
+        assertThat(runs()).as("builds started when b's first ticket is queued").hasSize(1);
+        for (var k = 1; k <= 5; k++) {
+            var started = k;
+
+            assertThat(within(60, () -> runs().size() == started)).as(k + ": " + runs()).isTrue();
+            Files.writeString(dir.resolve("loadavg"), "9999.00 9999.00 9999.00 1/1 1\n");
+            Files.writeString(dir.resolve("step." + k), "");
+            var left = builds.entrySet()
+                             .stream()
+                             .filter(run -> runs().stream()
+                                                .filter(run.getKey()::equals)
+                                                .count() < run.getValue())
+                             .count();
+
+            assertThat(within(60,
+                              () -> ids("running").isEmpty() && ids("waiting").size() == left)).as(k + ": " + ids("waiting"))
+                      .isTrue();
+            Files.writeString(dir.resolve("loadavg"), "0.00 0.00 0.00 1/1 1\n");
+        }
+
+        assertThat(a.waitFor(60, TimeUnit.SECONDS) && b.waitFor(60, TimeUnit.SECONDS)).isTrue();
+        assertThat(List.of(a.exitValue(), b.exitValue())).as(mutateLog(ownerA + "-a") + mutateLog(ownerB + "-b")).containsOnly(0);
+        assertThat(outcomes(ownerA + "-a")).containsExactly("m1 RED", "m2 RED");
+        assertThat(outcomes(ownerB + "-b")).containsExactly("m1 RED");
+
+        return runs().stream()
+                   .map(run -> run.substring(run.length() - 1))
+                   .toList();
+    }
+
+    /// Two batches of one owner alternate build by build, so the newer one's first build starts at most one build after its submit.
     @Test
-    void twoRunsOfTheOldTool_holdTwoMutantTickets() throws Exception {
+    void twoBatchesOfOneOwner_alternateBuildByBuild() throws Exception {
+        assertThat(startOrder("mo", "mo")).containsExactly("a", "b", "a", "b", "a");
+    }
+
+    /// The control of the test above: the same two batches of two owners are placed by order_at=, so the older one's builds all go first.
+    @Test
+    void twoBatchesOfTwoOwners_runInSubmitOrder() throws Exception {
+        assertThat(startOrder("mo", "mp")).containsExactly("a", "a", "a", "b", "b");
+    }
+
+    private void oneRunsOneWaits_whileAnOrdinaryTicketBehindRuns() throws Exception {
+        assertThat(within(120,
+                          () -> count("running", "mo", "^via=bb-mutate:") == 1 && count("waiting", "mo", "^via=bb-mutate:") == 1)).as(mutateLog("mo-a") + mutateLog("mo-b"))
+                  .isTrue();
+        plain("mo", "po-1");
+        assertThat(within(60, () -> runs().contains("po-1"))).as("the ordinary ticket behind the waiting one runs").isTrue();
+        assertThat(count("running", "mo", "^via=bb-mutate:")).isEqualTo(1);
+        assertThat(count("waiting", "mo", "^via=bb-mutate:")).isEqualTo(1);
+    }
+
+    /// Two real runs of one owner on a host with room for both: never two running mutant tickets, at most one waiting per live driver, and both finish
+    /// with every mutant RED.
+    @Test
+    void twoRunsOfOneOwner_neverRunTwoMutantTickets_andBothFinish() throws Exception {
+        Files.writeString(dir.resolve("max-reactors"), "9\n");
+        Files.writeString(dir.resolve("hold"), "");
+        try (var running = new Sampler(() -> count("running", "mo", "^via=bb-mutate:"));
+             var waiting = new Sampler(() -> count("waiting", "mo", "^via=bb-mutate:"))) {
+            var a = mutate(tools.resolve("bb-mutate"), "mo", "mo-a", "{\"pl\":\"A\"}", 2);
+            var b = mutate(tools.resolve("bb-mutate"), "mo", "mo-b", "{\"pl\":\"A\"}", 1);
+
+            oneRunsOneWaits_whileAnOrdinaryTicketBehindRuns();
+            Files.delete(dir.resolve("hold"));
+            assertThat(a.waitFor(300, TimeUnit.SECONDS) && b.waitFor(300, TimeUnit.SECONDS)).isTrue();
+            assertThat(List.of(a.exitValue(), b.exitValue())).as(mutateLog("mo-a") + mutateLog("mo-b")).containsOnly(0);
+            assertThat(running.max()).isEqualTo(1);
+            assertThat(waiting.max()).isBetween(1, 2);
+        }
+
+        assertThat(outcomes("mo-a")).containsExactly("m1 RED", "m2 RED");
+        assertThat(outcomes("mo-b")).containsExactly("m1 RED");
+    }
+
+    /// Two runs of the bb-mutate before #116 (no BB_ORDER_AT) take turns too: their tickets are mutant tickets.
+    @Test
+    void twoRunsOfTheBbMutateBefore116_takeTurnsToo() throws Exception {
         var old = BbFixtures.executable(dir.resolve("drv/old-bb-mutate"), resource("bb-mutate.pre116.prev"));
 
+        Files.writeString(dir.resolve("max-reactors"), "9\n");
         Files.writeString(dir.resolve("hold"), "");
         mutate(old, "mo", "mo-a", "{\"pl\":\"A\"}", 1);
         mutate(old, "mo", "mo-b", "{\"pl\":\"A\"}", 1);
-        assertThat(within(120, () -> mutantTickets() == 2)).as(mutateLog("mo-a") + mutateLog("mo-b")).isTrue();
+        oneRunsOneWaits_whileAnOrdinaryTicketBehindRuns();
+    }
+
+    /// The control of the two tests above: with the three tools before #116 the two runs do run two mutant tickets at once, so the count can be two.
+    @Test
+    void twoRunsWithTheToolsBefore116_runTwoMutantTickets() throws Exception {
+        for (var tool : List.of("bb-build", "bb-mutate")) {
+            BbFixtures.executable(tools.resolve(tool), resource(tool + ".pre116.prev"));
+        }
+
+        Files.writeString(tools.resolve("bb-queue-lib.sh"), resource("bb-queue-lib.sh.pre116.prev"));
+        Files.writeString(dir.resolve("max-reactors"), "9\n");
+        Files.writeString(dir.resolve("hold"), "");
+        mutate(tools.resolve("bb-mutate"), "mo", "mo-a", "{\"pl\":\"A\"}", 1);
+        mutate(tools.resolve("bb-mutate"), "mo", "mo-b", "{\"pl\":\"A\"}", 1);
+        assertThat(within(120,
+                          () -> count("running", "mo", "^via=bb-mutate:") == 2)).as(mutateLog("mo-a") + mutateLog("mo-b"))
+                  .isTrue();
     }
 
     private List<String> outcomes(String name) throws Exception {
@@ -490,8 +766,8 @@ class BbMutateOrderIT {
         }
     }
 
-    /// A mutant that waits for the owner's other mutant ticket longer than its own bound is not timed out by it: the bound starts at its own
-    /// Maven start. The other ticket is planted between the control and the first mutant and held for 30 s; the bound is 20 s.
+    /// A mutant ticket that waits for its turn longer than its own bound is not timed out by it: the bound starts at its own start. The other ticket
+    /// of the owner is planted between the control and the first mutant; the bound is 20 s, and the planted one ends once the mutant has waited 30 s.
     @Test
     void theWaitForTheTurn_doesNotCountAgainstTheMutantsBound() throws Exception {
         Files.writeString(dir.resolve("hold"), "");
@@ -502,21 +778,47 @@ class BbMutateOrderIT {
                           env("mo"),
                           dir.resolve("planted.log"));
 
-        Files.writeString(queue.resolve("running/1-planted"),
-                          "id=1-planted\nowner=mo\nco=" + dir
-                         + "/none\ncap=3\ncreated=1\nvia=bb-mutate:spec:other\nargs=run\n");
+        ticket(queue, "running", "1-planted", "mo", true, 1, "cap=3\n");
         Files.delete(dir.resolve("hold"));
-        assertThat(within(120,
-                          () -> mutateLog("mo-a").contains("[m1] waiting for its turn"))).as(mutateLog("mo-a"))
-                  .isTrue();
-        Thread.sleep(30_000);
+        assertThat(within(120, () -> ids("waiting").size() == 1)).as(mutateLog("mo-a")).isTrue();
+        var mutant = ids("waiting").getFirst();
+
+        assertThat(field("waiting", mutant, "bound")).isEqualTo("20");
+        assertThat(within(60,
+                          () -> now() - Long.parseLong(field("waiting", mutant, "created")) > 30 * SECOND)).isTrue();
         assertThat(run.isAlive()).as(mutateLog("mo-a")).isTrue();
         assertThat(ids("running")).containsExactly("1-planted");
-        assertThat(ids("waiting")).isEmpty();
+        assertThat(ids("waiting")).containsExactly(mutant);
         other.destroyForcibly().waitFor();
         assertThat(run.waitFor(180, TimeUnit.SECONDS)).isTrue();
         assertThat(run.exitValue()).as(mutateLog("mo-a")).isZero();
         assertThat(outcomes("mo-a")).containsExactly("m1 RED");
+    }
+
+    /// A control that never started within --timeout ends the run with exit 4 (the queue wait's code, as for a mutant), its ticket gone and nothing run.
+    @Test
+    void aControlThatNeverStarted_exits4() throws Exception {
+        blocker();
+        var run = mutate(tools.resolve("bb-mutate"), "mo", "mo-a", "{\"pl\":\"A\"}", 1, "--timeout", "0.2");
+
+        assertThat(run.waitFor(180, TimeUnit.SECONDS)).isTrue();
+        assertThat(run.exitValue()).as(mutateLog("mo-a")).isEqualTo(4);
+        assertThat(mutateLog("mo-a") + Files.readString(dir.resolve("mo-a.driver.log"))).contains("control ABORT");
+        assertThat(ids("waiting")).isEmpty();
+        assertThat(runs()).containsExactly("blk-1");
+    }
+
+    /// A control that started and overran --timeout is a failed control: exit 2, its build stopped.
+    @Test
+    void aControlThatOverran_exits2() throws Exception {
+        Files.writeString(dir.resolve("hold.mo-a"), "");
+        var run = mutate(tools.resolve("bb-mutate"), "mo", "mo-a", "{\"pl\":\"A\"}", 1, "--timeout", "0.4");
+
+        assertThat(run.waitFor(180, TimeUnit.SECONDS)).isTrue();
+        assertThat(run.exitValue()).as(mutateLog("mo-a")).isEqualTo(2);
+        assertThat(mutateLog("mo-a") + Files.readString(dir.resolve("mo-a.driver.log"))).contains("control TIMEOUT");
+        assertThat(within(60, () -> inCheckout("mo-a").isEmpty())).isTrue();
+        assertThat(runs()).containsExactly("mo-a");
     }
 
     // ---------------------------------------------------------------- proof 2 and 3
@@ -525,16 +827,16 @@ class BbMutateOrderIT {
     @Test
     void aMutantTicket_sortsByItsBatchSubmitTime_aheadOfALaterTicket() throws Exception {
         blocker();
-        var submitted = now();
+        var submitted = submit("mo", "mo-1");
         var ordinary = plain("ord", "ord-1");
         var late = drive("mp", "mp-1").ticket();
-        var early = drive("mo", "mo-1", "BB_ORDER_AT=" + submitted).ticket();
+        var early = enqueue("mo-1", submitted).ticket();
 
         assertThat(lib(tools.resolve("bb-queue-lib.sh"), queue, "order")).isEqualTo(String.join("\n",
                                                                                                 early,
                                                                                                 ordinary,
                                                                                                 late));
-        assertThat(field("waiting", early, "order_at")).isEqualTo(Long.toString(submitted));
+        assertThat(field("waiting", early, "order_at")).isEqualTo(Long.toString(orderAt("mo-1")));
         release("blk-1");
         assertThat(within(120, () -> runs().size() == 4)).isTrue();
         assertThat(runs()).containsExactly("blk-1", "mo-1", "ord-1", "mp-1");
@@ -545,8 +847,9 @@ class BbMutateOrderIT {
     @Test
     void aHigherPriorityTicket_goesBeforeAnEarlierOrderAt() throws Exception {
         blocker();
+        var submitted = submit("mo", "mo-1");
         var ordinary = plain("ord", "ord-1");
-        var mutant = drive("mo", "mo-1", "BB_ORDER_AT=" + (now() - 7200 * SECOND)).ticket();
+        var mutant = enqueue("mo-1", submitted).ticket();
         var vip = plain("vip", "vip-1");
 
         assertThat(lib(tools.resolve("bb-queue-lib.sh"), queue, "order")).isEqualTo(String.join("\n",
@@ -588,7 +891,10 @@ class BbMutateOrderIT {
         sigkill(running.pid());
         sigkill(killed.pid());
         abandoned(killed.ticket(), "mo-1");
-        Thread.sleep(12_000);  // two more polls of every waiter
+        var later = drive("mq", "mq-1");
+
+        sigkill(later.pid());
+        abandoned(later.ticket(), "mq-1");  // a ticket enqueued and dropped after it: the others were tested for a gone driver meanwhile
         assertThat(ids("waiting")).containsExactly(alive.ticket());
         assertThat(ids("running")).containsExactly(running.ticket());
         release("mr-1");
@@ -630,26 +936,148 @@ class BbMutateOrderIT {
         abandoned(drive("mo", "mo-1", "BB_TEST_RESTART_PID=SELF").ticket(), "mo-1");
     }
 
-    // ---------------------------------------------------------------- proof 5 and the bb-mutate-only rule
-    /// Proof 5: an order_at in the future (by an hour, and by a minute) is refused with rc 2 and nothing is queued. Control: the same call with a
-    /// time in the past is queued.
-    @Test
-    void aFutureOrderAt_isRefused_andNothingIsQueued() throws Exception {
-        for (var ahead : List.of(60, 3600)) {
-            var call = drive("mo", "mo-" + ahead, "BB_ORDER_AT=" + (now() + ahead * SECOND));
+    // ---------------------------------------------------------------- the bound
+    /// The processes whose cwd is the checkout.
+    private List<Long> inCheckout(String checkout) {
+        var co = dir.resolve("work/co").resolve(checkout);
 
-            assertThat(call.rc()).as(call.out()).isEqualTo(2);
-            assertThat(call.out()).contains("is in the future");
+        return ProcessHandle.allProcesses()
+                            .map(ProcessHandle::pid)
+                            .filter(pid -> {
+                                try {
+                                    return Files.readSymbolicLink(Path.of("/proc", pid.toString(), "cwd")).equals(co);
+                                } catch (java.io.IOException e) {
+                                    return false;
+                                }
+                            })
+                            .sorted()
+                            .toList();
+    }
+
+    private void endedAtItsBound(String id, String checkout, int bound) throws Exception {
+        assertThat(within(120, () -> in("done", id))).as("ended at its bound").isTrue();
+        assertThat(field("done", id, "state")).isEqualTo("finished");
+        assertThat(field("done", id, "rc")).isEqualTo("124");
+        assertThat(Files.readString(dir.resolve("work/co").resolve(checkout).resolve(".bb/rc")).strip()).isEqualTo("124");
+        assertThat(Files.readString(dir.resolve("work/co").resolve(checkout).resolve(".bb/build.log"))).contains("bound of " + bound + "s reached");
+        hitAtItsBound(id, bound);
+    }
+
+    private void hitAtItsBound(String id, int bound) {
+        assertThat(Long.parseLong(field("done", id, "bound_hit")) - Long.parseLong(field("done", id, "started"))).isBetween((long) bound,
+                                                                                                                           bound + 60L);
+    }
+
+    /// A RUNNING build ends at the bound its ticket carries, and not before, when its driver was killed (-9) and when it lives, with the same verdict. A
+    /// process that only stands in the checkout is not touched. Control: a build with a bound of 600 s whose driver was killed at the same time runs
+    /// on, and finishes 0 with no bound_hit=.
+    @Test
+    void aKilledDriversRunningBuild_endsAtItsBound_andNotBefore() throws Exception {
+        Files.writeString(dir.resolve("max-reactors"), "9\n");
+        Files.writeString(dir.resolve("hold"), "");
+        Files.writeString(dir.resolve("hold.mp-1"), "");
+        var killed = drive("mo", "mo-1", "BB_MUTANT_BOUND=20");
+        var unbounded = drive("mp", "mp-1");
+        var living = drive("mq", "mq-1", "BB_MUTANT_BOUND=20");
+
+        assertThat(within(60, () -> runs().size() == 3)).as(runs().toString()).isTrue();
+        sigkill(killed.pid());
+        sigkill(unbounded.pid());
+        var stands = start(List.of("bash", "-c", "cd \"$1\" && exec sleep 600", "bash", dir.resolve("work/co/mo-1").toString()),
+                           env("mo"),
+                           dir.resolve("stands.log"));
+
+        endedAtItsBound(killed.ticket(), "mo-1", 20);
+        endedAtItsBound(living.ticket(), "mq-1", 20);
+        assertThat(inCheckout("mo-1")).as("only what stands in the checkout is left").containsExactly(stands.pid());
+        assertThat(inCheckout("mq-1")).isEmpty();
+        assertThat(ProcessHandle.of(living.pid())).as("the living driver").isPresent();
+        assertThat(ids("running")).containsExactly(unbounded.ticket());
+        Files.delete(dir.resolve("hold"));
+        release("mp-1");
+        assertThat(within(60, () -> in("done", unbounded.ticket()))).isTrue();
+        assertThat(field("done", unbounded.ticket(), "rc")).isEqualTo("0");
+        assertThat(field("done", unbounded.ticket(), "bound_hit")).isEmpty();
+    }
+
+    /// The bound holds without the waiter too: driver and waiter killed (-9), the build runs on, ends at its bound with .bb/rc 124, and the ticket is
+    /// orphaned by the next reap. Control: after the two kills the build is still running.
+    @Test
+    void aRunningBuildWithoutDriverAndWaiter_endsAtItsBound() throws Exception {
+        Files.writeString(dir.resolve("hold.mo-1"), "");
+        var call = drive("mo", "mo-1", "BB_MUTANT_BOUND=20");
+        var id = call.ticket();
+
+        assertThat(within(60, () -> runs().contains("mo-1"))).isTrue();
+        var waiters = BbFixtures.waiters(id);
+        var waiter = waiters.stream()
+                            .filter(pid -> ProcessHandle.of(pid)
+                                                        .flatMap(ProcessHandle::parent)
+                                                        .filter(parent -> waiters.contains(parent.pid()))
+                                                        .isEmpty())
+                            .toList();
+
+        assertThat(waiter).as("the waiter of " + waiters).hasSize(1);
+        sigkill(call.pid());
+        sigkill(waiter.getFirst());
+        assertThat(in("running", id)).isTrue();
+        assertThat(inCheckout("mo-1")).as("the build runs on").isNotEmpty();
+        assertThat(dir.resolve("work/co/mo-1/.bb/rc")).doesNotExist();
+        assertThat(within(120, () -> Files.exists(dir.resolve("work/co/mo-1/.bb/rc")))).isTrue();
+        assertThat(Files.readString(dir.resolve("work/co/mo-1/.bb/rc")).strip()).isEqualTo("124");
+        assertThat(inCheckout("mo-1")).isEmpty();
+        assertThat(within(60,
+                          () -> unchecked(() -> BbFixtures.waiters(id)).isEmpty())).isTrue();
+        lib(tools.resolve("bb-queue-lib.sh"), queue, "exec 8> \"$Q/.lock\" && flock 8 && reap");
+        assertThat(field("done", id, "state")).isEqualTo("orphaned");
+        hitAtItsBound(id, 20);
+    }
+
+    /// A mutant that hangs past its bound is TIMEOUT in the results of a live bb-mutate, and the run goes on to the next mutant.
+    @Test
+    void aHungMutantOfALiveRun_isTimeout_andTheRunGoesOn() throws Exception {
+        Files.writeString(dir.resolve("hold.mut1"), "");
+        var run = mutate(tools.resolve("bb-mutate"), "mo", "mo-a", "{\"pl\":\"A\",\"mutantTimeoutSecs\":20}", 2);
+
+        assertThat(run.waitFor(240, TimeUnit.SECONDS)).isTrue();
+        assertThat(run.exitValue()).as(mutateLog("mo-a")).isZero();
+        assertThat(outcomes("mo-a")).containsExactly("m1 TIMEOUT", "m2 RED");
+        assertThat(Files.readString(dir.resolve("out-mo-a/results.tsv"))).contains("exceeded 20s from its own Maven start; job killed (counted detected)");
+        assertThat(inCheckout("mo-a")).isEmpty();
+    }
+
+    // ---------------------------------------------------------------- the order_at window and the bb-mutate-only rule
+    /// The call's whole answer to a refusal: rc 2 and one line, so no shell message ("integer expression expected", "value too great") beside it.
+    private static void refusedInOneLine(String row, Call call, String reason) {
+        assertThat(call.rc()).as(row + ": " + call.out()).isEqualTo(2);
+        assertThat(call.out().lines().skip(1).filter(line -> !line.isBlank()).toList()).as(row)
+                  .singleElement()
+                  .asString()
+                  .startsWith("refusing: BB_ORDER_AT")
+                  .contains(reason);
+    }
+
+    /// order_at is accepted from the driver's start to now: 1 ns before its start, a minute ahead and an hour ahead are refused with rc 2 and nothing is
+    /// queued. Control: the driver's start itself is accepted, and so is the time the driver reads for itself (the default of every other row here).
+    @Test
+    void anOrderAtOutsideTheDriversLifetime_isRefused_andNothingIsQueued() throws Exception {
+        refusedInOneLine("before", drive("mo", "mo-0", "BB_ORDER_AT=START-1"), "is before the start of its driver");
+        for (var ahead : List.of(60, 3600)) {
+            refusedInOneLine("ahead " + ahead,
+                             drive("mo", "mo-" + ahead, "BB_ORDER_AT=" + (now() + ahead * SECOND)),
+                             "is in the future");
         }
 
         nothingQueued();
-        assertThat(drive("mo", "mo-1", "BB_ORDER_AT=" + (now() - 60 * SECOND)).rc()).isZero();
+        var accepted = drive("mo", "mo-1", "BB_ORDER_AT=START");
+
+        assertThat(accepted.rc()).as(accepted.out()).isZero();
     }
 
-    /// A malformed order_at is refused with rc 2 and nothing is queued: empty, seconds, a letter, a leading zero, a newline with a second field,
-    /// above 2^63.
+    /// A malformed order_at is refused with rc 2, one line and nothing queued: empty, seconds, a letter, a leading zero, a newline with a second field,
+    /// 20 digits, and above 2^63 (19 digits, so in the future). So is a missing or malformed bound.
     @Test
-    void aMalformedOrderAt_isRefused_andNothingIsQueued() throws Exception {
+    void aMalformedOrderAtOrBound_isRefusedInOneLine_andNothingIsQueued() throws Exception {
         var row = 0;
 
         for (var value : List.of("",
@@ -657,11 +1085,24 @@ class BbMutateOrderIT {
                                  "179000000000000000x",
                                  "0790000000000000000",
                                  "1790000000000000000\npriority=9",
-                                 "9999999999999999999")) {
-            var call = drive("mo", "mo-" + row++, "BB_ORDER_AT=" + value);
+                                 "17900000000000000000")) {
+            refusedInOneLine(value, drive("mo", "mo-" + row++, "BB_ORDER_AT=" + value), "must be epoch nanoseconds");
+        }
 
-            assertThat(call.rc()).as(value + ": " + call.out()).isEqualTo(2);
-            assertThat(call.out()).as(value).contains("refusing: BB_ORDER_AT");
+        refusedInOneLine("2^63", drive("mo", "mo-" + row++, "BB_ORDER_AT=9999999999999999999"), "is in the future");
+        for (var bound : List.of("BB_MUTANT_BOUND",
+                                 "BB_MUTANT_BOUND=",
+                                 "BB_MUTANT_BOUND=0",
+                                 "BB_MUTANT_BOUND=060",
+                                 "BB_MUTANT_BOUND=1.5",
+                                 "BB_MUTANT_BOUND=60\npriority=9",
+                                 "BB_MUTANT_BOUND=1000000",
+                                 "BB_MUTANT_BOUND=99999999999999999999")) {
+            refusedInOneLine(bound, drive("mo", "mo-" + row++, bound), "needs BB_MUTANT_BOUND");
+        }
+
+        for (var number : List.of("BB_DRIVER_PID=9999999999", "BB_DRIVER_START=9999999999999999999", "BB_DRIVER_START=99999999999999999999")) {
+            refusedInOneLine(number, drive("mo", "mo-" + row++, number), "accepted only from bb-mutate");
         }
 
         nothingQueued();
@@ -702,7 +1143,7 @@ class BbMutateOrderIT {
     }
 
     /// order_at and the driver variables stop at the ticket: neither the waiter nor the build inherits them, nor does a build of a call that
-    /// carries only stray BB_DRIVER_* variables. Control: BB_OWNER and BB_VIA, passed the same way, do reach the build.
+    /// carries only stray BB_DRIVER_* and BB_MUTANT_BOUND variables. Control: BB_OWNER and BB_VIA, passed the same way, do reach the build.
     @Test
     void theOrderAndDriverVariables_reachNeitherTheWaiterNorTheBuild() throws Exception {
         Files.writeString(dir.resolve("hold.mo-1"), "");
@@ -713,13 +1154,48 @@ class BbMutateOrderIT {
         var waiterEnv = List.of(Files.readString(Path.of("/proc", waiter.toString(), "environ")).split("\0"));
 
         assertThat(waiterEnv).contains("BB_OWNER=mo", "BB_VIA=bb-mutate:spec:m1");
-        assertThat(waiterEnv).noneMatch(v -> v.startsWith("BB_ORDER_AT") || v.startsWith("BB_DRIVER_"));
+        assertThat(waiterEnv).noneMatch(v -> v.startsWith("BB_ORDER_AT") || v.startsWith("BB_DRIVER_") || v.startsWith("BB_MUTANT_"));
         assertThat(Files.readAllLines(dir.resolve("env.mo-1"))).containsExactlyInAnyOrder("BB_OWNER=mo",
                                                                                           "BB_VIA=bb-mutate:spec:m1");
         release("mo-1");
-        plain("ord", "ord-1", Map.of("BB_DRIVER_PID", "1", "BB_DRIVER_START", "1")).ticket();
+        plain("ord", "ord-1", Map.of("BB_DRIVER_PID", "1", "BB_DRIVER_START", "1", "BB_MUTANT_BOUND", "1")).ticket();
         assertThat(within(60, () -> runs().contains("ord-1"))).isTrue();
         assertThat(Files.readAllLines(dir.resolve("env.ord-1"))).containsExactly("BB_OWNER=ord");
+    }
+
+    /// The install order is lib, bb-build, bb-mutate and the rollback order its reverse, so a host only ever holds these mixes; in none of them does a
+    /// build inherit a mutant variable. Control: the mix the order rules out (a bb-mutate that passes the variables to a bb-build that does not
+    /// take them) does leak.
+    @Test
+    void noMixOfTheInstallOrRollbackOrder_leaksAMutantVariableIntoTheBuild() throws Exception {
+        assertThat(leaked("mo-0", false, false, false)).isEmpty();
+        assertThat(leaked("mo-1", true, false, false)).isEmpty();
+        assertThat(leaked("mo-2", true, true, false)).isEmpty();
+        assertThat(leaked("mo-3", true, true, true)).isEmpty();
+        assertThat(leaked("mo-4", true, false, true)).contains("BB_ORDER_AT", "BB_DRIVER_PID", "BB_DRIVER_START", "BB_MUTANT_BOUND");
+    }
+
+    /// The mutant variables in the environment of the last build of a whole run with each tool new or as before #116.
+    private List<String> leaked(String name, boolean lib, boolean build, boolean mutate) throws Exception {
+        for (var tool : Map.of("bb-queue-lib.sh", lib, "bb-build", build, "bb-mutate", mutate).entrySet()) {
+            BbFixtures.executable(tools.resolve(tool.getKey()),
+                                  tool.getValue()
+                                  ? Files.readString(BbFixtures.OPS_BB.resolve(tool.getKey()))
+                                  : resource(tool.getKey() + ".pre116.prev"));
+        }
+
+        var run = mutate(tools.resolve("bb-mutate"), "mo", name, "{\"pl\":\"A\"}", 1);
+
+        assertThat(run.waitFor(180, TimeUnit.SECONDS)).isTrue();
+        assertThat(run.exitValue()).as(mutateLog(name)).isZero();
+        assertThat(outcomes(name)).containsExactly("m1 RED");
+        assertThat(within(60, () -> ids("running").isEmpty())).isTrue();
+
+        return Files.readAllLines(dir.resolve("env." + name))
+                    .stream()
+                    .map(line -> line.split("=") [0])
+                    .filter(v -> v.matches("BB_(ORDER_AT|DRIVER_.*|MUTANT_.*)"))
+                    .toList();
     }
 
     // ---------------------------------------------------------------- proof 6, created= and proof 7
@@ -727,13 +1203,15 @@ class BbMutateOrderIT {
     @Test
     void createdOfAMutantTicket_isItsTrueEnqueueTime() throws Exception {
         blocker();
-        var orderAt = now() - 7200 * SECOND;
+        var submitted = submit("mo", "mo-1");
         var before = now();
-        var id = drive("mo", "mo-1", "BB_ORDER_AT=" + orderAt).ticket();
+        var id = enqueue("mo-1", submitted).ticket();
         var after = now();
 
+        assertThat(orderAt("mo-1")).isLessThan(before);
+
         assertThat(Long.parseLong(field("waiting", id, "created"))).isBetween(before, after);
-        assertThat(field("waiting", id, "order_at")).isEqualTo(Long.toString(orderAt));
+        assertThat(field("waiting", id, "order_at")).isEqualTo(Long.toString(orderAt("mo-1")));
         assertThat(Long.parseLong(lib(tools.resolve("bb-queue-lib.sh"), queue, "created_s \"$Q/waiting/" + id + "\""))).isBetween(before / SECOND,
                                                                                                                                   after / SECOND);
     }
@@ -753,8 +1231,11 @@ class BbMutateOrderIT {
     @Test
     void orderAt_neverReachesTheLoadStarvationOverride() throws Exception {
         blocker();
-        var id = drive("mo", "mo-1", "BB_ORDER_AT=" + (now() - 7200 * SECOND)).ticket();
-        var real = Files.readString(queue.resolve("waiting").resolve(id));
+        var id = drive("mo", "mo-1").ticket();
+        var real = Files.readString(queue.resolve("waiting").resolve(id)).replaceAll("(?m)^order_at=.*$",
+                                                                                     "order_at=" + (now() - 7200 * SECOND));
+
+        assertThat(real).contains("\norder_at=");
         var root = goldenQueue();
         var ticket = root.resolve("waiting").resolve(id);
 

@@ -1226,6 +1226,38 @@ class BbInstallIT {
         }
     }
 
+    /// #116: the lib goes first, then bb-build, then bb-mutate (the last of all files), and the .bak files put back in the reverse order give back
+    /// the host before the install, so a host only ever holds the mixes [BbMutateOrderIT] pins as free of leaks. The order is read from
+    /// what the install printed, not from FILES.
+    /// Mutation: move bb-mutate before bb-build in FILES -> the order assertion is red.
+    @Test
+    void theLibIsInstalledBeforeBbBuild_andBbMutateLast_andTheReverseRollbackRestoresTheHost() throws Exception {
+        var tools = host("h1");
+        var pins = Map.of("bb-queue-lib.sh", "BB_LIB", "bb-build", "BB_BUILD", "bb-mutate", "BB_MUTATE");
+
+        for (var file : pins.keySet()) {
+            Files.write(tools.resolve(file), prev(file + ".pre116"));
+        }
+
+        var run = install("builder@h1");
+        var order = run.stdout()
+                       .lines()
+                       .filter(line -> line.startsWith("installed "))
+                       .map(line -> line.split(" ") [2])
+                       .toList();
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        assertThat(order.stream().filter(pins::containsKey)).containsExactly("bb-queue-lib.sh", "bb-build", "bb-mutate");
+        assertThat(order.getLast()).isEqualTo("bb-mutate");
+        assertThat(Files.readString(INSTALL).replace("\n#   ", " ")).contains("a rollback from the .bak files goes in the reverse order: bb-mutate, bb-build, lib");
+        for (var file : List.of("bb-mutate", "bb-build", "bb-queue-lib.sh")) {
+            Files.copy(tools.resolve(file + ".bak-" + pin(pins.get(file) + "_PRE116")),
+                       tools.resolve(file),
+                       java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            assertThat(tools.resolve(file)).hasBinaryContent(prev(file + ".pre116"));
+        }
+    }
+
     /// A host after the owner's install-bb-79.sh (#63 + #79: bb-build 2810f93c, bb-portgroup.py and bb-modules.py at main's
     /// values) and still on the pre-#70 bb-result, bb-queue-lib.sh, bb-queue is accepted for every file and is updated.
     /// Mutation: drop BB_BUILD_PRESESSION from accepted_of -> the post-install host is refused, red.

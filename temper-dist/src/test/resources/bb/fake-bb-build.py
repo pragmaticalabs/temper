@@ -6,10 +6,10 @@
 # listed module is mutated (a change in another file breaking this module's test: the #97 cross-file shape).
 # A module's "failN":N makes its first N testcases fail instead of the first one (the #100 truncation shape).
 # Top-level "ignoreFailures":true makes rc 0 although testcases fail (testFailureIgnore).
-# "turnWhen":N makes the call exit 20 (the owner has another mutant ticket, #116), "turns":K times, when exactly N modules are mutated;
 # More scenario keys: "refuseWhen":N makes the call exit 1 (bb-build refused, no build runs) when exactly N modules are mutated;
 # "rcWhen":N forces rc 1 (reports untouched) when exactly N modules are mutated; fault "compileerr" (mutated, tests pass) puts a
 # COMPILATION ERROR into .bb/build.log; fault "hang" (mutated) starts, then never ends (no rc) until its detached child exits;
+# fault "bounded" (mutated) is stopped by bb-build's bound runner: rc 124, no results;
 # fault "nostart" never starts at all. A hung job is a detached child that sleeps 20 s, so bb-mutate must kill the build by its bound.
 # A module with a failed or skipped dependency is skipped; without -fae every module after a failure is.
 import json, os, sys, time
@@ -25,17 +25,17 @@ mutated = [m["name"] for m in sc["modules"] if "MUT" in open(f"{co}/{m['name']}/
 if sc.get("refuseWhen") == len(mutated):
     sys.stderr.write("bb-build: refused\n")
     sys.exit(1)
-if sc.get("turnWhen") == len(mutated):
-    turns = home + "/turns.log"
-    if not os.path.exists(turns) or len(open(turns).readlines()) < sc.get("turns", 1):
-        open(turns, "a").write(os.environ.get("BB_ORDER_AT", "<unset>") + "\n")
-        sys.stderr.write("refusing (rc 20): t already has mutant ticket\n")
-        sys.exit(20)
 faults = [m.get("fault") for m in sc["modules"] if m["name"] in mutated]
 if "nostart" not in faults:
     open(b + "/start", "w").write(str(int(time.time())) + "\n")
 open(home + "/builds.log", "a").write("[" + ",".join(mutated) + "] " + str(fae).lower() + "\n")
+open(home + "/bounds.log", "a").write(os.environ.get("BB_MUTANT_BOUND", "<unset>") + " " + os.environ.get("BB_ORDER_AT", "<unset>") + "\n")
 open(home + "/via.log", "a").write(os.environ.get("BB_VIA", "<unset>") + "\n")
+if "bounded" in faults:
+    open(b + "/end", "w").write(str(int(time.time())) + "\n")
+    open(b + "/rc", "w").write("124\n")
+    print("ticket=T1")
+    sys.exit(0)
 if "hang" in faults or "nostart" in faults:
     print("ticket=T1", flush=True)
     if os.fork():
