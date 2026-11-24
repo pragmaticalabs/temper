@@ -520,6 +520,7 @@ class BbMutateIT {
            set -e
            cd "%s"
            git add -A && git -c user.name=t -c user.email=t@t commit -qm poms
+           git push -q origin HEAD:refs/heads/main && git fetch -q origin
            """.formatted(co));
         buildJson = "{\"pl\":\"B\"}";
         okRcs = List.of(2);
