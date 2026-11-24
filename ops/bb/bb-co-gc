@@ -42,6 +42,7 @@
 # sleeps S seconds (--pace, default 2). The whole live pass is DEFERRED (log `deferred: builds running`, exit 0, nothing read or removed)
 # when ~/work/queue/running holds a ticket with group=1 (the port group) or more than half the host cap (the first 1..999 line of
 # ~/work/max-reactors, else 3) tickets; checked once, at the start of the pass.
+# TEST SEAM: BB_CO_GC_PROC=<dir> replaces /proc (BbCoGcIT's blind rows: a real unreadable process is seen by every concurrent run on the host).
 # OWNER INSTALL STEPS (not code): the timer units need `loginctl enable-linger aether` (root, once per host): with Linger=no the user manager
 # stops at the last logout, which pauses the timers and SIGTERMs a run between its mv and its rm (the leftovers above exist for that).
 # FOLLOW-UP (not here): bb-temper should name the co-gc.log REMOVED line when a checkout it was given has vanished (today: `cd: ... No such file`).
@@ -98,11 +99,12 @@ Q=$WORK/queue
 TLOG=$WORK/bb-ticket-log.tsv
 LOG=$WORK/co-gc.log
 LOCK=$WORK/.co-gc.lock
+PROC=${BB_CO_GC_PROC:-/proc}   # TEST ONLY: BbCoGcIT's blind rows point it at a fake tree (a real unreadable process would show to every concurrent run on the host)
 QLOCK=$Q/.lock
 MAXREACT=$WORK/max-reactors
 
 # ---- preconditions (read-only)
-[ -d /proc/self ] || die 65 "no /proc: the process guard cannot run (Linux only)"
+[ -d "$PROC/self" ] || die 65 "no $PROC: the process guard cannot run (Linux only)"
 [ "$LIVE" = 0 ] || command -v flock > /dev/null 2>&1 || die 65 "flock is not installed"
 [ -d "$CO" ] || die 65 "$CO is not a directory"
 CO_REAL=$(cd -P "$CO" && pwd -P)
@@ -146,7 +148,7 @@ log_activity() {
 proc_paths() {
   local d me uid st
   me=$(id -u)
-  for d in /proc/[0-9]*; do
+  for d in "$PROC"/[0-9]*; do
     if readlink -- "$d/cwd" 2> /dev/null; then
       readlink -- "$d/exe" "$d"/fd/* 2> /dev/null || true
     else
@@ -154,7 +156,7 @@ proc_paths() {
       uid=$(stat -c %u -- "$d" 2> /dev/null) || continue
       [ "$uid" = "$me" ] || continue                           # another user's process, kernel threads included
       st=$(sed 's/^.*) //; s/ .*//' "$d/stat" 2> /dev/null) || continue
-      [ -z "$st" ] || [ "$st" = Z ] || echo "BLIND:${d#/proc/}"
+      [ -z "$st" ] || [ "$st" = Z ] || echo "BLIND:${d#"$PROC"/}"
     fi
   done
 }
@@ -165,9 +167,9 @@ scan() {
   BLIND=$(grep -c '^BLIND:' <<< "$SCAN" || true)
   BLIND_BAD=0   # blind processes whose comm is not allowlisted (one that exited meanwhile is no longer blind)
   for p in $(sed -n 's/^BLIND://p' <<< "$SCAN"); do
-    [ -e "/proc/$p" ] || continue
-    c=$(cat -- "/proc/$p/comm" 2> /dev/null) || c=
-    [ -e "/proc/$p" ] || continue
+    [ -e "$PROC/$p" ] || continue
+    c=$(cat -- "$PROC/$p/comm" 2> /dev/null) || c=
+    [ -e "$PROC/$p" ] || continue
     case $c in sshd|systemd|'(sd-pam)') ;; *) BLIND_BAD=$((BLIND_BAD + 1)) ;; esac
   done
   PROC_NAMES=$(awk -v a="$CO_REAL/" -v b="$CO/" '

@@ -84,21 +84,26 @@ class BbCoGcIT {
                          + "\n");
     }
 
-    /// A process of this user that cannot be read (prctl DUMPABLE=0: its /proc/<pid>/cwd is root-owned), named `comm`. Skips the row where it is readable.
-    private Process blindProcess(String comm) throws Exception {
-        var py = new ProcessBuilder("python3",
-                                    "-c",
-                                    "import ctypes,sys,time\nl=ctypes.CDLL(None)\nl.prctl(4,0,0,0,0)\nl.prctl(15,sys.argv[1].encode(),0,0,0)\nprint('up',flush=True)\ntime.sleep(120)",
-                                    comm).directory(home.toFile())
-                                         .redirectErrorStream(true)
-                                         .start();
-        var up = new java.io.BufferedReader(new java.io.InputStreamReader(py.getInputStream())).readLine();
+    /// A fake /proc (BB_CO_GC_PROC) holding one process of this user whose cwd cannot be read, named `comm`: no cwd entry, as for a dumpable=0
+    /// process. A REAL unreadable process would be seen by every concurrent run on the host (the first version of these rows failed that way).
+    private Map<String, String> fakeProcWithBlindProcess(String comm) throws IOException {
+        var proc = home.resolve("fakeproc");
+        var pid = proc.resolve("4242");
 
-        assumeTrue("up".equals(up), "python3 with ctypes is needed for the blind-process rows");
-        assumeTrue(!Files.isReadable(Path.of("/proc/" + py.pid() + "/cwd")),
-                   "a dumpable=0 process must be unreadable to this user");
+        Files.createDirectories(proc.resolve("self"));
+        Files.createDirectories(pid);
+        Files.writeString(pid.resolve("comm"), comm + "\n");
+        Files.writeString(pid.resolve("stat"), "4242 (" + comm + ") S 1 4242 4242 0 -1\n");
 
-        return py;
+        return Map.of("BB_CO_GC_PROC", proc.toString());
+    }
+
+    private BbFixtures.Outcome liveWith(Map<String, String> env) throws Exception {
+        var run = gcWith(env, "--live", "--days", "3", "--pace", "0");
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+
+        return run;
     }
 
     private static void stop(Process p) throws InterruptedException {
@@ -388,20 +393,14 @@ class BbCoGcIT {
         skeleton();
         var victim = checkout("victim", 10);
         var control = checkout("control", 10);
-        var blind = blindProcess("rogue");
+        var run = liveWith(fakeProcWithBlindProcess("rogue"));
 
-        try {
-            var run = live();
-
-            assertThat(victim.resolve("module/target/payload.bin")).as(run.stdout()).exists();
-            assertThat(control.resolve("module/target/payload.bin")).as(run.stdout()).exists();
-            assertThat(run.stdout()).contains("keep victim reasons=blind ",
-                                              "keep control reasons=blind ",
-                                              "unlisted-blind=1")
-                      .doesNotContain("\nremoved ", "removed control ", "removed victim ");
-        } finally {
-            stop(blind);
-        }
+        assertThat(victim.resolve("module/target/payload.bin")).as(run.stdout()).exists();
+        assertThat(control.resolve("module/target/payload.bin")).as(run.stdout()).exists();
+        assertThat(run.stdout()).contains("keep victim reasons=blind ",
+                                          "keep control reasons=blind ",
+                                          "blind=1 unlisted-blind=1")
+                  .doesNotContain("\nremoved ", "removed control ", "removed victim ");
     }
 
     /// The allowlist is the whole difference: the same unreadable process named `sshd` (a login's session monitor) keeps nothing.
@@ -409,16 +408,10 @@ class BbCoGcIT {
     void aBlindProcessOnTheAllowlist_keepsNothing() throws Exception {
         skeleton();
         var control = checkout("control", 10);
-        var blind = blindProcess("sshd");
+        var run = liveWith(fakeProcWithBlindProcess("sshd"));
 
-        try {
-            var run = live();
-
-            assertThat(control).as(run.stdout()).doesNotExist();
-            assertThat(run.stdout()).contains("removed control ", "unlisted-blind=0").containsPattern("blind=[1-9]");
-        } finally {
-            stop(blind);
-        }
+        assertThat(control).as(run.stdout()).doesNotExist();
+        assertThat(run.stdout()).contains("removed control ", "blind=1 unlisted-blind=0");
     }
 
     /// Finding 2: a leftover .gc dir gets the second look of a fresh move: keep, queued and a ticket each send it back to its name; none is removed.
