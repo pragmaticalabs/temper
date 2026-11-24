@@ -38,6 +38,10 @@ class BbCoGcIT {
     @TempDir
     Path home;
 
+    /// The fake /proc trees live here, outside `home`, so a row that snapshots `home` (dry_changesNothing) sees only what the tool did.
+    @TempDir
+    Path procRoot;
+
     private Path co() {
         return home.resolve("work/co");
     }
@@ -87,7 +91,7 @@ class BbCoGcIT {
     /// A fake /proc (BB_CO_GC_PROC) holding one process of this user whose cwd cannot be read, named `comm`: no cwd entry, as for a dumpable=0
     /// process. A REAL unreadable process would be seen by every concurrent run on the host (the first version of these rows failed that way).
     private Map<String, String> fakeProcWithBlindProcess(String comm) throws IOException {
-        var proc = home.resolve("fakeproc");
+        var proc = procRoot.resolve("fakeproc");
         var pid = proc.resolve("4242");
 
         Files.createDirectories(proc.resolve("self"));
@@ -101,7 +105,7 @@ class BbCoGcIT {
     /// A fake /proc holding `self` (the tool's precondition) and nothing else, so no process of the host this test runs on (a gpg-agent whose cwd
     /// is unreadable made every candidate `blind` on bigboy, 2026-11-25) reaches the guard. Every row gets this unless it names its own tree.
     private Path fakeProc() throws IOException {
-        var proc = home.resolve("fakeproc-none");
+        var proc = procRoot.resolve("fakeproc-none");
 
         Files.createDirectories(proc.resolve("self"));
 
@@ -112,7 +116,7 @@ class BbCoGcIT {
     /// first thing guard 3 reads (the tool then also reads exe and fd/*, absent here, which it tolerates). The mapping is the test's own claim
     /// about its child; the assert on `isAlive` and the process's real cwd are in the row.
     private Path fakeProcWithCwd(Map<Long, Path> cwdOf) throws IOException {
-        var proc = home.resolve("fakeproc-cwd");
+        var proc = procRoot.resolve("fakeproc-cwd");
 
         Files.createDirectories(proc.resolve("self"));
 
