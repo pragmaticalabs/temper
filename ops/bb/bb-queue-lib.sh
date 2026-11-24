@@ -180,12 +180,15 @@ prio() {
     END { print (best == "" ? 0 : best) }' "$PRIO" 2>/dev/null || echo 0
 }
 
-# order: waiting ticket ids, grant order first (priority desc, then enqueue time asc).
+# order: waiting ticket ids, grant order first (priority desc, then enqueue time asc; a mutant ticket's enqueue time is its order_at=, MUTANT
+# TICKETS in bb-build's header, #116). This is the ONLY reader of order_at=: created= stays the true enqueue time, and created_s (hence
+# pick's load-starvation override and the ticket log's wait_s) reads created= alone. No (or a non-numeric) order_at= means created=.
 order() {
   local f
   for f in "$Q"/waiting/*; do
     [ -f "$f" ] || continue
-    printf '%s %s %s\n' "$(prio "$(field "$f" owner)" "$(field "$f" sha)")" "$(field "$f" created | grep -x '[0-9][0-9]*' || echo 0)" "${f##*/}"
+    printf '%s %s %s\n' "$(prio "$(field "$f" owner)" "$(field "$f" sha)")" \
+      "$(field "$f" order_at | grep -x '[0-9][0-9]*' || field "$f" created | grep -x '[0-9][0-9]*' || echo 0)" "${f##*/}"
   done | sort -k1,1nr -k2,2n -k3,3 | awk '{print $3}'
 }
 
@@ -253,6 +256,41 @@ never_started() {
   echo "bb-build: maven never started: $3" > "$B/build.log"; rm -f "$B/queued"; write_rc "$B" "$2"
 }
 
+# abandon <waiting ticket file> <reason> (under lock): a waiting ticket that will never run goes to done/ as state=abandoned; its checkout,
+# when .bb/queued still names the ticket, gets rc 9 (never_started), as for a cancel. Used by reap (waiter gone) and the waiter (driver gone).
+abandon() {
+  local id=${1##*/} co; co=$(field "$1" co)
+  [ "$(cat "$co/.bb/queued" 2>/dev/null)" = "$id" ] && never_started "$co" 9 "ticket $id abandoned ($2)"
+  printf 'state=abandoned\nended=%s\n' "$(date +%s)" >> "$1"; to_done "$1"
+}
+# driver_gone <ticket file>: 0 when the ticket names a driver (driver_pid= and driver_start=, MUTANT TICKETS in bb-build's header) and that
+# process no longer exists: no such pid, a zombie, or the pid now has another start time (a recycled pid). 1 for a ticket without a
+# driver, and for a stat that cannot be read (not evidence of a death; the next poll decides).
+driver_gone() {
+  local p s now; p=$(field "$1" driver_pid); s=$(field "$1" driver_start)
+  [ -n "$p" ] && [ -n "$s" ] || return 1
+  [ -e "/proc/$p/stat" ] || return 0
+  now=$(pstart_now "$p"); [ -n "$now" ] || return 1
+  [ "$now" = "$s" ] || return 0
+  case "$(sed 's/^.*) //; s/ .*//' "/proc/$p/stat" 2>/dev/null)" in Z|X) return 0;; esac
+  return 1
+}
+# mutate_driver <pid> <start>: 0 when <pid> runs with start time <start>, its command line is `python* [-opts] .../bb-mutate ...`, and it is an
+# ANCESTOR of the calling bb-build (so naming someone else's running driver is refused).
+mutate_driver() {
+  local p=$PPID a=; local -a argv=()
+  proc_live "$1" && [ "$(pstart "$1")" = "$2" ] || return 1
+  mapfile -d '' -t argv 2>/dev/null < "/proc/$1/cmdline" || return 1
+  case "${argv[0]-}" in python*|*/python*) ;; *) return 1;; esac
+  for a in "${argv[@]:1}"; do case "$a" in -*) ;; *) break;; esac; done
+  [ "${a##*/}" = bb-mutate ] || return 1
+  while [ "${p:-0}" -gt 1 ]; do
+    [ "$p" = "$1" ] && return 0
+    p=$(sed 's/^.*) //' "/proc/$p/stat" 2>/dev/null | cut -d' ' -f2)
+  done
+  return 1
+}
+
 # reap (under lock): tickets whose waiter is gone, or (waiting) whose checkout directory is gone. Waiting -> abandoned (rc 9 written for the poller).
 # Running -> orphaned (no rc, whatever .bb/rc holds). A running ticket whose waiter died but whose maven still runs in
 # its checkout stays running (it still holds its reactor slot and, if group=1, the port group) until maven exits.
@@ -274,8 +312,7 @@ reap() {
       printf 'state=abandoned\nended=%s\n' "$(date +%s)" >> "$f"; to_done "$f"; continue
     fi
     waiter_alive "$id" && continue
-    [ "$(cat "$co/.bb/queued" 2>/dev/null)" = "$id" ] && never_started "$co" 9 "ticket $id abandoned (waiter process gone)"
-    printf 'state=abandoned\nended=%s\n' "$(date +%s)" >> "$f"; to_done "$f"
+    abandon "$f" "waiter process gone"
   done
   for f in "$Q"/running/*; do
     [ -f "$f" ] || continue; id=${f##*/}; waiter_alive "$id" && continue
