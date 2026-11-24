@@ -570,6 +570,28 @@ class BbDriftIT {
                                                                   "ok builder@h1 21 files");
     }
 
+    /// The header's `repo-sourced` class line names the same files as HOST_FILES, which is what the tool compares: a tool added to (or dropped
+    /// from) one and not the other leaves the documentation lying about what is checked.
+    @Test
+    void theHeaderOfTheRepoSourcedClass_namesExactlyTheHostFiles() throws Exception {
+        var script = Files.readString(DRIFT);
+        var array = Pattern.compile("^HOST_FILES=\\(([^)]*)\\)", Pattern.MULTILINE).matcher(script);
+        var header = Pattern.compile("^#\\s+repo-sourced\\s+(.*?): compared", Pattern.MULTILINE).matcher(script);
+
+        assertThat(array.find()).as("HOST_FILES array").isTrue();
+        assertThat(header.find()).as("repo-sourced header line").isTrue();
+        var listed = Set.of(array.group(1).trim().split("\\s+"));
+        var documented = Stream.of(header.group(1).replaceAll("\\([^)]*\\)", "").split("[\\s,]+"))
+                               .filter(t -> !t.isEmpty())
+                               .collect(Collectors.toSet());
+
+        // bb-modules.py is in HOST_FILES but absent from the header (a documentation gap found 2026-11-25, left as is: this change touches no
+        // ops/bb file); naming it in the header later keeps this row green.
+        var withKnownGap = Stream.concat(documented.stream(), Stream.of("bb-modules.py")).collect(Collectors.toSet());
+
+        assertThat(withKnownGap).isEqualTo(listed);
+    }
+
     /// The host-only tools: the pin table is exactly the 4 names of the 2026-11-09 snapshot that are not vendored yet, at its md5s (bb-hold and
     /// bb-portgroup.py, then bb-checkout, moved to the repo-sourced class on 2026-11-11; the rest follow in a later PR, and this class then goes away).
     @Test
