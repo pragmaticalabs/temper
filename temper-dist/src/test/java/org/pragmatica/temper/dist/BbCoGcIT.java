@@ -1146,6 +1146,224 @@ class BbCoGcIT {
                                                                                               .findFirst().orElseThrow() + " owner=- days=3");
     }
 
+    // ---- leftovers (G3)
+    /// An `id` stub that records, at every call, whether the queue lock is free. The tool calls `id -u` at the start of each /proc scan and
+    /// documents that it never holds the queue lock across a scan: every probe must say `free`. Returns the probe log.
+    private Path probeTheQueueLockAtEveryScan() throws IOException {
+        var probes = procRoot.resolve("probes.log");
+
+        stub("id", "if flock -n @Q@/.lock true 2> /dev/null; then echo free; else echo busy; fi >> " + probes + "\nexec id \"$@\"\n");
+
+        return probes;
+    }
+
+    private void assertEveryProbeFree(Path probes, int atLeast) throws IOException {
+        var seen = Files.exists(probes) ? Files.readAllLines(probes) : List.<String>of();
+
+        assertThat(seen).as("the queue lock at each scan").hasSizeGreaterThanOrEqualTo(atLeast).containsOnly("free");
+    }
+
+    /// A leftover that is a symlink, a dangling symlink or a plain file is skipped, with its name, and never followed, restored or removed.
+    /// Mutation g3: the check dropped, `rm -rf` takes the link and the file away.
+    @Test
+    void aLeftoverThatIsNotADirectory_isSkippedAndNeverTouched() throws Exception {
+        skeleton();
+        var target = Files.move(checkout("target", 10), home.resolve("elsewhere"));
+        var link = Files.createSymbolicLink(co().resolve(".gc-1700000000-lnk"), target);
+        var dangling = Files.createSymbolicLink(co().resolve(".gc-1700000000-dangling"), home.resolve("nothing"));
+        var file = Files.writeString(co().resolve(".gc-1700000000-file"), "x");
+        var before = snapshot(target);
+        var run = live();
+
+        assertThat(Files.isSymbolicLink(link)).as(run.stdout()).isTrue();
+        assertThat(Files.isSymbolicLink(dangling)).as(run.stdout()).isTrue();
+        assertThat(file).exists();
+        assertThat(snapshot(target)).isEqualTo(before);
+        assertThat(run.stdout()).contains("leftover-skipped .gc-1700000000-lnk reason=not-a-directory",
+                                          "leftover-skipped .gc-1700000000-dangling reason=not-a-directory",
+                                          "leftover-skipped .gc-1700000000-file reason=not-a-directory")
+                  .doesNotContain("leftover-removed");
+    }
+
+    /// Only `.gc-<digits...>-<name>` is a leftover: a directory that merely starts with `.gc-` is somebody's and stays, and so does one whose
+    /// name has a character outside [A-Za-z0-9._-]. Mutations g4 (glob `.gc-*`) and g6 (the name-class check dropped): both are removed.
+    @Test
+    void aDirectoryThatOnlyLooksLikeALeftover_isLeftAlone() throws Exception {
+        skeleton();
+        var notes = Files.createDirectories(co().resolve(".gc-notes/module"));
+        var odd = Files.createDirectories(co().resolve(".gc-1700000000-has space/module"));
+
+        Files.writeString(notes.resolve("payload.bin"), "x");
+        Files.writeString(odd.resolve("payload.bin"), "x");
+        var run = live();
+
+        assertThat(notes.resolve("payload.bin")).as(run.stdout()).exists();
+        assertThat(odd.resolve("payload.bin")).as(run.stdout()).exists();
+        assertThat(run.stdout()).doesNotContain("leftover");
+        assertThat(Files.readString(home.resolve("work/co-gc.log"))).doesNotContain("LEFTOVER");
+    }
+
+    /// A leftover whose name has nothing after `.gc-<epoch>-` has no original name to go back to and is not checked against any ticket: kept in
+    /// place, logged, never removed. Mutation n52: the reason dropped, it is removed.
+    @Test
+    void aLeftoverWithoutAnOriginalName_staysInPlace() throws Exception {
+        skeleton();
+        var nameless = Files.createDirectories(co().resolve(".gc-1700000000-/module"));
+
+        Files.writeString(nameless.resolve("payload.bin"), "x");
+        var run = live();
+
+        assertThat(nameless.resolve("payload.bin")).as(run.stdout()).exists();
+        assertThat(run.stdout()).contains("leftover-kept .gc-1700000000- reasons=no-original-name (stays in place; never removed)");
+        assertLogHas("LEFTOVER-KEPT path=" + co().toRealPath() + "/.gc-1700000000- reasons=no-original-name");
+    }
+
+    /// A held leftover whose name is a DANGLING symlink cannot go back either (`-e` is false for it, `-L` is not): it stays, rc 0, logged.
+    /// Mutation n56: only `-e` is tested, the move-back is tried onto the link, fails, and the run ends 74 with RESTORE-FAILED.
+    @Test
+    void aHeldLeftoverWhoseNameIsADanglingSymlink_staysInPlace() throws Exception {
+        skeleton();
+        var leftover = Files.move(checkout("dup", 10), co().resolve(".gc-1700000000-dup"));
+
+        Files.writeString(leftover.resolve(".bb/keep"), "");
+        var link = Files.createSymbolicLink(co().resolve("dup"), home.resolve("nothing"));
+        var run = live();
+
+        assertThat(leftover.resolve("module/target/payload.bin")).as(run.stdout()).exists();
+        assertThat(Files.isSymbolicLink(link)).isTrue();
+        assertThat(run.stdout()).contains("leftover-kept .gc-1700000000-dup reasons=keep-file (stays in place; never removed)")
+                  .doesNotContain("restore failed");
+        assertLogHas("LEFTOVER-KEPT path=" + co().toRealPath() + "/.gc-1700000000-dup reasons=keep-file");
+    }
+
+    /// A move-back that fails is a failure: logged LEFTOVER-RESTORE-FAILED, said as such, counted in the total, and the run ends 74. The leftover
+    /// stays where it is. (A stub `mv` refuses every move that does not make a .gc-* directory.) Mutation n59: the failure is not counted, rc 0.
+    @Test
+    void aFailedMoveBackOfAHeldLeftover_isAFailure() throws Exception {
+        skeleton();
+        var leftover = Files.move(checkout("held", 10), co().resolve(".gc-1700000000-held"));
+
+        Files.writeString(leftover.resolve(".bb/keep"), "");
+        stub("mv", """
+                   for a; do dst=$a; done
+                   case ${dst##*/} in .gc-*) exec mv "$@" ;; esac
+                   exit 1
+                   """);
+        var run = gcWith(stubbed(), "--live", "--days", "3", "--pace", "0");
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isEqualTo(74);
+        assertThat(leftover.resolve("module/target/payload.bin")).exists();
+        assertThat(co().resolve("held")).doesNotExist();
+        assertThat(run.stdout()).contains("leftover-kept .gc-1700000000-held reasons=keep-file (restore failed)", "failed 1,");
+        assertLogHas("LEFTOVER-RESTORE-FAILED path=" + co().toRealPath() + "/.gc-1700000000-held to=" + co().toRealPath() + "/held reasons=keep-file");
+    }
+
+    /// A leftover whose turn finds the queue lock busy is SKIPPED, not removed and not a failure: said, logged and counted. (A stub `flock -w`
+    /// answers busy at once, the wait itself is the row of aQueueLockHeldPastTheWait.) Mutations n49 (the lock is optional: the leftover is
+    /// removed unlocked) and n50 (the skip is not counted).
+    @Test
+    void aLeftoverWhoseQueueLockIsBusy_isSkippedAndCounted() throws Exception {
+        skeleton();
+        var leftover = Files.move(checkout("busy", 10), co().resolve(".gc-1700000000-busy"));
+
+        stub("flock", """
+                      case "$1" in -w) exit 1 ;; esac
+                      exec flock "$@"
+                      """);
+        var run = liveWith(stubbed());
+
+        assertThat(leftover.resolve("module/target/payload.bin")).as(run.stdout()).exists();
+        assertThat(run.stdout()).contains("leftover-skipped .gc-1700000000-busy reason=queue-lock-busy", "skipped 1,");
+        assertLogHas("SKIP path=" + co().toRealPath() + "/.gc-1700000000-busy reason=queue-lock-busy");
+        assertLogHas("skipped=1 kept=0 blind=0 unlisted_blind=0");
+    }
+
+    /// DRY says where a held leftover would go or stay but writes nothing: no log, no lock file, not even for a leftover that stays.
+    /// Mutation n61: the LEFTOVER-KEPT log line is written in DRY too.
+    @Test
+    void dry_aHeldLeftoverWhoseNameIsTaken_isSaidButNotLogged() throws Exception {
+        skeleton();
+        var leftover = Files.move(checkout("dup", 10), co().resolve(".gc-1700000000-dup"));
+
+        Files.writeString(leftover.resolve(".bb/keep"), "");
+        checkout("dup", 1);
+        var run = gc();
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        assertThat(run.stdout()).contains("leftover-kept .gc-1700000000-dup reasons=keep-file (stays in place; never removed)");
+        assertThat(home.resolve("work/co-gc.log")).doesNotExist();
+        assertThat(home.resolve("work/.co-gc.lock")).doesNotExist();
+    }
+
+    /// The queue lock is let go at the end of every leftover's turn, whatever came of it: a held leftover that goes back, a removed leftover, then
+    /// a candidate, each starts its /proc scan with the lock free. Mutations n54 (no release after a removable leftover) and n62 (none at the end
+    /// of a held one) leave it held across the next scan.
+    @Test
+    void theQueueLock_isFreeAtEveryScan_afterLeftovers() throws Exception {
+        skeleton();
+        var held = Files.move(checkout("a-held", 10), co().resolve(".gc-1700000000-a-held"));
+        var plain = Files.move(checkout("b-plain", 10), co().resolve(".gc-1700000000-b-plain"));
+
+        Files.writeString(held.resolve(".bb/keep"), "");
+        var control = checkout("control", 10);
+        var probes = probeTheQueueLockAtEveryScan();
+        var run = liveWith(stubbed());
+
+        assertThat(plain).as(run.stdout()).doesNotExist();
+        assertThat(control).doesNotExist();
+        assertThat(co().resolve("a-held/module/target/payload.bin")).exists();
+        assertEveryProbeFree(probes, 4);
+    }
+
+    // ---- run exclusion (G4)
+    /// Starts a child that holds `flock` on `lock` until `release` exists; returns once it holds it (polled, 5 s bound, no sleep as synchronisation).
+    private Process holdFlock(Path lock, Path release) throws Exception {
+        var held = lock.resolveSibling(lock.getFileName() + ".held");
+        var holder = BbFixtures.process("flock", lock.toString(), "sh", "-c", "touch " + held + "; while [ ! -e " + release + " ]; do sleep 0.1; done").start();
+
+        for (var i = 0; i < 100 && !Files.exists(held); i++) {
+            Thread.sleep(50);
+        }
+
+        assertThat(held).as("control: the flock child holds " + lock).exists();
+
+        return holder;
+    }
+
+    /// Two --live runs never overlap: while another run holds ~/work/.co-gc.lock a live run exits 75 at once, before the deferral check, before
+    /// its log line, and removes nothing; a DRY run takes no lock and still reads; once the holder lets go the same run removes.
+    /// Mutations k-lock-off and l3 (no lock taken: the run removes, or is deferred with 0 instead of 75), k-lock-rc (exit 1).
+    @Test
+    void aSecondLiveRun_exitsWith75_whileTheRunLockIsHeld() throws Exception {
+        skeleton();
+        var idle = checkout("idle", 10);
+        var release = home.resolve("release");
+        var holder = holdFlock(home.resolve("work/.co-gc.lock"), release);
+
+        try {
+            var run = gc("--live", "--days", "3", "--pace", "0");
+
+            assertThat(run.rc()).as(run.stdout() + run.stderr()).isEqualTo(75);
+            assertThat(run.stderr()).contains("another run holds");
+            assertThat(idle.resolve("module/target/payload.bin")).exists();
+            assertThat(home.resolve("work/co-gc.log")).doesNotExist();
+            ticket("running", "r1", "busy", "group=1");
+            var deferred = gc("--live", "--days", "3", "--pace", "0");
+
+            assertThat(deferred.rc()).as("the lock comes before the deferral check\n" + deferred.stdout() + deferred.stderr()).isEqualTo(75);
+            assertThat(deferred.stdout()).doesNotContain("deferred");
+            assertThat(gc("--days", "3").rc()).as("DRY takes no lock").isZero();
+            Files.delete(home.resolve("work/queue/running/r1"));
+        } finally {
+            Files.writeString(release, "go");
+            stop(holder);
+        }
+
+        var later = live();
+
+        assertThat(idle).as(later.stdout()).doesNotExist();
+    }
+
     // ---- snapshot
     /// path -> type, size, mtime, link target; directories included (a removed or created entry changes its parent's mtime too).
     private static TreeMap<String, String> snapshot(Path root) throws IOException {
