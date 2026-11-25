@@ -101,6 +101,12 @@ class BbCheckoutLockIT {
             p.descendants().forEach(ProcessHandle::destroyForcibly);
             p.destroyForcibly();
         }
+        // a row that failed before it released its parked git (a mutant run does that on purpose) must not leave it behind: an orphan is
+        // reparented to init, so only its handle reaches it, and a shim parks until a file appears that a failed row never wrote
+        for (var handle : orphans) {
+            handle.descendants().forEach(ProcessHandle::destroyForcibly);
+            handle.destroyForcibly();
+        }
         for (var handle : orphans) {
             handle.onExit().get(60, TimeUnit.SECONDS);
         }
