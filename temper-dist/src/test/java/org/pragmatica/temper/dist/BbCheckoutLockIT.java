@@ -407,6 +407,8 @@ class BbCheckoutLockIT {
         var stderrLines = next.stderrLines();
 
         left.forEach(f -> assertThat(stderrLines).as("listed: " + f).anyMatch(l -> l.contains(f)));
+        assertThat(next.stderr()).contains("only when no fetch is running",
+                                           "flock " + home.resolve("work/pragmatica.git.lock") + " find " + home.resolve("work/pragmatica.git"));
         assertThat(lockFiles()).as("the script deleted none of them").isEqualTo(left);
         assertThat(Files.exists(co("s1-b"))).isFalse();
         var operator = BbFixtures.run(List.of("find", home.resolve("work/pragmatica.git").toString(), "-name", "*.lock", "-type", "f", "-delete"),
