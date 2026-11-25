@@ -9,7 +9,7 @@
 # 7 identical build running/queued elsewhere; 8 identical build already finished (paths printed); 19 BB_QUEUE=0 with a counted selector
 # (ZERO-TESTCASE REFUSAL); 10 -Dtest without
 # -Dit.test on forge-tests (failsafe ignores -Dtest); 11 -pl without -am/-amd, a lifecycle phase at or after `compile`, and a reactor module the run resolves not installed (UNINSTALLED SIBLING, below). BB_DEDUP=0
-# skips dedup. DEDUP IDENTITY (#80, 2026-11-21): a finished identical build is still the checkout's result only while .bb/ticket names ITS ticket (not while
+# skips dedup; a bb-mutate call (BB_VIA bb-mutate:*) has no dedup key, so nothing dedups onto its ticket either. DEDUP IDENTITY (#80, 2026-11-21): a finished identical build is still the checkout's result only while .bb/ticket names ITS ticket (not while
 # .bb/start equals its started=: two runs granted in one second shared a start, and dedup answered with the newer run's result). A checkout with no
 # .bb/ticket (run before this change) is not current: no dedup, the safe direction. BB_QUEUE=0 runs the pre-queue script (bb-build-direct) -- it also bypasses the port group -- after removing .bb/ticket (that run writes .bb/start only, so an older ticket must not stay current).
 # PORT GROUP (2026-09-29): a run that will execute tests of a fixed-port module (~/work/port-group-modules; decided by
@@ -39,7 +39,8 @@
 #     later-created tickets only of runs that started before c: at most one at a time per owner, and in all at most the builds such a run
 #     still has (control + mutants + batch re-runs). No time bound, and blocked_since= does not limit it.
 #   ACCEPTED ONLY when ALL hold, else call rc 2 and nothing queued: BB_ORDER_AT is 19 digits, not later than now and not earlier than the driver's
-#     start (start_ns: up to 1 s of slack; a forward step of the wall clock by more during a run refuses its later builds); BB_VIA matches
+#     start (start_ns: up to 1 s of slack; a forward step of the wall clock by more during a run refuses its later builds ("before the start of its driver"),
+#     and so does a BACKWARD step by more than the run's age, the time since its BB_ORDER_AT ("is in the future"): rc 2 for each later call until the clock is back); BB_VIA matches
 #     ^bb-mutate:[A-Za-z0-9._-]{1,20}:[A-Za-z0-9._-]+$; BB_MUTANT_BOUND is 1 to 6 digits, not 0; the driver pid runs with that start time, its
 #     command line is `python* .../bb-mutate` and it is an ancestor process of this call. WHAT THAT DOES NOT COVER: BB_VIA alone is an env
 #     value anyone can set (such a ticket takes turns with its owner's, no more); the driver check ties the call to a live process NAMED
@@ -53,7 +54,10 @@
 #     bound; one test a second; plus a wait for the queue lock). Then TERM after one /proc scan, KILL 5 s later to what ignores it, two more scans,
 #     .bb/rc: measured 4 to 8 s after bound_hit=, 9 to 10 s for a job that ignores TERM (300 processes on the host; a scan grows with them,
 #     and a stop that left survivors is retried, so there is no fixed upper limit).
-#     A runner outlives its waiter; NOT COVERED: the runner itself killed, and tickets without bound= (a bb-mutate of before #116).
+#     A runner outlives its waiter; NOT COVERED: the runner itself killed, and tickets without bound= (a bb-mutate of before #116). A ticket still WAITING
+#     when bb-build is rolled back (the installer's reverse order) runs WITHOUT its bound: its waiter starts the runner as `bash <this file> __bound`, at
+#     the grant, and the file is then the bb-build of before #116, which has no such mode (it ends at once; the ticket gets no bound_hit=).
+#     bb-mutate reads .bb/rc 124 as the bound only when the ticket carries bound_hit=; a job's own exit 124 is an ordinary rc.
 # The four variables are unset before the waiter (or, under BB_QUEUE=0, bb-build-direct) starts, so a build never inherits them.
 # LOAD GATE (2026-11-11): a ticket is also granted only while load5/cores < 1.2 (BB_LOAD_MAX); the oldest grantable ticket goes
 # once it waited > 1200 s (BB_LOAD_STARVE_SECS) while < 2 queue launches run (BB_LOAD_STARVE_REACTORS). MEMORY FLOOR (#53): a grant also
@@ -568,6 +572,10 @@ else
   echo "dedup: skipped (working tree has changes vs $SHA)"
 fi
 
+# A bb-mutate call (BB_VIA bb-mutate:*) has NO dedup key: it is never deduped, and nothing dedups onto its ticket (key= is written empty; the two
+# dedup loops below skip an empty key). Its control is a clean-tree build, and a plain identical build deduped onto it would get no result when its
+# driver dies (the waiting ticket is dropped, .bb/rc 9; N4 of the #117 review). The only readers of key= are those two loops.
+case ${BB_VIA:-} in bb-mutate:*) KEY="";; esac
 exec 8> "$Q/.lock"; flock 8
 reap >/dev/null   # its stdout is the launch count, for pick only (#90)
 QD=$(cat "$B/queued" 2>/dev/null || true)

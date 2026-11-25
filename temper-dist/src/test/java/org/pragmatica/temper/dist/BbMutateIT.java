@@ -427,6 +427,57 @@ class BbMutateIT {
         assertThat(runner.rc()).isZero();
     }
 
+    /// A job that exits 124 by itself (no bound hit: its ticket carries job_end=, not bound_hit=) is an ordinary build, as before #116: its reports
+    /// are read and, with no failing testcase, it is BUILD-FAIL with its rc, never TIMEOUT (which counts as detected). Control: the build the bound
+    /// runner stopped (ticket with bound_hit=) is TIMEOUT, in [#aBuildStoppedByTheBoundRunner_readsAsTheDriversOwnTimeout]. Mutation: drop
+    /// `ticket_has(ticket, "bound_hit")` from the RC_BOUND branch -> TIMEOUT here, red.
+    @Test
+    void aJobsOwnExit124WithoutABoundHit_isBuildFail_neverTimeout() throws Exception {
+        killableBuilds();
+        buildJson = "{\"mutantTimeoutSecs\":60}";
+        var out = batch(modules("exit124"), mutation("mA", "A", "ATest", "MUT"));
+
+        assertThat(out.outcomes()).containsEntry("mA", "BUILD-FAIL");
+        assertThat(out.detail("mA")).isEqualTo("rc=124 with no failing testcase");
+        assertThat(out.log()).doesNotContain("job killed");
+        assertThat(out.rc()).isZero();
+    }
+
+    /// --timeout above 16666 min is a bound bb-build refuses (six digits): bb-mutate refuses it at the start, exit 2, one line naming --timeout, no
+    /// build queued (the fake bb-build never ran). So is a mutantTimeoutSecs over 999999. Control: 16666 min starts (a build is made).
+    /// Mutation: drop the check -> the control build is refused by bb-build instead, with no word of --timeout, red.
+    @Test
+    void aTimeoutOverSixDigitsOfSeconds_isRefusedAtTheStart_namingTheOption() throws Exception {
+        Files.writeString(home.resolve("scenario.json"), modules(null));
+        for (var row : List.of(List.of("--timeout", "16667", "{}", "--timeout 16667 min is over 16666 min"),
+                               List.of("--timeout", "1", "{\"mutantTimeoutSecs\":1000000}", "build.mutantTimeoutSecs 1000000 is over 999999 s"))) {
+            Files.writeString(dir.resolve(specName),
+                              "{\"build\":" + row.get(2) + ",\"mutations\":[" + mutation("mA", "A", "ATest", "MUT") + "]}");
+            var run = BbFixtures.run(List.of("python3",
+                                             TOOL.toString(),
+                                             co.toString(),
+                                             dir.resolve(specName).toString(),
+                                             dir.resolve("out-refused").toString(),
+                                             row.get(0),
+                                             row.get(1)),
+                                     Map.of("PATH", System.getenv("PATH"), "HOME", home.toString(), "BB_OWNER", "t"),
+                                     null,
+                                     null);
+
+            assertThat(run.rc()).as(run.stderr()).isEqualTo(2);
+            assertThat(run.stderr()).contains(row.get(3)).contains("nothing queued");
+            assertThat(run.stderr().lines().filter(l -> !l.isBlank()).count()).isEqualTo(1);
+            assertThat(home.resolve("builds.log")).doesNotExist();
+        }
+
+        extra = List.of("--timeout", "16666");
+        buildJson = "{}";
+        var out = batch(modules(null), mutation("mA", "A", "ATest", "MUT"));
+
+        assertThat(out.outcomes()).containsEntry("mA", "RED");
+        assertThat(builds()).isNotEmpty();
+    }
+
     /// Every build carries its bound to bb-build (#116): a mutant's own, the control's --timeout; and the run's one submit time.
     @Test
     void everyBuild_carriesItsBound_andTheRunsSubmitTime() throws Exception {

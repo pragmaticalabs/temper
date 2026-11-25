@@ -1352,4 +1352,201 @@ class BbMutateOrderIT {
         assertThat(lib(old, root, "order")).isEqualTo(before);
         assertThat(lib(lib, root, "order").lines().toList().indexOf("1790000000000000009-1")).isEqualTo(6);
     }
+
+    // ---------------------------------------------------------------- final round (#117 review N2-N4, items 3 and 5)
+    /// An ordinary bb-build call on `co` (an existing checkout), with `more` in its environment.
+    private Call plainAt(String owner, Path co, Map<String, String> more) throws Exception {
+        var env = env(owner);
+
+        env.putAll(more);
+        var run = BbFixtures.run(List.of(tools.resolve("bb-build").toString(), co.toString(), "run"), env, dir, null);
+
+        return new Call(run.rc(),
+                        run.stdout() + run.stderr(),
+                        0);
+    }
+
+    /// A clone of checkout `like` under another name: the same HEAD, the same tracked maven.config, so the same dedup key.
+    private Path identical(String name, String like) throws Exception {
+        var co = dir.resolve("work/co").resolve(name);
+        var run = BbFixtures.run(List.of("git", "clone", "-q", dir.resolve("work/co").resolve(like).toString(), co.toString()),
+                                 Map.of("HOME", dir.toString()),
+                                 null,
+                                 null);
+
+        assertThat(run.rc()).as(run.stderr()).isZero();
+
+        return co;
+    }
+
+    private static final Map<String, String> DEDUP_ON = Map.of("BB_DEDUP", "1");
+
+    /// N4: nothing dedups onto a bb-mutate ticket. A plain build identical to a run's WAITING control is queued and runs (not rc 7: it would get no
+    /// result when the driver dies, its ticket being dropped); the control's ticket carries an empty key=. Control: two plain identical builds do
+    /// dedup (rc 7), so the clone is identical. Mutation: write the ticket's key= for a bb-mutate call (drop the `KEY=""` rule) -> rc 7 here, red.
+    @Test
+    void aPlainBuildIdenticalToAWaitingControl_isNotDedupedOntoIt_andRuns() throws Exception {
+        blocker();
+        var control = drive("mo", "mo-1").ticket();
+
+        assertThat(in("waiting", control)).isTrue();
+        assertThat(field("waiting", control, "key")).isEmpty();
+        var plain = plainAt("ord", identical("ord-1", "mo-1"), DEDUP_ON);
+
+        assertThat(plain.rc()).as(plain.out()).isZero();
+        assertThat(plain.out()).doesNotContain("dedup:");
+        assertThat(field("waiting", plain.ticket(), "key")).as("a plain ticket keeps its key").hasSize(16);
+        var first = plain("ord", "ord-2");
+        var second = plainAt("ord", identical("ord-3", "ord-2"), DEDUP_ON);
+
+        assertThat(first).isNotBlank();
+        assertThat(second.rc()).as("control: two plain identical builds dedup").isEqualTo(7);
+        assertThat(second.out()).contains("dedup: identical build is waiting");
+    }
+
+    /// N4, after the control finished: a plain identical build is not rc 8 ("already finished", its result read from the control's checkout) and
+    /// runs. Control: a finished PLAIN build does dedup an identical one (rc 8). Mutation: as above.
+    @Test
+    void aPlainBuildIdenticalToAFinishedControl_isNotDedupedOntoIt_andRuns() throws Exception {
+        var control = drive("mo", "mo-1").ticket();
+
+        assertThat(within(60, () -> in("done", control))).isTrue();
+        assertThat(field("done", control, "state")).isEqualTo("finished");
+        assertThat(field("done", control, "key")).isEmpty();
+        var plain = plainAt("ord", identical("ord-1", "mo-1"), DEDUP_ON);
+
+        assertThat(plain.rc()).as(plain.out()).isZero();
+        assertThat(plain.out()).doesNotContain("dedup:");
+        assertThat(within(60, () -> in("done", plain.ticket()))).isTrue();
+        var first = plain("ord", "ord-2");
+
+        assertThat(within(60, () -> in("done", first))).isTrue();
+        var second = plainAt("ord", identical("ord-3", "ord-2"), DEDUP_ON);
+
+        assertThat(second.rc()).as("control: a finished plain build dedups an identical one").isEqualTo(8);
+    }
+
+    /// Item 3: under BB_QUEUE=0 the legacy script gets none of BB_ORDER_AT, BB_DRIVER_PID, BB_DRIVER_START and BB_MUTANT_BOUND, however they were
+    /// passed (the call is not refused for them there: there is no ticket to order); BB_OWNER and BB_VIA, passed the same way, arrive (control).
+    /// Mutation: drop the `unset` of the BB_QUEUE=0 branch -> the four reach it, red.
+    @Test
+    void underBbQueue0_theMutantVariablesNeverReachTheDirectBuild() throws Exception {
+        BbFixtures.executable(tools.resolve("bb-build-direct"),
+                              "#!/bin/bash\nenv | grep -E '^BB_(ORDER_AT|DRIVER_|MUTANT_|VIA|OWNER)' | sort > \"$HOLD_DIR/direct.env\"\n");
+        var call = plain("ord",
+                         "ord-q0",
+                         Map.of("BB_QUEUE",
+                                "0",
+                                "BB_ORDER_AT",
+                                "1790000000000000000",
+                                "BB_DRIVER_PID",
+                                "1",
+                                "BB_DRIVER_START",
+                                "1",
+                                "BB_MUTANT_BOUND",
+                                "60",
+                                "BB_VIA",
+                                "bb-mutate:spec:m1"));
+
+        assertThat(call.rc()).as(call.out()).isZero();
+        assertThat(Files.readAllLines(dir.resolve("direct.env"))).containsExactly("BB_OWNER=ord", "BB_VIA=bb-mutate:spec:m1");
+        nothingQueued();
+    }
+
+    /// N3: a clock stepped BACK during a run refuses its later builds, as the header says. The run's order_at is taken, then the clock (a `date`
+    /// shim) is 30 s behind it: the call is refused, rc 2, one line, "is in the future", nothing queued. Control: the same call with the clock
+    /// back in step is accepted. Mutation: drop the never-in-the-future check -> accepted, red.
+    @Test
+    void aClockStepBackDuringARun_refusesItsLaterBuilds_untilItIsBack() throws Exception {
+        var shim = Files.createDirectories(dir.resolve("shim"));
+
+        BbFixtures.executable(shim.resolve("date"),
+                              "#!/bin/bash\nif [ \"$*\" = '+%s%N' ]; then echo $(( $(/usr/bin/date +%s%N) - $(cat \"$HOLD_DIR/clock.back\" 2>/dev/null || echo 0) * 1000000000 ));"
+                              + " else exec /usr/bin/date \"$@\"; fi\n");
+        var path = "PATH=" + shim + ":" + System.getenv("PATH");
+        var stepped = submit("mo", "mo-1", path);
+        var inStep = submit("mo", "mo-2", path);
+
+        Files.writeString(dir.resolve("clock.back"), "30");
+        refusedInOneLine("clock 30 s back", enqueue("mo-1", stepped), "is in the future");
+        nothingQueued();
+        Files.delete(dir.resolve("clock.back"));
+        var accepted = enqueue("mo-2", inStep);
+
+        assertThat(accepted.rc()).as(accepted.out()).isZero();
+    }
+
+    /// N2: a ticket still WAITING when bb-build is rolled back runs without its bound: its waiter starts the bound runner from the bb-build file of
+    /// the grant, which is the one before #116 and has no `__bound` mode. After the grant the build runs past its bound of 5 s (and 2 s of
+    /// slack), no bound runner stands, and the ticket ends by itself, rc 0, with no bound_hit=. The rollback is by rename, as the installer's.
+    /// Mutation: none (this pins a documented limit; it turns red when the limit goes, and the header and installer text must then go too).
+    @Test
+    void aTicketWaitingAtARollbackOfBbBuild_runsWithoutItsBound() throws Exception {
+        blocker();
+        Files.writeString(dir.resolve("hold.mo-1"), "");
+        var id = drive("mo", "mo-1", "BB_MUTANT_BOUND=5").ticket();
+
+        assertThat(field("waiting", id, "bound")).isEqualTo("5");
+        var rolledBack = BbFixtures.executable(tools.resolve("bb-build.new"), resource("bb-build.pre116.prev"));
+
+        Files.move(rolledBack, tools.resolve("bb-build"), StandardCopyOption.ATOMIC_MOVE);
+        release("blk-1");
+        assertThat(within(60, () -> runs().contains("mo-1"))).as(runs().toString()).isTrue();
+        assertThat(field("running", id, "bound")).isEqualTo("5");
+        var started = Long.parseLong(field("running", id, "started"));
+
+        assertThat(within(60, () -> now() / SECOND - started >= 12)).isTrue();
+        assertThat(in("running", id)).as("past its bound and a half").isTrue();
+        assertThat(field("running", id, "bound_hit")).isEmpty();
+        assertThat(boundRunners(id)).as("no bound runner started").isZero();
+        assertThat(inCheckout("mo-1")).as("the build runs on").isNotEmpty();
+        release("mo-1");
+        assertThat(within(60, () -> in("done", id))).isTrue();
+        assertThat(field("done", id, "rc")).isEqualTo("0");
+        assertThat(field("done", id, "bound_hit")).isEmpty();
+    }
+
+    /// Item 5, pid reuse: the bound runner stops a job only while the process of that pid has the START TIME the ticket's waiter recorded. A runner
+    /// handed the pid of a running job with another start time (the pid was reused) whose deadline has passed ends without a stop: no bound_hit=,
+    /// the build runs on. Control: the same call with the true start time stops it (bound_hit=, rc 124). Mutation: drop the start-time comparison
+    /// from job_runs in the bound runner -> the first call stops the job, red.
+    @Test
+    void aBoundRunnerHandedAReusedPid_stopsNothing() throws Exception {
+        Files.writeString(dir.resolve("hold.mo-1"), "");
+        var id = drive("mo", "mo-1", "BB_MUTANT_BOUND=600").ticket();
+
+        assertThat(within(60, () -> runs().contains("mo-1") && boundRunners(id) > 0)).isTrue();
+        var args = ProcessHandle.allProcesses()
+                                .flatMap(process -> process.info().commandLine().stream())
+                                .filter(line -> line.contains(" __bound " + id + " "))
+                                .findFirst()
+                                .orElseThrow()
+                                .split(" ");
+        var co = args[args.length - 4];
+        var pid = args[args.length - 3];
+        var start = args[args.length - 2];
+
+        assertThat(co).isEqualTo(dir.resolve("work/co/mo-1").toString());
+        var reused = BbFixtures.run(List.of("bash", tools.resolve("bb-build").toString(), "__bound", id, co, pid, "" + (Long.parseLong(start) + 1), "1"),
+                                    env("mo"),
+                                    dir,
+                                    null);
+
+        assertThat(reused.rc()).as(reused.stderr()).isZero();
+        assertThat(field("running", id, "bound_hit")).isEmpty();
+        assertThat(inCheckout("mo-1")).as("the build runs on").isNotEmpty();
+        assertThat(ProcessHandle.of(Long.parseLong(pid))).isPresent();
+        var same = BbFixtures.run(List.of("bash", tools.resolve("bb-build").toString(), "__bound", id, co, pid, start, "1"), env("mo"), dir, null);
+
+        assertThat(same.rc()).as(same.stderr()).isZero();
+        assertThat(field("running", id, "bound_hit")).as("control: the true start time is stopped").isNotEmpty();
+        assertThat(within(120, () -> Files.exists(dir.resolve("work/co/mo-1/.bb/rc")))).isTrue();
+        assertThat(Files.readString(dir.resolve("work/co/mo-1/.bb/rc")).strip()).isEqualTo("124");
+        assertThat(inCheckout("mo-1")).isEmpty();
+        assertThat(within(60,
+                          () -> unchecked(() -> BbFixtures.waiters(id)).isEmpty())).isTrue();
+        lib(tools.resolve("bb-queue-lib.sh"), queue, "exec 8> \"$Q/.lock\" && flock 8 && reap");
+        assertThat(field("done", id, "state")).isEqualTo("orphaned");
+        assertThat(field("done", id, "bound_hit")).isNotEmpty();
+    }
 }

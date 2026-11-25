@@ -10,7 +10,9 @@
 # "rcWhen":N forces rc 1 (reports untouched) when exactly N modules are mutated; fault "compileerr" (mutated, tests pass) puts a
 # COMPILATION ERROR into .bb/build.log; fault "hang" (mutated) starts, then never ends (no rc) until its detached child exits;
 # fault "bounded" (mutated) is stopped by bb-build's bound runner: rc 124, no results;
-# fault "nostart" never starts at all. A hung job is a detached child that sleeps 20 s, so bb-mutate must kill the build by its bound.
+# fault "exit124" (mutated, tests pass) ends by ITSELF with rc 124 (a job whose own exit status is 124, no bound hit: its ticket carries job_end=);
+# fault "nostart" never starts at all. A ticket file T1 is written under $HOME/work/queue (running/), as bb-build's does: "bounded" with
+# bound_hit=, "exit124" with job_end=. A hung job is a detached child that sleeps 20 s, so bb-mutate must kill the build by its bound.
 # A module with a failed or skipped dependency is skipped; without -fae every module after a failure is.
 import json, os, sys, time
 
@@ -34,7 +36,13 @@ if "nostart" not in faults:
 open(home + "/builds.log", "a").write("[" + ",".join(mutated) + "] " + str(fae).lower() + "\n")
 open(home + "/bounds.log", "a").write(os.environ.get("BB_MUTANT_BOUND", "<unset>") + " " + os.environ.get("BB_ORDER_AT", "<unset>") + "\n")
 open(home + "/via.log", "a").write(os.environ.get("BB_VIA", "<unset>") + "\n")
+def ticket(line):
+    d = os.environ.get("BB_TEST_QUEUE_ROOT", home + "/work/queue") + "/running"
+    os.makedirs(d, exist_ok=True)
+    open(d + "/T1", "w").write("id=T1\nstate=running\n" + line + "\n")
+
 if "bounded" in faults:
+    ticket("bound_hit=%d" % time.time())
     open(b + "/end", "w").write(str(int(time.time())) + "\n")
     open(b + "/rc", "w").write("124\n")
     print("ticket=T1")
@@ -76,6 +84,9 @@ for m in sc["modules"]:
     if fail:
         bad.add(n)
         rc = 1
+if "exit124" in faults:
+    ticket("job_end=%d" % time.time())
+    rc = 124
 open(b + "/end", "w").write(str(int(time.time())) + "\n")
 open(b + "/rc", "w").write(f"{1 if sc.get('rcWhen') == len(mutated) else 0 if sc.get('ignoreFailures') else rc}\n")
 print("ticket=T1")

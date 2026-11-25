@@ -18,7 +18,7 @@
 #   expected=<pin>[|<pin>...]` (every accepted pin except `absent`, in the order above) for every mismatch on every target and exits 65 having written nothing anywhere; an unreachable target is 69.
 # Phase 2, per target and per file to change (bb-cp-record, bb-test, bb-testcount, bb-tickets, bb-hold, bb-wait, bb-await, bb-netns-run, bb-portgroup.py, bb-modules.py, bb-jbct-bootstrap, bb-result, bb-queue-lib.sh, bb-queue,
 #   then bb-build, then bb-mutate: the helpers and the lib before the tools that call or source them; bb-build calls bb-cp-record; bb-mutate after
-#   bb-build, which takes its BB_ORDER_AT/BB_DRIVER_*/BB_MUTANT_BOUND out of the build's environment, #116; a rollback from the .bak files goes in the reverse order: bb-mutate, bb-build, lib), one remote `bash -s` script: receive the file as
+#   bb-build, which takes its BB_ORDER_AT/BB_DRIVER_*/BB_MUTANT_BOUND out of the build's environment, #116; a rollback from the .bak files goes in the reverse order: bb-mutate, bb-build, lib; a ticket still WAITING when bb-build is rolled back runs WITHOUT its bound=: its waiter starts the bound runner from the bb-build file of the grant, which is then the one before #116 and has no __bound mode), one remote `bash -s` script: receive the file as
 #   ~/tools/<f>.new (base64 on stdin); its md5 must be the pinned one; re-check that the installed file is still what phase 1
 #   saw (closes the race with phase 1); chmod 0755; cp -p an existing file (not bb-tickets) to <f>.bak-<oldmd5> (an existing .bak of that name is
 #   kept; the older .pre-* / .bak-* backups are never touched); mv -f .new into place. The mv is atomic, so a running
@@ -80,7 +80,7 @@ readonly BB_BUILD_PRE91=12f2c9b52c09724be2a07e8058bc6a43   # the #91 version: th
 readonly BB_BUILD_PRE102=0b01f3522843051950e95ba6e52ec5e3   # the #86/#91 version: the args guards pipe printf into grep -q, so a long arg list can make a guard miss its match under pipefail (issue #102)
 readonly BB_BUILD_PRE112=b10f1e002113eafa50a05b8f4fe58eae   # the #102 version: -pl without -am is queued although a reactor dependency is not installed (issue #112)
 readonly BB_BUILD_PRE116=f1478564c91a6ab3544d1a7c9efec568   # the version before #116: mutant tickets carry no order_at= and have no one-per-owner rule
-readonly BB_BUILD_NEW=b5fd6605faee72beb2cc816d520c3ec8
+readonly BB_BUILD_NEW=cfb4be8d2cd1261867572e7318b04850
 # bb-jbct-bootstrap: absent on every host before its first install; bb-build calls it, so it is installed first.
 readonly BB_JBCTBOOT_NEW=3e5396ecee48b99949456cf805df1e60
 # bb-result: absent on every host before its first install. No trailing comment on a pin line: bb-drift reads it by pattern.
@@ -128,7 +128,7 @@ readonly BB_MUTATE_PREVIA=2c341d44d428ba445db7ea03ee90af64   # the batch-sound v
 readonly BB_MUTATE_PRE97=130f094861c0f835869ff42230d7bffb   # a batch is credited from a build with failures (issue #97)
 readonly BB_MUTATE_PRE100=4869a07cdaf3252905ceb0800c64cda7   # a solo build failing only unlisted tests reads SURVIVED (issue #100); live on hosts or pending install (#98)
 readonly BB_MUTATE_PRE116=3dc63455b03b7f166ec18e29bf9da25f   # the version before #116: passes no BB_ORDER_AT and takes one mutant ticket per driver
-readonly BB_MUTATE_NEW=5e9aedc8172bcc45407bcf91ea27ddb7
+readonly BB_MUTATE_NEW=1b28a7ca8f1c76edd7e4f675224443cf
 readonly TARGET_RE='^[a-z_][a-z0-9_-]{0,31}@[A-Za-z0-9.:-]+$'
 
 HERE=$(cd "$(dirname "$0")" && pwd)

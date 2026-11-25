@@ -37,9 +37,10 @@ newer than the mutant marker), so queue wait is excluded. Default: 3x the contro
 On expiry the mutant is TIMEOUT, COUNTED AS DETECTED: the job's own process group (the setsid waiter whose ticket
 bb-build printed, hence maven and its forks) gets SIGTERM, then SIGKILL; java/maven processes with cwd inside the
 checkout that escaped the group are killed too; survivors abort the run (exit 4). .bb/rc is written as 124 (only if
-absent; maven's own rc never is 124) with .bb/end, so the next bb-build is accepted; `bb-queue reap` then releases
+absent) with .bb/end, so the next bb-build is accepted; `bb-queue reap` then releases
 the ticket. The tree is restored and the run continues. A batch that times out is re-run singly. --timeout MIN now
-bounds only queue wait (and the whole control build); a mutant that never starts within it aborts the run (exit 4).
+bounds only queue wait (and the whole control build); a mutant that never starts within it aborts the run (exit 4). --timeout above 16666 min (a bound of
+over 999999 s, which bb-build refuses) is refused at the start, exit 2, naming --timeout; so is a mutantTimeoutSecs over 999999.
 results.tsv / results.md are rewritten (atomically) after every mutant.
 
 QUEUE TURN (#116; the rules are MUTANT TICKETS in bb-build's header): every build of a run (control, singles, batches, re-runs) is a
@@ -49,7 +50,8 @@ waiting ones go by their own enqueue time, so runs of one owner alternate build 
 has at most one waiting mutant ticket per live driver. Waiting for the turn is queue wait: it counts against --timeout (expiry: exit 4,
 control and mutant alike) and never against a mutant's bound. A driver that dies leaves a WAITING ticket to be dropped by its waiter (rc 9);
 its RUNNING build ends by itself or at its bound, which the ticket carries (the control's is --timeout) and bb-build enforces, live
-driver or not; this driver reads that rc 124 as the same TIMEOUT. The mutated tree stays as it is when the driver died.
+driver or not; this driver reads that rc 124 as the same TIMEOUT when the ticket carries bound_hit= (an rc 124 of the job itself
+without it is an ordinary build: BUILD-FAIL when no testcase failed). The mutated tree stays as it is when the driver died.
 """
 import json, math, os, re, signal, subprocess, sys, time, shutil
 import xml.etree.ElementTree as ET
@@ -324,6 +326,7 @@ def kill_job(co, ticket, label):
 
 RC_BOUND = 124  # .bb/rc of a build stopped at its bound (by bb-build's bound runner, or kill_job below)
 ORDER_AT = 0  # set by main: this run's submit time, epoch nanoseconds
+MAX_BOUND = 999999  # the most BB_MUTANT_BOUND (seconds) bb-build accepts: 6 digits
 SPEC_BASE = ""  # set by main: the spec file's basename, for the BB_VIA marker
 
 
@@ -343,6 +346,20 @@ def driver_start():
             return f.read().rpartition(")")[2].split()[19]
     except OSError:
         return ""
+
+
+def ticket_has(ticket, key):
+    """True when the ticket (running/ first, then done/: it only ever moves that way) holds a non-empty `key=` line; False without a ticket"""
+    if not ticket:
+        return False
+    root = os.environ.get("BB_TEST_QUEUE_ROOT") or os.path.join(HOME, "work", "queue")
+    for state in ("running", "done"):
+        try:
+            with open(os.path.join(root, state, ticket), errors="replace") as f:
+                return any(ln.startswith(key + "=") and len(ln) > len(key) + 1 for ln in f.read().splitlines())
+        except OSError:
+            continue
+    return False
 
 
 def run_build(co, owner, build, timeout_s, label, bound=None, fae=False):
@@ -401,7 +418,10 @@ def run_build(co, owner, build, timeout_s, label, bound=None, fae=False):
                         detail=f"no fresh .bb/rc within {int(timeout_s)}s (queue wait / --timeout); job killed")
         time.sleep(POLL)
     rc = int(open(rcp).read().strip() or -1)
-    if rc == RC_BOUND:  # bb-build's bound runner was first; it writes this rc only once nothing of the build is left
+    # rc 124 is the bound runner's only when the ticket carries bound_hit= (stamped before the runner writes the rc): a job that exits 124 by itself
+    # (a wrapper's `timeout`, a test's own exit) is an ordinary build, classified from its reports (BUILD-FAIL without a failing testcase, as
+    # before #116). The runner writes the rc after its stop scans; a detached non-java child outside the group and the checkout's java scan may survive.
+    if rc == RC_BOUND and ticket_has(ticket, "bound_hit"):
         return dict(kind="TIMEOUT", rc=None, cases=[], bad=[], files=[], secs=time.time() - t0, mvn_secs=mvn_t0 and time.time() - mvn_t0,
                     detail=f"exceeded {int(timeout_s)}s (--timeout); job killed" if bound is None else
                     f"exceeded {int(bound)}s from its own Maven start; job killed (counted detected)")
@@ -457,6 +477,10 @@ def main():
         die(2, "duplicate mutation ids")
     for m in muts:
         m.setdefault("expect", [])
+    if timeout_min * 60 > MAX_BOUND:  # bb-build takes BB_MUTANT_BOUND of 1 to 6 digits; the control's bound is --timeout
+        die(2, f"--timeout {timeout_min:g} min is over {MAX_BOUND // 60} min: the bound of a build is at most {MAX_BOUND} s (6 digits); nothing queued")
+    if float(build.get("mutantTimeoutSecs") or 0) > MAX_BOUND:
+        die(2, f"build.mutantTimeoutSecs {build['mutantTimeoutSecs']} is over {MAX_BOUND} s, the most a build's bound can be (6 digits); nothing queued")
     sha = preflight(co)
     owner = os.environ.get("BB_OWNER") or os.path.basename(co).split("-")[0]
     timeout_s = timeout_min * 60
@@ -497,7 +521,7 @@ def main():
     if porcelain(co):
         die(3, "tree dirty after control build:\n" + porcelain(co))
     ctl_mvn = ctl.get("mvn_secs") or ctl["secs"]
-    bound = float(build["mutantTimeoutSecs"]) if build.get("mutantTimeoutSecs") else max(3 * ctl_mvn, 10)
+    bound = float(build["mutantTimeoutSecs"]) if build.get("mutantTimeoutSecs") else min(max(3 * ctl_mvn, 10), MAX_BOUND)
     state["verdict"] = f"RUNNING: control OK ({ctl_n} testcases); per-mutant bound {int(bound)}s"
     flush()
     log(f"control OK: {ctl_n} testcases; control maven {ctl_mvn}s; per-mutant bound {int(bound)}s")
