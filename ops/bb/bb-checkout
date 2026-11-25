@@ -8,22 +8,39 @@
 # bb-probe-reap runs afterwards; its failure never fails the checkout.
 # Mirror lock (#119): the fetch, the rev-parse and the clone of the mirror run under an exclusive flock on $HOME/work/pragmatica.git.lock
 # (next to the mirror, never in the queue dir), so concurrent callers queue instead of racing on ref locks ("cannot lock ref ...: is at X
-# but expected Y") or on a repack under a clone. Anyone else that writes the mirror must take the same lock. The lock fd is closed in every
-# child (a git child can never outlive the script holding the lock) and gc runs in the foreground (gc.autoDetach=false), inside the lock
-# and inside the fetch bound; the kernel drops the lock when the script dies, kill -9 included. A caller that has to queue says so on
-# stderr ("waiting for the mirror lock"). Bounds, in seconds, both overridable by a [0-9]+ environment variable:
-#   BB_MIRROR_LOCK_WAIT     default 420   wait for the lock; must cover one hung holder (the fetch bound) plus one normal fetch
-#   BB_MIRROR_FETCH_TIMEOUT default 300   the fetch itself (a cold fetch takes seconds to about a minute); TERM, KILL 10 s later
-# Exit codes: 2 usage, 3 dir exists, 4 owner guard, 5 ref not found (existing); 6 the mirror lock was not obtained within the wait (or
-# no flock/timeout on this host); 7 the mirror fetch exceeded its bound (timeout's 124, or 137 once the bound has passed; a SIGKILL
-# before the bound, e.g. the OOM killer, is not an expiry and stays 137 with a line saying so). Any other fetch failure keeps git's own
-# exit code. On 6 and 7 no checkout dir exists. Named limit: a git killed -9 mid-update (also our own KILL after the TERM grace) leaves
-# <ref>.lock / packed-refs.lock / packed-refs.new in the mirror (measured on git 2.43: kill at the ref update leaves <ref>.lock, kill while
-# packed-refs is rewritten leaves packed-refs.lock AND packed-refs.new, kill during pack receipt leaves only objects/pack/tmp_pack_*, which
-# does not block) and every later fetch fails "Unable to create ... File exists"; on any failed fetch this script lists the *.lock files and
-# packed-refs.new and the operator command (flock <mirror>.lock find <mirror> -type f -name '*.lock' -delete -o -type f -name packed-refs.new -delete,
-# only when no fetch runs on the mirror). objects/**/tmp_* are neither listed nor touched by it. It deletes none itself: the lock-less
-# hand-run scripts that also fetch the mirror may own them. The clone under the lock is not bounded.
+# but expected Y") or on a repack under a clone. Anyone else that writes the mirror must take the same lock.
+# Guarantees, each with its mechanism:
+#  - Mutual exclusion among callers that take this flock (one kernel flock on one open file). A process that does not take it (a hand-run
+#    fetch, an old bb-checkout) is not excluded.
+#  - The lock outlives bb-checkout exactly as long as a git it started: fd 9 is INHERITED by every git below (fetch, rev-parse, clone and what
+#    they spawn: remote helper, upload-pack, index-pack, hooks, gc) and the kernel drops the flock when the last holder of that open file ends. A
+#    bb-checkout killed by TERM, HUP or KILL therefore leaves the lock with its git; a second caller waits (it says so, naming the holder pids from
+#    /proc/<pid>/fdinfo) and then fetches a mirror no git of ours is still writing. The fetch keeps its bound (below), the clone has none.
+#  - The fetch is bounded: timeout -k 10 sends TERM at the bound and KILL 10 s later to its whole process group (timeout runs in its own
+#    group), so a helper that ignores TERM (index-pack, ssh) dies at the KILL; the lock goes with it.
+#  - gc runs in the foreground (gc.autoDetach=false; maintenance.autoDetach=false, unknown and inert on git 2.43), inside the lock and the fetch bound:
+#    the fetch's own auto gc is the collector, and a detached gc can never hold the lock past the script.
+#  - A caller that has to queue says so on stderr ("waiting for the mirror lock ... held by pid: ...") and waits at most BB_MIRROR_LOCK_WAIT.
+# Bounds, in seconds, overridable by environment variables of 1 to 5 ASCII digits, at least 1 (anything else: exit 2, nothing created):
+#   BB_MIRROR_LOCK_WAIT     default 420   wait for the lock; covers one hung holder (the fetch bound) plus one normal fetch
+#   BB_MIRROR_FETCH_TIMEOUT default 300   the fetch itself (a cold fetch takes seconds to about a minute)
+# Exit codes: 2 usage or bad bound, 3 dir exists, 4 owner guard, 5 ref not found (existing); 6 the mirror lock was not obtained within the wait (or
+# no flock/timeout/bash 5 on this host); 7 the mirror fetch exceeded its bound (status 124 or 137 once the bound has elapsed by the clock, in ms; the
+# same status before the bound is git's own or an outside SIGKILL, e.g. the OOM killer, and is passed on with a line saying so). Any other fetch
+# failure keeps git's own exit code. On 6 and 7 no checkout dir exists.
+# Named limits:
+#  - kill -9 of the `timeout` process itself leaves its git unbounded and holding the lock until it ends; callers exit 6 after the wait.
+#  - a child that outlives its git (left running, or out of the process group: setsid, a daemonised helper such as an ssh ControlPersist
+#    master, not measured here) keeps the lock for as long as it lives; a group member is killed only at the bound. The origin of the mirror is https.
+#  - the clone under the lock is not bounded. SIGINT: bash defers it while a git runs and a tty Ctrl-C does not reach git (own process group),
+#    so an interrupted run continues to its end. A bb-checkout killed by TERM/HUP/KILL does not run its EXIT trap and may leave a partial
+#    checkout dir (a retry with that name exits 3); a failed clone leaving a partial dir is as it was before #119.
+#  - a git killed -9 mid-update (also our own KILL after the TERM grace) leaves blocking files in the mirror (measured on git 2.43: kill at the ref
+#    update leaves <ref>.lock, while packed-refs is rewritten packed-refs.lock AND packed-refs.new, during pack receipt only objects/pack/tmp_pack_*,
+#    which does not block; commit-graph/multi-pack-index locks, config.lock, shallow.lock, hooks/*.lock did not block a fetch) and every later
+#    fetch fails "Unable to create ... File exists". On a failed fetch this script lists every *.lock under refs/, HEAD.lock, packed-refs.lock
+#    and packed-refs.new and prints one command (paths quoted) that deletes exactly those under the flock. It deletes none itself: the lock-less
+#    hand-run scripts that also fetch the mirror may own them, and the flock does not stop those.
 set -euo pipefail
 [ $# -eq 2 ] || { echo "usage: bb-checkout <name> <sha-or-ref>" >&2; exit 2; }
 NAME=$1; REF=$2
@@ -41,48 +58,68 @@ MADE=
 # a failed run removes only the dir this run created
 trap 'rc=$?; [ "$rc" = 0 ] || [ -z "$MADE" ] || rm -rf "$CO"' EXIT
 LOCK_WAIT=${BB_MIRROR_LOCK_WAIT:-420}; FETCH_T=${BB_MIRROR_FETCH_TIMEOUT:-300}
-case "$LOCK_WAIT$FETCH_T" in *[!0-9]*|"") echo "refusing: BB_MIRROR_LOCK_WAIT and BB_MIRROR_FETCH_TIMEOUT must be [0-9]+ seconds" >&2; exit 2;; esac
-command -v flock > /dev/null 2>&1 && command -v timeout > /dev/null 2>&1 || { echo "refusing: flock and timeout are required for the mirror lock" >&2; exit 6; }
+# 1 to 5 ASCII digits, value >= 1 (an explicit digit list: a range could match non-ASCII digits in some locales; 0 and a huge value would mean no bound)
+for v in "$LOCK_WAIT" "$FETCH_T"; do
+  case $v in *[!0123456789]*) v=x ;; esac
+  [ "${#v}" -le 5 ] && [ "$v" != x ] && [ "$((10#$v))" -ge 1 ] || { echo "refusing: BB_MIRROR_LOCK_WAIT and BB_MIRROR_FETCH_TIMEOUT must be 1 to 5 ASCII digits, at least 1 (seconds)" >&2; exit 2; }
+done
+LOCK_WAIT=$((10#$LOCK_WAIT)); FETCH_T=$((10#$FETCH_T))
+command -v flock > /dev/null 2>&1 && command -v timeout > /dev/null 2>&1 && [ -n "${EPOCHREALTIME:-}" ] || { echo "refusing: flock, timeout and bash 5 (EPOCHREALTIME) are required for the mirror lock" >&2; exit 6; }
 LOCK=$MIRROR.lock
+# pids that hold the lock: processes with the lock file open whose open file carries the flock (the kernel lists it in /proc/<pid>/fdinfo/<fd>)
+holders() {
+  local f pid n out=
+  for f in $(find -L /proc/[0-9]*/fd -maxdepth 1 -samefile "$LOCK" 2> /dev/null); do
+    pid=${f#/proc/}; pid=${pid%%/*}; n=${f##*/}
+    grep -q '^lock:' "/proc/$pid/fdinfo/$n" 2> /dev/null && out="$out $pid ($(cat "/proc/$pid/comm" 2> /dev/null))"
+  done
+  echo "${out:- none found (just released?)}"
+}
 exec 9>> "$LOCK" || { echo "refusing: cannot open the mirror lock $LOCK" >&2; exit 6; }
 if ! flock -n 9; then
-  echo "bb-checkout: waiting for the mirror lock $LOCK (up to ${LOCK_WAIT}s)" >&2
-  flock -w "$LOCK_WAIT" 9 || { echo "refusing: mirror lock $LOCK not obtained within ${LOCK_WAIT}s (another fetch holds it); nothing created" >&2; exit 6; }
+  echo "bb-checkout: waiting for the mirror lock $LOCK (up to ${LOCK_WAIT}s); held by pid:$(holders)" >&2
+  flock -w "$LOCK_WAIT" 9 || { echo "refusing: mirror lock $LOCK not obtained within ${LOCK_WAIT}s (held by pid:$(holders)); nothing created" >&2; exit 6; }
 fi
-# fd 9 is closed (9>&-) in every command below: a child must never inherit the lock
-# a git killed -9 mid-update leaves <ref>.lock / packed-refs.lock / packed-refs.new in the mirror and every later fetch then fails with git's own exit code;
-# nothing here deletes them (a foreign process, e.g. a hand-run fetch, may own them): they are listed with the operator's command
+# fd 9 is INHERITED by every command below, on purpose: the kernel holds the flock for as long as any process has the open file, so a
+# bb-checkout killed by TERM, HUP or KILL leaves the lock with its git (still running, still under timeout's bound) until that git ends
+# what a git killed -9 mid-update leaves in the mirror (measured, git 2.43) and blocks the next fetch: <ref>.lock, HEAD.lock, and when
+# packed-refs is rewritten packed-refs.lock + packed-refs.new. Nothing here deletes them (a lock-less hand-run fetch may own them): they are listed
+# with the operator's command. Not listed (measured not to block a fetch): objects/**/tmp_*, commit-graph and multi-pack-index locks, config.lock, shallow.lock, hooks/*.lock.
+PM=$(printf '%s' "$MIRROR" | sed 's/[][\*?]/\\&/g')
+BLOCKING=("$MIRROR" -type f '(' '(' -path "$PM/refs/*" -name '*.lock' ')' -o -path "$PM/HEAD.lock" -o -path "$PM/packed-refs.lock" -o -path "$PM/packed-refs.new" ')')
 lock_files() {
   local f
-  f=$(find "$MIRROR" -type f \( -name '*.lock' -o -name packed-refs.new \) 2> /dev/null | head -n 20)
+  f=$(find "${BLOCKING[@]}" 2> /dev/null)
   [ -z "$f" ] || {
-    echo "bb-checkout: lock files and packed-refs.new in the mirror, left by a git killed mid-update (none is deleted here):" >&2
+    echo "bb-checkout: blocking files in the mirror, left by a git killed mid-update (none is deleted here):" >&2
     printf '%s\n' "$f" | while IFS= read -r l; do ls -ld "$l" >&2; done
-    echo "bb-checkout: only when no fetch is running on $MIRROR, remove them under the same lock: flock $LOCK find $MIRROR -type f -name '*.lock' -delete -o -type f -name packed-refs.new -delete" >&2
+    echo "bb-checkout: the command below removes exactly the files listed above (every *.lock under refs/, HEAD.lock, packed-refs.lock, packed-refs.new); run it only when no git runs on the mirror (the flock stops callers that take it, not a lock-less hand-run git):" >&2
+    printf '%q ' flock "$LOCK" find "${BLOCKING[@]}" -delete >&2; echo >&2
   }
 }
-rc=0; t0=$SECONDS
-timeout -k 10 "$FETCH_T" git -c gc.autoDetach=false -C "$MIRROR" fetch -q --prune origin 9>&- || rc=$?
+now_ms() { local t=${EPOCHREALTIME/[.,]/}; echo $((t / 1000)); }
+rc=0; t0=$(now_ms)
+timeout -k 10 "$FETCH_T" git -c gc.autoDetach=false -c maintenance.autoDetach=false -C "$MIRROR" fetch -q --prune origin || rc=$?
+elapsed=$(($(now_ms) - t0))
 expired=
+# 124 is timeout's status for its TERM at the bound, 137 its KILL 10 s later; a 124 or 137 from elsewhere (git itself, an outside SIGKILL such as
+# the OOM killer) before the bound has passed is not an expiry
 case $rc in
-  0) ;;
-  124) expired=1 ;;   # timeout's own status: it sent TERM at the bound
-  137) # KILL: ours after the TERM grace (the bound has passed), or an outside SIGKILL (OOM killer) well before it
-    [ $((SECONDS - t0)) -lt "$FETCH_T" ] || expired=1 ;;
+  124|137) [ "$elapsed" -lt $((FETCH_T * 1000)) ] || expired=1 ;;
 esac
 if [ -n "$expired" ]; then
   echo "refusing: the mirror fetch exceeded ${FETCH_T}s (BB_MIRROR_FETCH_TIMEOUT); nothing created" >&2; lock_files; exit 7
 elif [ "$rc" != 0 ]; then
-  [ "$rc" != 137 ] || echo "bb-checkout: the mirror fetch was killed by SIGKILL after $((SECONDS - t0))s, before its ${FETCH_T}s bound (an outside kill, e.g. the OOM killer): not a bound expiry" >&2
+  case $rc in 124|137) echo "bb-checkout: the mirror fetch ended with status $rc (137 is SIGKILL) after ${elapsed} ms, before its ${FETCH_T}s bound (an outside kill, e.g. the OOM killer, or git's own status): not a bound expiry" >&2 ;; esac
   lock_files; exit "$rc"
 fi
 PROBE_REF=
 case $REF in probes/*/*) PROBE_REF=$REF ;; esac
 SHA=
-[ -n "$PROBE_REF" ] || SHA=$(git -C "$MIRROR" rev-parse --verify "$REF^{commit}" 2> /dev/null 9>&-) || SHA=
+[ -n "$PROBE_REF" ] || SHA=$(git -C "$MIRROR" rev-parse --verify "$REF^{commit}" 2> /dev/null) || SHA=
 [ -n "$SHA" ] || [ -d "$PROBES" ] || { echo "refusing: $REF is not in the mirror (and there is no $PROBES)" >&2; exit 5; }
 mkdir -p "$HOME/work/co"
-git clone -q --no-checkout "$MIRROR" "$CO" 9>&-
+git clone -q --no-checkout "$MIRROR" "$CO"
 MADE=1
 exec 9>&-   # the mirror is no longer read: release the lock before the probes steps
 if [ -d "$PROBES" ]; then
