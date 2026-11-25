@@ -780,7 +780,7 @@ class BbCheckoutLockIT {
                 }
                 if (roundSkipped > 2) {
                     roundRed = true;
-                    red.add("round " + round + ": only " + (8 - roundSkipped) + " of 8 callers got through (the rest were skipped as origin races)");
+                    red.add("callers in round " + round + ": only " + (8 - roundSkipped) + " of 8 callers got through (the rest were skipped as origin races)");
                 }
                 if (roundRed) {
                     red.add("round " + round + " red");
