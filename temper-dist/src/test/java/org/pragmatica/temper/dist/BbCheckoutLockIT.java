@@ -166,14 +166,15 @@ class BbCheckoutLockIT {
         Files.writeString(gate.resolve("release"), "x");
     }
 
-    /// a bb-checkout run, started and left running; stdout and stderr go to files
+    /// a bb-checkout run, started and left running; stdout and stderr go to files. HUP is reset to its default for the run: a build started
+    /// under nohup/setsid hands its children SIGHUP as ignored, and an ignoring process cannot be killed by it (nothing to guarantee then)
     private Run start(String name, String ref, Map<String, String> extra) throws IOException {
         var out = dir.resolve(name + ".out");
         var err = dir.resolve(name + ".err");
         var env = new HashMap<>(extra);
 
         env.put("BB_OWNER", "s1");
-        var builder = BbFixtures.process(List.of("bash", home.resolve("tools/bb-checkout").toString(), name, ref), env(env));
+        var builder = BbFixtures.process(List.of("env", "--default-signal=HUP", "bash", home.resolve("tools/bb-checkout").toString(), name, ref), env(env));
 
         builder.redirectOutput(out.toFile());
         builder.redirectError(err.toFile());
@@ -258,6 +259,16 @@ class BbCheckoutLockIT {
     /// the lock is held by someone: a non-blocking flock on the lock file fails
     private boolean lockHeld() throws Exception {
         return BbFixtures.run(List.of("flock", "-n", lock.toString(), "true"), env(Map.of()), null, null).rc() != 0;
+    }
+
+    /// the SigIgn mask of a live process (bit 0 is SIGHUP)
+    private static long sigIgn(long pid) throws IOException {
+        for (var line : Files.readAllLines(Path.of("/proc/" + pid + "/status"))) {
+            if (line.startsWith("SigIgn:")) {
+                return Long.parseUnsignedLong(line.substring(7).trim(), 16);
+            }
+        }
+        throw new IOException("no SigIgn in /proc/" + pid + "/status");
     }
 
     private void signal(String signal, long pid) throws Exception {
@@ -354,6 +365,7 @@ class BbCheckoutLockIT {
         var timeoutPid = first.process().children().findFirst().orElseThrow().pid();
 
         first.process().descendants().forEach(orphans::add);
+        assertThat(sigIgn(first.process().pid()) & 1).as("SIGHUP is not ignored by bb-checkout").isZero();
         signal(signal, first.process().pid());
         first.process().onExit().get(30, TimeUnit.SECONDS);
         assertThat(lockHeld()).as("the lock stays with the git that bb-checkout started").isTrue();

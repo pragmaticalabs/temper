@@ -32,6 +32,7 @@
 #  - kill -9 of the `timeout` process itself leaves its git unbounded and holding the lock until it ends; callers exit 6 after the wait.
 #  - a child that outlives its git (left running, or out of the process group: setsid, a daemonised helper such as an ssh ControlPersist
 #    master, not measured here) keeps the lock for as long as it lives; a group member is killed only at the bound. The origin of the mirror is https.
+#  - a caller that ignores SIGHUP (started under nohup or setsid) is not killed by it: no kill, so nothing to guarantee; the other signals apply.
 #  - the elapsed time that tells 124/137 expiry from git's own is read from the wall clock (EPOCHREALTIME): a clock step during a fetch can
 #    misclassify such a status (the fetch fails either way; only the message and exit 7 versus the status itself differ).
 #  - the clone under the lock is not bounded. SIGINT: bash defers it while a git runs and a tty Ctrl-C does not reach git (own process group),
