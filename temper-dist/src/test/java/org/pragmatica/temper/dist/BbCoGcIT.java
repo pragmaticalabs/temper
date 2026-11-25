@@ -1012,7 +1012,7 @@ class BbCoGcIT {
         assertThat(older).doesNotExist();
         assertThat(young.resolve("module/target/payload.bin")).exists();
         assertThat(run.stdout()).contains("days=3,");
-        assertLogHas("RUN live days=3 pace=2");
+        assertLogHas("RUN live days=3 pace=0");
     }
 
     /// --days is an integer from 1 to 3650: 0 (a zero window would make every checkout removable) and 3651 are usage errors (rc 2) before any
