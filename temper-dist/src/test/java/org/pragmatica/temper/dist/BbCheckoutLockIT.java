@@ -748,6 +748,7 @@ class BbCheckoutLockIT {
         var failure = new AtomicReference<Throwable>();
         var rounds = Integer.getInteger("bb.lockit.rounds", 3);
         var red = new ArrayList<String>();
+        var skipped = 0;
         var mover = Thread.ofPlatform().start(() -> move(spare, stop, failure));
 
         try {
@@ -758,13 +759,16 @@ class BbCheckoutLockIT {
                     runs.add(start("s1-r" + round + "-" + i, "stable"));
                 }
                 var roundRed = false;
+                var roundSkipped = 0;
 
                 for (var run : runs) {
                     var rc = run.finish();
 
                     // the moving ORIGIN, not the mirror: a ref the mover deletes between upload-pack's advertisement and the want makes git itself fail
                     // ("not our ref 000...", measured 1 caller in ~480 on a build host with a normal tool); the lock does not reach the origin
-                    if (rc != 0 && run.stderr().contains("upload-pack: not our ref")) {
+                    if (rc != 0 && run.stderr().lines().anyMatch(l -> l.startsWith("fatal: remote error: upload-pack: not our ref "))) {
+                        skipped++;
+                        roundSkipped++;
                         continue;
                     }
                     if (rc != 0 || run.stderr().contains("cannot lock ref") || !run.stdout().contains("sha=" + c1) || !c1.equals(head(run.name()))) {
@@ -774,6 +778,10 @@ class BbCheckoutLockIT {
                         }
                     }
                 }
+                if (roundSkipped > 2) {
+                    roundRed = true;
+                    red.add("round " + round + ": only " + (8 - roundSkipped) + " of 8 callers got through (the rest were skipped as origin races)");
+                }
                 if (roundRed) {
                     red.add("round " + round + " red");
                 }
@@ -782,6 +790,7 @@ class BbCheckoutLockIT {
             stop.set(true);
             mover.join();
         }
+        System.out.println("eightCallers_whileRefsMove: rounds=" + rounds + " callers=" + (rounds * 8) + " skippedAsOriginRace=" + skipped);
         assertThat(failure.get()).as("the ref mover").isNull();
         assertThat(red).as("rounds red: " + red.stream().filter(r -> r.startsWith("round ")).count() + " of " + rounds).isEmpty();
     }
