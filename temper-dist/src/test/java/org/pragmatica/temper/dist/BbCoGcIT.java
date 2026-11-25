@@ -898,23 +898,19 @@ class BbCoGcIT {
         assertNoGcDirectories();
     }
 
-    /// The main loop reads the process table and the tickets AGAIN for each candidate (a stub `flock -n` adds a process in one checkout and a
-    /// ticket for another after the run's first reads; the stub `mv` moves the fake process with its directory, as the kernel does). Whole
-    /// guards, not the re-check, must decide: the text says `(changed during the run)`, not `changed-after-move`.
-    /// Mutations: the scan before the queue lock dropped (n63), the ticket re-read under it dropped (n67): the re-check sends them back instead.
+    /// The main loop reads the process table AGAIN for each candidate (a stub `flock -n` adds a process in the checkout after the run's first
+    /// reads; the stub `mv` moves the fake process with its directory, as the kernel does). The guard, not the re-check, must decide: the text
+    /// says `(changed during the run)`, not `changed-after-move`. Mutation n63: the scan before the queue lock dropped, the re-check sends it back.
+    /// (One late change per run: the first candidate's re-reads would hand the second one the news early.)
     @Test
-    void aProcessAndATicketThatAppearAfterTheFirstReads_areMetByTheGuardsNotTheRecheck() throws Exception {
+    void aProcessThatAppearsAfterTheFirstReads_isMetByTheGuardNotTheRecheck() throws Exception {
         skeleton();
         var process = checkout("a-process", 10);
-        var ticket = checkout("a-ticket", 10);
         var control = checkout("control", 10);
 
         stub("flock", """
                       flock "$@" || exit $?
-                      case "$1" in -n)
-                        mkdir -p @PROC@/9200; ln -s @CO@/a-process @PROC@/9200/cwd
-                        printf 'id=late\\nowner=x\\nco=@CO@/a-ticket\\nsha=a\\n' > @Q@/waiting/late ;;
-                      esac
+                      case "$1" in -n) mkdir -p @PROC@/9200; ln -s @CO@/a-process @PROC@/9200/cwd ;; esac
                       """);
         stub("mv", """
                    mv "$@" || exit $?
@@ -926,10 +922,27 @@ class BbCoGcIT {
 
         assertThat(control).as(run.stdout()).doesNotExist();
         assertThat(process.resolve("module/target/payload.bin")).exists();
-        assertThat(ticket.resolve("module/target/payload.bin")).exists();
-        assertThat(run.stdout()).contains("keep a-process reasons=process (changed during the run)", "keep a-ticket reasons=ticket (changed during the run)")
-                  .doesNotContain("changed-after-move");
+        assertThat(run.stdout()).contains("keep a-process reasons=process (changed during the run)").doesNotContain("changed-after-move");
         assertLogHas("KEPT path=" + co().toRealPath() + "/a-process reasons=process");
+    }
+
+    /// The same for a ticket: it is written after the run's first reads (stub `flock -n`) and the checkout is kept by the ticket read under the
+    /// queue lock (`changed during the run`). Mutation n67: that re-read dropped, the re-check sends it back instead (`changed-after-move`).
+    @Test
+    void aTicketThatAppearsAfterTheFirstReads_isMetByTheGuardNotTheRecheck() throws Exception {
+        skeleton();
+        var ticket = checkout("a-ticket", 10);
+        var control = checkout("control", 10);
+
+        stub("flock", """
+                      flock "$@" || exit $?
+                      case "$1" in -n) printf 'id=late\\nowner=x\\nco=@CO@/a-ticket\\nsha=a\\n' > @Q@/waiting/late ;; esac
+                      """);
+        var run = liveWith(stubbed());
+
+        assertThat(control).as(run.stdout()).doesNotExist();
+        assertThat(ticket.resolve("module/target/payload.bin")).exists();
+        assertThat(run.stdout()).contains("keep a-ticket reasons=ticket (changed during the run)").doesNotContain("changed-after-move");
         assertLogHas("KEPT path=" + co().toRealPath() + "/a-ticket reasons=ticket");
     }
 
@@ -952,6 +965,185 @@ class BbCoGcIT {
         assertThat(victim.resolve("module/target/payload.bin")).exists();
         assertThat(run.stdout()).contains("keep a-keep reasons=keep-file (changed during the run)").doesNotContain("changed-after-move");
         assertLogHas("KEPT path=" + co().toRealPath() + "/a-keep reasons=keep-file");
+    }
+
+    // ---- guard inputs (G2): what each one reads decides what is removed
+    private void touch(Path file, double ageDays) throws IOException {
+        Files.setLastModifiedTime(file, FileTime.from(Instant.now().minus(Duration.ofSeconds((long)(ageDays * 86400)))));
+    }
+
+    /// Each activity signal alone keeps a checkout: .bb/end fresh, or .git/HEAD fresh, while every other signal is 10 days old.
+    /// Mutations k4d (.bb/end no longer read) and k4e (.git/HEAD no longer read): the matching victim is removed.
+    @Test
+    void reason4_aFreshEndFileAlone_orAFreshHeadAlone_keepsTheCheckout() throws Exception {
+        skeleton();
+        var end = checkout("victim-end", 10);
+        var head = checkout("victim-head", 10);
+        var control = checkout("control", 10);
+
+        touch(end.resolve(".bb/end"), 0.2);
+        touch(head.resolve(".git/HEAD"), 0.2);
+        var run = live();
+
+        assertThat(control).as(run.stdout()).doesNotExist();
+        assertThat(end.resolve("module/target/payload.bin")).as(run.stdout()).exists();
+        assertThat(head.resolve("module/target/payload.bin")).as(run.stdout()).exists();
+        assertThat(run.stdout()).contains("keep victim-end reasons=recent ", "keep victim-head reasons=recent ");
+    }
+
+    /// The window is 3 days when --days is not given, on both sides: a checkout of 2.5 days is kept, one of 3.5 removed (a default of 2 would
+    /// list 2.5 d, a default of 4 or 7 would keep 3.5 d); DRY first (candidate / keep lines, `days=3`, `age_days` of the line: floor of the age
+    /// in days), then --live with --pace only.
+    @Test
+    void withoutDays_theWindowIsThreeDays_andTheCandidateLineNamesTheAgeInDays() throws Exception {
+        skeleton();
+        var young = checkout("age2h", 2.5);
+        var old = checkout("age3h", 3.5);
+        var older = checkout("age10", 10);
+        var dry = gc();
+
+        assertThat(dry.rc()).as(dry.stdout() + dry.stderr()).isZero();
+        assertThat(dry.stdout()).contains("keep age2h reasons=recent ", "candidate age3h ", "age_days=3 ", "candidate age10 ", "age_days=10 ", "days=3;");
+        assertThat(dry.stdout()).doesNotContain("candidate age2h ");
+        var run = gc("--live", "--pace", "0");
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        assertThat(old).as(run.stdout()).doesNotExist();
+        assertThat(older).doesNotExist();
+        assertThat(young.resolve("module/target/payload.bin")).exists();
+        assertThat(run.stdout()).contains("days=3,");
+        assertLogHas("RUN live days=3 pace=2");
+    }
+
+    /// --days is an integer from 1 to 3650: 0 (a zero window would make every checkout removable) and 3651 are usage errors (rc 2) before any
+    /// write, 3650 is accepted. Mutation d7: the lower bound 0, the run goes ahead and removes the idle checkout.
+    @Test
+    void daysOutsideOneToThreeThousandSixHundredFifty_isRefusedBeforeAnyWrite() throws Exception {
+        skeleton();
+        var idle = checkout("idle", 10);
+
+        for (var bad : List.of("0", "3651", "00")) {
+            var run = gc("--live", "--days", bad, "--pace", "0");
+
+            assertThat(run.rc()).as(bad + "\n" + run.stdout() + run.stderr()).isEqualTo(2);
+            assertThat(run.stderr()).contains("usage: bb-co-gc");
+            assertThat(idle.resolve("module/target/payload.bin")).as(bad).exists();
+        }
+
+        assertThat(home.resolve("work/co-gc.log")).doesNotExist();
+        assertThat(gc("--days", "3650").rc()).isZero();
+    }
+
+    /// Guard 3 reads the executable and the open files of a process as well as its cwd: one process works outside ~/work/co with its exe in a
+    /// checkout, another with an open file in a second checkout. Mutation t4: only the cwd is read, both are removed.
+    @Test
+    void reason3_aProcessWithOnlyItsExeOrOnlyAnOpenFileInTheCheckout_keepsIt() throws Exception {
+        skeleton();
+        var exe = checkout("victim-exe", 10);
+        var fd = checkout("victim-fd", 10);
+        var control = checkout("control", 10);
+        var proc = fakeProc();
+        var p1 = Files.createDirectories(proc.resolve("7001"));
+        var p2 = Files.createDirectories(proc.resolve("7002/fd"));
+
+        Files.createSymbolicLink(p1.resolve("cwd"), home.toRealPath());
+        Files.createSymbolicLink(p1.resolve("exe"), exe.toRealPath().resolve("module/target/payload.bin"));
+        Files.createSymbolicLink(p2.getParent().resolve("cwd"), home.toRealPath());
+        Files.createSymbolicLink(p2.resolve("3"), fd.toRealPath().resolve("module/target/payload.bin"));
+        var run = liveWith(Map.of("BB_CO_GC_PROC", proc.toString()));
+
+        assertThat(control).as(run.stdout()).doesNotExist();
+        assertThat(exe.resolve("module/target/payload.bin")).as(run.stdout()).exists();
+        assertThat(fd.resolve("module/target/payload.bin")).as(run.stdout()).exists();
+        assertThat(run.stdout()).contains("keep victim-exe reasons=process ", "keep victim-fd reasons=process ");
+    }
+
+    /// A ticket that cannot be read means the ticket guard cannot run: the run stops with 70 before it removes or logs anything (a ticket that
+    /// names the idle checkout is the one it could not read). Mutation t6: the unreadable ticket is skipped, the checkout is removed.
+    @Test
+    void anUnreadableTicket_stopsTheRunWith70_andNothingIsRemoved() throws Exception {
+        skeleton();
+        var idle = checkout("idle", 10);
+
+        ticket("waiting", "w1", "idle");
+        var ticket = home.resolve("work/queue/waiting/w1");
+
+        Files.setPosixFilePermissions(ticket, java.util.Set.of());
+        assumeTrue(!Files.isReadable(ticket), "a user that can read a mode-000 file (root) cannot make a ticket unreadable");
+
+        for (var args : List.of(List.of("--live", "--pace", "0"), List.<String>of())) {
+            var run = gc(args.toArray(String[]::new));
+
+            assertThat(run.rc()).as(run.stdout() + run.stderr()).isEqualTo(70);
+            assertThat(run.stderr()).contains("cannot read ticket");
+            assertThat(idle.resolve("module/target/payload.bin")).exists();
+            assertThat(run.stdout()).doesNotContain("candidate", "removed");
+        }
+
+        assertThat(home.resolve("work/co-gc.log")).doesNotExist();
+    }
+
+    /// No usable process table means the process guard cannot run: rc 65 before any write, DRY and --live alike (the seam names a directory
+    /// without `self`; the real /proc has one, so a check that looked at /proc instead would go ahead and remove). Mutation n11.
+    @Test
+    void anUnusableProcessTable_refusesWith65_andNothingIsRemoved() throws Exception {
+        skeleton();
+        var idle = checkout("idle", 10);
+        var empty = Files.createDirectories(procRoot.resolve("no-self"));
+
+        for (var args : List.of(List.of("--live", "--pace", "0"), List.<String>of())) {
+            var run = gcWith(Map.of("BB_CO_GC_PROC", empty.toString()), args.toArray(String[]::new));
+
+            assertThat(run.rc()).as(run.stdout() + run.stderr()).isEqualTo(65);
+            assertThat(run.stderr()).contains("no " + empty + ": the process guard cannot run");
+            assertThat(idle.resolve("module/target/payload.bin")).exists();
+        }
+
+        assertThat(home.resolve("work/co-gc.log")).doesNotExist();
+    }
+
+    /// A name outside [A-Za-z0-9._-] is kept as `unsafe-name` (a newline would corrupt every list the tool builds), never moved or removed;
+    /// a plain file in ~/work/co is `not-direct-child` and survives. Mutation s5: the space name is removed as a checkout.
+    @Test
+    void anUnsafeName_andAPlainFile_areKept() throws Exception {
+        skeleton();
+        var spaced = Files.move(checkout("spaced", 10), co().resolve("bad name"));
+        var newline = Files.move(checkout("newline", 10), co().resolve("bad\nname"));
+        var file = Files.writeString(co().resolve("afile"), "x");
+        var control = checkout("control", 10);
+        var run = live();
+
+        assertThat(control).as(run.stdout()).doesNotExist();
+        assertThat(spaced.resolve("module/target/payload.bin")).as(run.stdout()).exists();
+        assertThat(newline.resolve("module/target/payload.bin")).as(run.stdout()).exists();
+        assertThat(file).exists();
+        assertThat(run.stdout()).contains("keep bad name reasons=unsafe-name", "keep afile reasons=not-direct-child").doesNotContain("removed bad", "removed afile");
+        assertThat(run.stdout().lines().filter(l -> l.startsWith("keep bad")).count()).as(run.stdout()).isGreaterThanOrEqualTo(2);
+    }
+
+    /// ~/work/co may itself be a symlink to a directory named co (hosts keep it on a data disk): checkouts are judged and moved by their
+    /// resolved path, so idle ones are removed and a ticketed one is kept. Mutation s6: the unresolved path is compared with the resolved one,
+    /// every checkout is `not-direct-child` and nothing is ever freed.
+    @Test
+    void aSymlinkedCoDirectory_isStillWorked() throws Exception {
+        var real = Files.createDirectories(home.resolve("data/co"));
+
+        Files.createDirectories(home.resolve("work/queue/waiting"));
+        Files.createDirectories(home.resolve("work/queue/running"));
+        Files.createSymbolicLink(home.resolve("work/co"), real);
+        var held = checkout("held", 10);
+        var idle = checkout("idle", 10);
+
+        ticket("waiting", "w1", "held");
+        var run = live();
+
+        assertThat(idle).as(run.stdout()).doesNotExist();
+        assertThat(held.resolve("module/target/payload.bin")).exists();
+        assertThat(run.stdout()).contains("removed idle ", "keep held reasons=ticket ");
+        assertLogHas("REMOVED path=" + real.toRealPath() + "/idle size_mb=0 last_activity=" + run.stdout().lines()
+                                                                                              .filter(l -> l.startsWith("removed idle "))
+                                                                                              .map(l -> l.replaceFirst(".* newest=(\\S+) .*", "$1"))
+                                                                                              .findFirst().orElseThrow() + " owner=- days=3");
     }
 
     // ---- snapshot
