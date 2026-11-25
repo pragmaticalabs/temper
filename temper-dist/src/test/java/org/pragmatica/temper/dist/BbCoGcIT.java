@@ -1450,8 +1450,10 @@ class BbCoGcIT {
         assertThat(stuck.resolve("module/target/payload.bin")).exists();
         assertThat(removed).as(run.stdout()).doesNotExist();
         assertThat(last).doesNotExist();
-        assertThat(logLines()).anyMatch(l -> l.contains("SKIP path=" + co().toRealPath() + "/a-skip reason="))
-                              .anyMatch(l -> l.endsWith("MOVE-FAILED path=" + co().toRealPath() + "/b-mvfail"));
+        var real = co().toRealPath();
+
+        assertThat(logLines()).anyMatch(l -> l.contains("SKIP path=" + real + "/a-skip reason="))
+                              .anyMatch(l -> l.endsWith("MOVE-FAILED path=" + real + "/b-mvfail"));
         assertEveryProbeFree(probes, 6);
     }
 
@@ -1481,7 +1483,9 @@ class BbCoGcIT {
         assertThat(big).doesNotExist();
         assertThat(neighbour.resolve("module/target/payload.bin")).exists();
         assertThat(run.stdout()).contains("removed big size_mb=5 newest=", " owner=first", "total: removed 1 of 1 candidates, freed 5 MB, failed 0, skipped 0, kept 1 (recent=1), days=5, blind=0 unlisted-blind=0");
-        assertThat(logLines()).anyMatch(l -> l.contains(" REMOVED path=" + co().toRealPath() + "/big size_mb=5 last_activity=") && l.endsWith(" owner=first days=5"));
+        var real = co().toRealPath();
+
+        assertThat(logLines()).anyMatch(l -> l.contains(" REMOVED path=" + real + "/big size_mb=5 last_activity=") && l.endsWith(" owner=first days=5"));
         assertLogHas("RUN end removed=1 candidates=1 freed_mb=5 failed=0 skipped=0 kept=1 blind=0 unlisted_blind=0");
         assertThat(Files.readAllLines(mvs)).anyMatch(l -> l.matches("-T -- \\S+/big \\S+/\\.gc-\\d+-big"));
         assertThat(Files.readAllLines(rms)).isNotEmpty().allMatch(l -> l.contains("--one-file-system"));
@@ -1502,7 +1506,9 @@ class BbCoGcIT {
         assertThat(run.rc()).as(run.stdout() + run.stderr()).isEqualTo(74);
         assertThat(good).as(run.stdout()).doesNotExist();
         assertThat(bad).doesNotExist();
-        assertThat(logLines()).anyMatch(l -> l.contains(" RM-FAILED path=" + co().toRealPath() + "/bad moved=" + co().toRealPath() + "/.gc-"));
+        var real = co().toRealPath();
+
+        assertThat(logLines()).anyMatch(l -> l.contains(" RM-FAILED path=" + real + "/bad moved=" + real + "/.gc-"));
         assertThat(run.stdout()).contains("failed bad ", "total: removed 1 of 2 candidates", "failed 1, skipped 0");
         assertLogHas("failed=1 skipped=0 kept=0 blind=0 unlisted_blind=0");
         try (var names = Files.list(co())) {
