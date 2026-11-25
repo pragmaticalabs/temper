@@ -36,7 +36,9 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 /// Mutations: remove the `flock` lines -> [#aSecondCaller_whileTheFirstIsParkedMidFetch_queues_andBothSucceed] (always red) and
 /// [#eightCallers_whileRefsMove_allSucceedAtTheRightSha] (usually red); drop `9>&-` from the fetch ->
 /// [#theLockFd_isNotInheritedByAChildThatOutlivesTheScript]; drop `timeout` -> [#aHungFetch_isBounded_refused_andLeavesNothing];
-/// drop the `-w` bound -> [#aLockWaitThatExpires_isRefusedWithExit6_andLeavesNothing].
+/// drop the `-w` bound -> [#aLockWaitThatExpires_isRefusedWithExit6_andLeavesNothing]; call every 137 an expiry ->
+/// [#anOutsideSigkill_ofTheFetch_isNotCalledABoundExpiry_andKeeps137]; delete the lock files -> [#aFetchKilledAtTheRefUpdate_leavesLockFiles_thatAreListedNotDeleted_andTheOperatorCommandRecovers].
+/// `-Dbb.lockit.rounds=N` runs the statistical row for N rounds of 8 callers and names how many were red.
 class BbCheckoutLockIT {
     private static final long DEADLINE_MILLIS = 90_000L;
 
@@ -88,6 +90,7 @@ class BbCheckoutLockIT {
         // release anything still parked, then wait for the recorded processes to end before the temp dir goes
         Files.writeString(gate.resolve("release"), "x");
         for (var p : started) {
+            p.descendants().forEach(ProcessHandle::destroyForcibly);
             p.destroyForcibly();
         }
         for (var handle : orphans) {
@@ -185,6 +188,10 @@ class BbCheckoutLockIT {
 
         String stderr() throws IOException {
             return Files.readString(err);
+        }
+
+        List<String> stderrLines() throws IOException {
+            return Files.readAllLines(err);
         }
 
         int finish() throws InterruptedException {
@@ -345,6 +352,74 @@ class BbCheckoutLockIT {
     }
 
     @Test
+    void aFetchThatIgnoresTerm_isKilledAfterTheGrace_andIsStillExit7() throws Exception {
+        var env = new HashMap<>(gitShim("trap '' TERM\nexec sleep 600"));
+
+        env.put("BB_MIRROR_FETCH_TIMEOUT", "1");
+        var stubborn = start("s1-a", c2, env);
+
+        assertThat(stubborn.finish()).as(stubborn.stderr()).isEqualTo(7);
+        assertThat(stubborn.stderr()).contains("the mirror fetch exceeded 1s");
+        assertThat(Files.exists(co("s1-a"))).isFalse();
+    }
+
+    /// rc 137 is also what an outside SIGKILL (the OOM killer) looks like: well before the bound it is not an expiry
+    @Test
+    void anOutsideSigkill_ofTheFetch_isNotCalledABoundExpiry_andKeeps137() throws Exception {
+        var run = start("s1-a", c2, gitShim("kill -KILL $$"));
+
+        assertThat(run.finish()).as(run.stderr()).isEqualTo(137);
+        assertThat(run.stderr()).contains("killed by SIGKILL", "before its 300s bound", "not a bound expiry").doesNotContain("exceeded");
+        assertThat(Files.exists(co("s1-a"))).isFalse();
+    }
+
+    private List<String> lockFiles() throws Exception {
+        var found = BbFixtures.run(List.of("find", home.resolve("work/pragmatica.git").toString(), "-name", "*.lock", "-type", "f"),
+                                   env(Map.of()),
+                                   null,
+                                   null);
+
+        return found.stdout().lines().toList();
+    }
+
+    /// the named limit: a git killed -9 at the ref-update point leaves *.lock files; later callers fail with git's rc, are told which
+    /// files and the operator command, and nothing is deleted by the script; the operator command makes the next caller succeed
+    @Test
+    void aFetchKilledAtTheRefUpdate_leavesLockFiles_thatAreListedNotDeleted_andTheOperatorCommandRecovers() throws Exception {
+        var hook = home.resolve("work/pragmatica.git/hooks/reference-transaction");
+        var hookText = "#!/bin/sh\n[ \"$1\" = prepared ] && [ -e " + gate.resolve("kill") + " ] && kill -KILL $PPID\nexit 0\n";
+
+        Files.createDirectories(hook.getParent());
+        Files.writeString(hook, hookText);
+        BbFixtures.executable(hook, hookText);
+        Files.writeString(gate.resolve("kill"), "x");
+        var killed = start("s1-a", c2);
+
+        assertThat(killed.finish()).as(killed.stderr()).isEqualTo(137);
+        var left = lockFiles();
+
+        assertThat(left).as("the killed fetch left lock files in the mirror").isNotEmpty();
+        Files.delete(gate.resolve("kill"));
+        var next = start("s1-b", c2);
+
+        assertThat(next.finish()).as(next.stderr()).isNotZero();
+        assertThat(next.stderr()).contains("File exists", "lock files in the mirror", "-name '*.lock' -type f -delete");
+        left.forEach(f -> assertThat(next.stderrLines()).as("listed: " + f).anyMatch(l -> l.contains(f)));
+        assertThat(lockFiles()).as("the script deleted none of them").isEqualTo(left);
+        assertThat(Files.exists(co("s1-b"))).isFalse();
+        var operator = BbFixtures.run(List.of("find", home.resolve("work/pragmatica.git").toString(), "-name", "*.lock", "-type", "f", "-delete"),
+                                      env(Map.of()),
+                                      null,
+                                      null);
+
+        assertThat(operator.rc()).isZero();
+        var recovered = start("s1-c", c2);
+
+        assertThat(recovered.finish()).as(recovered.stderr()).isZero();
+        assertThat(head("s1-c")).isEqualTo(c2);
+    }
+
+    @Test
     void theLockFd_isNotInheritedByAChildThatOutlivesTheScript() throws Exception {
         var pidFile = dir.resolve("bg.pid");
         var body = "sleep 600 > /dev/null 2>&1 < /dev/null &\n" + "echo $! > " + pidFile;
@@ -373,20 +448,31 @@ class BbCheckoutLockIT {
         }
         var stop = new AtomicBoolean();
         var failure = new AtomicReference<Throwable>();
+        var rounds = Integer.getInteger("bb.lockit.rounds", 3);
+        var red = new ArrayList<String>();
         var mover = Thread.ofPlatform().start(() -> move(spare, stop, failure));
 
         try {
-            for (var round = 0; round < 3; round++) {
+            for (var round = 0; round < rounds; round++) {
                 var runs = new ArrayList<Run>();
 
                 for (var i = 0; i < 8; i++) {
                     runs.add(start("s1-r" + round + "-" + i, "stable"));
                 }
+                var roundRed = false;
+
                 for (var run : runs) {
-                    assertThat(run.finish()).as(run.name() + ": " + run.stderr()).isZero();
-                    assertNoRefRace(run);
-                    assertThat(run.stdout()).contains("sha=" + c1);
-                    assertThat(head(run.name())).isEqualTo(c1);
+                    var rc = run.finish();
+
+                    if (rc != 0 || run.stderr().contains("cannot lock ref") || !run.stdout().contains("sha=" + c1) || !c1.equals(head(run.name()))) {
+                        roundRed = true;
+                        if (red.size() < 3) {
+                            red.add(run.name() + " rc=" + rc + ": " + run.stderr().lines().findFirst().orElse(""));
+                        }
+                    }
+                }
+                if (roundRed) {
+                    red.add("round " + round + " red");
                 }
             }
         } finally {
@@ -394,6 +480,7 @@ class BbCheckoutLockIT {
             mover.join();
         }
         assertThat(failure.get()).as("the ref mover").isNull();
+        assertThat(red).as("rounds red: " + red.stream().filter(r -> r.startsWith("round ")).count() + " of " + rounds).isEmpty();
     }
 
     /// adds, force-moves and deletes refs/heads and refs/pull refs in the fake origin until told to stop
