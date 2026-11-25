@@ -729,6 +729,231 @@ class BbCoGcIT {
         assertThat(idle).as(later.stdout()).doesNotExist();
     }
 
+    // ---- command stubs: state that changes at an exact step of the run (#113 test round)
+    /// Writes `command` into a stub directory outside `home`; the stub removes its own directory from PATH, so a plain `mv`/`flock`/`du`/`rm`
+    /// inside `body` is the real command. `@PROC@`, `@CO@` (the resolved ~/work/co) and `@Q@` (the queue) are filled in.
+    private void stub(String command, String body) throws IOException {
+        var proc = hookProc();
+        var text = body.replace("@PROC@", proc.toString())
+                       .replace("@CO@", co().toRealPath().toString())
+                       .replace("@Q@", home.resolve("work/queue").toString());
+
+        BbFixtures.executable(procRoot.resolve("stubbin").resolve(command), "#!/bin/sh\nS=${0%/*}\nPATH=${PATH#\"$S:\"}\n" + text);
+    }
+
+    /// The env that makes the stubs first on PATH and points the tool at the hook-driven fake /proc (`self` only until a stub adds to it).
+    private Map<String, String> stubbed() throws IOException {
+        return Map.of("PATH", procRoot.resolve("stubbin") + ":" + System.getenv("PATH"), "BB_CO_GC_PROC", hookProc().toString());
+    }
+
+    private Path hookProc() throws IOException {
+        return Files.createDirectories(procRoot.resolve("fakeproc-hook/self")).getParent();
+    }
+
+    private List<String> logLines() throws IOException {
+        return Files.readAllLines(home.resolve("work/co-gc.log"));
+    }
+
+    private void assertLogHas(String suffix) throws IOException {
+        assertThat(logLines()).as(suffix).anyMatch(l -> l.endsWith(suffix));
+    }
+
+    private void assertNoGcDirectories() throws IOException {
+        try (var names = Files.list(co())) {
+            assertThat(names.map(x -> x.getFileName().toString()).filter(x -> x.startsWith(".gc-")).toList()).isEmpty();
+        }
+    }
+
+    /// The victim is back under its name with its payload, nothing is left as .gc-*, the log says RESTORED with exactly `reasons`.
+    private void assertRestored(Path victim, BbFixtures.Outcome run, String reasons) throws IOException {
+        var name = victim.getFileName().toString();
+
+        assertThat(victim.resolve("module/target/payload.bin")).as(name + "\n" + run.stdout()).exists();
+        assertThat(run.stdout()).contains("keep " + name + " reasons=changed-after-move (restored)").doesNotContain("removed " + name + " ");
+        assertLogHas("RESTORED path=" + co().toRealPath() + "/" + name + " reasons=" + reasons);
+        assertNoGcDirectories();
+    }
+
+    /// The re-check after the move is the ONLY guard that can see these: each change happens in a stub `mv`, right after the real rename and
+    /// before the tool's scan of the moved directory, so the classification (outside and under the queue lock) saw a removable checkout.
+    /// Mutations: recheck off (p1) or its process / blind / unverifiable arms dropped (p2, n26, p6a), the scan after the move dropped (n71),
+    /// rm after RESTORED (p8): each victim is removed, or its directory is gone, and a row below goes red.
+    @Test
+    void aChangeBetweenTheMoveAndTheRecheck_sendsTheCheckoutBackUnderItsName() throws Exception {
+        skeleton();
+        var late = new java.util.LinkedHashMap<String, String>();
+
+        late.put("late-inflight", "in-flight");
+        late.put("late-keep", "keep-file");
+        late.put("late-process", "process");
+        late.put("late-queued", "in-flight");
+        late.put("late-ticket", "ticket");
+        var victims = new java.util.LinkedHashMap<String, Path>();
+
+        for (var n : late.keySet()) {
+            victims.put(n, checkout(n, 10));
+        }
+
+        var control = checkout("control", 10);
+
+        stub("mv", """
+                   mv "$@" || exit $?
+                   for a; do dst=$a; done
+                   case ${dst##*/} in
+                     .gc-*-late-inflight) rm -f "$dst/.bb/rc" ;;
+                     .gc-*-late-keep) : > "$dst/.bb/keep" ;;
+                     .gc-*-late-process) mkdir -p @PROC@/9001; ln -s "$dst" @PROC@/9001/cwd ;;
+                     .gc-*-late-queued) : > "$dst/.bb/queued" ;;
+                     .gc-*-late-ticket) printf 'id=late\\nowner=x\\nco=@CO@/late-ticket\\nsha=a\\n' > @Q@/waiting/late ;;
+                   esac
+                   """);
+        var run = liveWith(stubbed());
+
+        assertThat(control).as(run.stdout()).doesNotExist();
+        assertThat(run.stdout()).contains("removed control ");
+        for (var e : late.entrySet()) {
+            assertRestored(victims.get(e.getKey()), run, e.getValue());
+        }
+    }
+
+    /// A process of this user that cannot be read and is not allowlisted appears after the move: every candidate is kept, the moved one goes back.
+    /// Mutation n26: the blind arm of the re-check dropped, the victim is removed.
+    @Test
+    void aBlindProcessAppearingAfterTheMove_sendsTheCheckoutBack() throws Exception {
+        skeleton();
+        var victim = checkout("late-blind", 10);
+        var control = checkout("control", 10);
+
+        stub("mv", """
+                   mv "$@" || exit $?
+                   for a; do dst=$a; done
+                   case ${dst##*/} in
+                     .gc-*-late-blind) mkdir -p @PROC@/4242; echo evil > @PROC@/4242/comm; echo '4242 (evil) S 1 4242 4242 0 -1' > @PROC@/4242/stat ;;
+                   esac
+                   """);
+        var run = liveWith(stubbed());
+
+        assertThat(control).as(run.stdout()).doesNotExist();
+        assertRestored(victim, run, "blind");
+    }
+
+    /// A re-check that cannot run restores too (fail closed): an unreadable ticket appears after the move, so the ticket read fails with 70.
+    /// Mutation p6a: `|| why=unverifiable` -> `|| why=`, the victim is removed unchecked.
+    @Test
+    void aRecheckThatCannotRun_sendsTheCheckoutBack() throws Exception {
+        skeleton();
+        var victim = checkout("zz-unreadable", 10);
+        var control = checkout("control", 10);
+
+        stub("mv", """
+                   mv "$@" || exit $?
+                   for a; do dst=$a; done
+                   case ${dst##*/} in
+                     .gc-*-zz-unreadable) printf 'id=bad\\n' > @Q@/waiting/bad; chmod 000 @Q@/waiting/bad ;;
+                   esac
+                   """);
+        var run = liveWith(stubbed());
+
+        assumeTrue(!Files.isReadable(home.resolve("work/queue/waiting/bad")), "a user that can read a mode-000 file (root) cannot make a ticket unreadable");
+        assertThat(control).as(run.stdout()).doesNotExist();
+        assertRestored(victim, run, "unverifiable");
+    }
+
+    /// The same fail-closed rule for a leftover: its re-check cannot run (a stub `flock` makes a ticket unreadable once the queue lock is
+    /// taken), so it goes back to its name instead of being removed. Mutation p6b: `|| why=unverifiable` -> `|| why=`: removed.
+    @Test
+    void aLeftoverWhoseRecheckCannotRun_isRestoredNotRemoved() throws Exception {
+        skeleton();
+        var leftover = Files.move(checkout("lv", 10), co().resolve(".gc-1700000000-lv"));
+
+        Files.writeString(leftover.resolve(".bb/keep"), "");   // only so the main loop does not look at lv again (and need the queue lock)
+        stub("flock", """
+                      flock "$@" || exit $?
+                      case "$1" in -w) printf 'id=bad\\n' > @Q@/waiting/bad; chmod 000 @Q@/waiting/bad ;; esac
+                      """);
+        var run = liveWith(stubbed());
+
+        assumeTrue(!Files.isReadable(home.resolve("work/queue/waiting/bad")), "a user that can read a mode-000 file (root) cannot make a ticket unreadable");
+        assertThat(co().resolve("lv/module/target/payload.bin")).as(run.stdout()).exists();
+        assertThat(run.stdout()).contains("leftover-restored .gc-1700000000-lv to lv reasons=unverifiable");
+        assertNoGcDirectories();
+        assertLogHas("LEFTOVER-RESTORED path=" + co().toRealPath() + "/lv from=" + co().toRealPath() + "/.gc-1700000000-lv reasons=unverifiable");
+    }
+
+    /// A process takes the leftover as its cwd AFTER the run's first scan and before the leftover's turn (a stub `flock -n`, the run lock, is the
+    /// step between them): only the scan in the leftover loop sees it. The leftover is recent, so the main loop keeps it once it is back.
+    /// Mutation g5: that scan dropped, the leftover is removed with a process in it.
+    @Test
+    void aProcessEnteringALeftoverAfterTheFirstScan_keepsIt() throws Exception {
+        skeleton();
+        Files.move(checkout("held", 1), co().resolve(".gc-1700000000-held"));
+        stub("flock", """
+                      flock "$@" || exit $?
+                      case "$1" in -n) mkdir -p @PROC@/9100; ln -s @CO@/.gc-1700000000-held @PROC@/9100/cwd ;; esac
+                      """);
+        var run = liveWith(stubbed());
+
+        assertThat(co().resolve("held/module/target/payload.bin")).as(run.stdout()).exists();
+        assertThat(run.stdout()).contains("leftover-restored .gc-1700000000-held to held reasons=process").doesNotContain("leftover-removed");
+        assertNoGcDirectories();
+    }
+
+    /// The main loop reads the process table and the tickets AGAIN for each candidate (a stub `flock -n` adds a process in one checkout and a
+    /// ticket for another after the run's first reads; the stub `mv` moves the fake process with its directory, as the kernel does). Whole
+    /// guards, not the re-check, must decide: the text says `(changed during the run)`, not `changed-after-move`.
+    /// Mutations: the scan before the queue lock dropped (n63), the ticket re-read under it dropped (n67): the re-check sends them back instead.
+    @Test
+    void aProcessAndATicketThatAppearAfterTheFirstReads_areMetByTheGuardsNotTheRecheck() throws Exception {
+        skeleton();
+        var process = checkout("a-process", 10);
+        var ticket = checkout("a-ticket", 10);
+        var control = checkout("control", 10);
+
+        stub("flock", """
+                      flock "$@" || exit $?
+                      case "$1" in -n)
+                        mkdir -p @PROC@/9200; ln -s @CO@/a-process @PROC@/9200/cwd
+                        printf 'id=late\\nowner=x\\nco=@CO@/a-ticket\\nsha=a\\n' > @Q@/waiting/late ;;
+                      esac
+                      """);
+        stub("mv", """
+                   mv "$@" || exit $?
+                   for a; do src=$dst; dst=$a; done
+                   for l in @PROC@/*/cwd; do [ "$(readlink "$l")" = "$src" ] && ln -sfn "$dst" "$l"; done
+                   exit 0
+                   """);
+        var run = liveWith(stubbed());
+
+        assertThat(control).as(run.stdout()).doesNotExist();
+        assertThat(process.resolve("module/target/payload.bin")).exists();
+        assertThat(ticket.resolve("module/target/payload.bin")).exists();
+        assertThat(run.stdout()).contains("keep a-process reasons=process (changed during the run)", "keep a-ticket reasons=ticket (changed during the run)")
+                  .doesNotContain("changed-after-move");
+        assertLogHas("KEPT path=" + co().toRealPath() + "/a-process reasons=process");
+        assertLogHas("KEPT path=" + co().toRealPath() + "/a-ticket reasons=ticket");
+    }
+
+    /// A keep file appears while the run holds the queue lock for the candidate (a stub `flock -w`, once, after the lock is taken): the
+    /// re-classification under the lock keeps it and logs KEPT. Mutation p7: that re-classification dropped, the re-check sends it back instead
+    /// (`changed-after-move`): the directory survives either way, so the row pins the reason text and the log line.
+    @Test
+    void aKeepFileAppearingUnderTheQueueLock_isMetByTheReclassification() throws Exception {
+        skeleton();
+        var victim = checkout("a-keep", 10);
+        var control = checkout("control", 10);
+
+        stub("flock", """
+                      flock "$@" || exit $?
+                      case "$1" in -w) [ -e @Q@/hooked ] || { : > @Q@/hooked; : > @CO@/a-keep/.bb/keep; } ;; esac
+                      """);
+        var run = liveWith(stubbed());
+
+        assertThat(control).as(run.stdout()).doesNotExist();
+        assertThat(victim.resolve("module/target/payload.bin")).exists();
+        assertThat(run.stdout()).contains("keep a-keep reasons=keep-file (changed during the run)").doesNotContain("changed-after-move");
+        assertLogHas("KEPT path=" + co().toRealPath() + "/a-keep reasons=keep-file");
+    }
+
     // ---- snapshot
     /// path -> type, size, mtime, link target; directories included (a removed or created entry changes its parent's mtime too).
     private static TreeMap<String, String> snapshot(Path root) throws IOException {
