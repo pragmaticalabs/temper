@@ -37,7 +37,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 /// [#eightCallers_whileRefsMove_allSucceedAtTheRightSha] (usually red); drop `9>&-` from the fetch ->
 /// [#theLockFd_isNotInheritedByAChildThatOutlivesTheScript]; drop `timeout` -> [#aHungFetch_isBounded_refused_andLeavesNothing];
 /// drop the `-w` bound -> [#aLockWaitThatExpires_isRefusedWithExit6_andLeavesNothing]; call every 137 an expiry ->
-/// [#anOutsideSigkill_ofTheFetch_isNotCalledABoundExpiry_andKeeps137]; delete the lock files -> [#aFetchKilledAtTheRefUpdate_leavesLockFiles_thatAreListedNotDeleted_andTheOperatorCommandRecovers].
+/// [#anOutsideSigkill_ofTheFetch_isNotCalledABoundExpiry_andKeeps137]; delete the lock files -> [#aFetchKilledAtTheRefUpdate_leavesBlockingFiles_thatAreListedNotDeleted_andThePrintedCommandRecovers].
 /// `-Dbb.lockit.rounds=N` runs the statistical row for N rounds of 8 callers and names how many were red.
 class BbCheckoutLockIT {
     private static final long DEADLINE_MILLIS = 90_000L;
@@ -373,50 +373,59 @@ class BbCheckoutLockIT {
         assertThat(Files.exists(co("s1-a"))).isFalse();
     }
 
+    /// what a killed git leaves that blocks the next fetch: *.lock files and packed-refs.new (not objects/**/tmp_*, which never block)
     private List<String> lockFiles() throws Exception {
-        var found = BbFixtures.run(List.of("find", home.resolve("work/pragmatica.git").toString(), "-name", "*.lock", "-type", "f"),
+        var found = BbFixtures.run(List.of("find", home.resolve("work/pragmatica.git").toString(), "-type", "f", "(", "-name", "*.lock", "-o", "-name", "packed-refs.new", ")"),
                                    env(Map.of()),
                                    null,
                                    null);
 
-        return found.stdout().lines().toList();
+        return found.stdout().lines().sorted().toList();
     }
 
-    /// the named limit: a git killed -9 at the ref-update point leaves *.lock files; later callers fail with git's rc, are told which
-    /// files and the operator command, and nothing is deleted by the script; the operator command makes the next caller succeed
+    /// the named limit: a git killed -9 while it updates refs leaves *.lock files and packed-refs.new (measured: ref update -> <ref>.lock;
+    /// packed-refs rewrite -> packed-refs.lock + packed-refs.new; pack receipt -> only objects/pack/tmp_pack_*, which does not block). Later
+    /// callers fail with git's rc and are told which files and the operator command; the script deletes nothing; the printed command, run
+    /// as printed, removes exactly those (not tmp_pack_*) and the next caller succeeds
     @Test
-    void aFetchKilledAtTheRefUpdate_leavesLockFiles_thatAreListedNotDeleted_andTheOperatorCommandRecovers() throws Exception {
-        var hook = home.resolve("work/pragmatica.git/hooks/reference-transaction");
+    void aFetchKilledAtTheRefUpdate_leavesBlockingFiles_thatAreListedNotDeleted_andThePrintedCommandRecovers() throws Exception {
+        var mirror = home.resolve("work/pragmatica.git");
+        var hook = mirror.resolve("hooks/reference-transaction");
         var hookText = "#!/bin/sh\n[ \"$1\" = prepared ] && [ -e " + gate.resolve("kill") + " ] && kill -KILL $PPID\nexit 0\n";
+        var tmpPack = mirror.resolve("objects/pack/tmp_pack_left");
 
         Files.createDirectories(hook.getParent());
         Files.writeString(hook, hookText);
         BbFixtures.executable(hook, hookText);
+        Files.writeString(tmpPack, "partial");
         Files.writeString(gate.resolve("kill"), "x");
         var killed = start("s1-a", c2);
 
         assertThat(killed.finish()).as(killed.stderr()).isEqualTo(137);
         var left = lockFiles();
 
-        assertThat(left).as("the killed fetch left lock files in the mirror").isNotEmpty();
+        assertThat(left).as("the killed fetch left blocking files in the mirror").isNotEmpty();
+        assertThat(left).as("packed-refs.new is among them").anyMatch(f -> f.endsWith("/packed-refs.new"));
         Files.delete(gate.resolve("kill"));
         var next = start("s1-b", c2);
 
         assertThat(next.finish()).as(next.stderr()).isNotZero();
-        assertThat(next.stderr()).contains("File exists", "lock files in the mirror", "-name '*.lock' -type f -delete");
+        assertThat(next.stderr()).contains("File exists", "packed-refs.new in the mirror", "only when no fetch is running");
         var stderrLines = next.stderrLines();
 
         left.forEach(f -> assertThat(stderrLines).as("listed: " + f).anyMatch(l -> l.contains(f)));
-        assertThat(next.stderr()).contains("only when no fetch is running",
-                                           "flock " + home.resolve("work/pragmatica.git.lock") + " find " + home.resolve("work/pragmatica.git"));
         assertThat(lockFiles()).as("the script deleted none of them").isEqualTo(left);
+        assertThat(Files.exists(tmpPack)).as("the script touched no tmp_pack").isTrue();
         assertThat(Files.exists(co("s1-b"))).isFalse();
-        var operator = BbFixtures.run(List.of("find", home.resolve("work/pragmatica.git").toString(), "-name", "*.lock", "-type", "f", "-delete"),
-                                      env(Map.of()),
-                                      null,
-                                      null);
+        var printed = stderrLines.stream().filter(l -> l.contains("under the same lock: ")).findFirst().orElseThrow();
+        var command = printed.substring(printed.indexOf("under the same lock: ") + "under the same lock: ".length());
 
-        assertThat(operator.rc()).isZero();
+        assertThat(command).startsWith("flock " + home.resolve("work/pragmatica.git.lock") + " find " + mirror + " ");
+        var operator = BbFixtures.run(List.of("bash", "-c", command), env(Map.of()), null, null);
+
+        assertThat(operator.rc()).as(operator.stderr()).isZero();
+        assertThat(lockFiles()).as("the printed command removed them all").isEmpty();
+        assertThat(Files.exists(tmpPack)).as("the printed command left tmp_pack alone").isTrue();
         var recovered = start("s1-c", c2);
 
         assertThat(recovered.finish()).as(recovered.stderr()).isZero();

@@ -23,7 +23,7 @@ set -euo pipefail
 
 readonly BB_CHECKOUT_OLD=7098ea8dee142600771968559e15e4db
 readonly BB_CHECKOUT_PREV=07a63e0eacd70c7269a9bf38f699b23d
-readonly BB_CHECKOUT_NEW=9d7de09db7e6522375ffe8712ac33fd5
+readonly BB_CHECKOUT_NEW=7ac8675bc4150e55d3e5d6ad49299d3c
 readonly BB_REAP_NEW=f322bb6d6e8967fe0d71c508ba3ae75d
 readonly PROBES_INIT_NEW=a4b1b264837dda6f1e536fb4fba5c11d
 readonly TARGET_RE='^[a-z_][a-z0-9_-]{0,31}@[A-Za-z0-9.:-]+$'

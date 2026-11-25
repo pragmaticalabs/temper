@@ -18,9 +18,12 @@
 # no flock/timeout on this host); 7 the mirror fetch exceeded its bound (timeout's 124, or 137 once the bound has passed; a SIGKILL
 # before the bound, e.g. the OOM killer, is not an expiry and stays 137 with a line saying so). Any other fetch failure keeps git's own
 # exit code. On 6 and 7 no checkout dir exists. Named limit: a git killed -9 mid-update (also our own KILL after the TERM grace) leaves
-# <ref>.lock / packed-refs.lock in the mirror and every later fetch fails "Unable to create ... File exists"; on any failed fetch this
-# script lists the *.lock files and the operator command (flock <mirror>.lock find <mirror> -name '*.lock' -type f -delete, only when no fetch runs on the mirror).
-# It deletes none: the lock-less hand-run scripts that also fetch the mirror may own them. The clone under the lock is not bounded.
+# <ref>.lock / packed-refs.lock / packed-refs.new in the mirror (measured on git 2.43: kill at the ref update leaves <ref>.lock, kill while
+# packed-refs is rewritten leaves packed-refs.lock AND packed-refs.new, kill during pack receipt leaves only objects/pack/tmp_pack_*, which
+# does not block) and every later fetch fails "Unable to create ... File exists"; on any failed fetch this script lists the *.lock files and
+# packed-refs.new and the operator command (flock <mirror>.lock find <mirror> -type f -name '*.lock' -delete -o -type f -name packed-refs.new -delete,
+# only when no fetch runs on the mirror). objects/**/tmp_* are neither listed nor touched by it. It deletes none itself: the lock-less
+# hand-run scripts that also fetch the mirror may own them. The clone under the lock is not bounded.
 set -euo pipefail
 [ $# -eq 2 ] || { echo "usage: bb-checkout <name> <sha-or-ref>" >&2; exit 2; }
 NAME=$1; REF=$2
@@ -47,15 +50,15 @@ if ! flock -n 9; then
   flock -w "$LOCK_WAIT" 9 || { echo "refusing: mirror lock $LOCK not obtained within ${LOCK_WAIT}s (another fetch holds it); nothing created" >&2; exit 6; }
 fi
 # fd 9 is closed (9>&-) in every command below: a child must never inherit the lock
-# a git killed -9 mid-update leaves <ref>.lock / packed-refs.lock in the mirror and every later fetch then fails with git's own exit code;
+# a git killed -9 mid-update leaves <ref>.lock / packed-refs.lock / packed-refs.new in the mirror and every later fetch then fails with git's own exit code;
 # nothing here deletes them (a foreign process, e.g. a hand-run fetch, may own them): they are listed with the operator's command
 lock_files() {
   local f
-  f=$(find "$MIRROR" -name '*.lock' -type f 2> /dev/null | head -n 20)
+  f=$(find "$MIRROR" -type f \( -name '*.lock' -o -name packed-refs.new \) 2> /dev/null | head -n 20)
   [ -z "$f" ] || {
-    echo "bb-checkout: lock files in the mirror, left by a git killed mid-update (none is deleted here):" >&2
+    echo "bb-checkout: lock files and packed-refs.new in the mirror, left by a git killed mid-update (none is deleted here):" >&2
     printf '%s\n' "$f" | while IFS= read -r l; do ls -ld "$l" >&2; done
-    echo "bb-checkout: only when no fetch is running on $MIRROR, remove them under the same lock: flock $LOCK find $MIRROR -name '*.lock' -type f -delete" >&2
+    echo "bb-checkout: only when no fetch is running on $MIRROR, remove them under the same lock: flock $LOCK find $MIRROR -type f -name '*.lock' -delete -o -type f -name packed-refs.new -delete" >&2
   }
 }
 rc=0; t0=$SECONDS
