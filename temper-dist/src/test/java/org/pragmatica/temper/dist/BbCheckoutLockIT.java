@@ -261,6 +261,24 @@ class BbCheckoutLockIT {
         return BbFixtures.run(List.of("flock", "-n", lock.toString(), "true"), env(Map.of()), null, null).rc() != 0;
     }
 
+    /// the process itself has the lock file open with the flock on it (/proc/<pid>/fdinfo of an fd that is the lock file carries a `lock:` line):
+    /// holding the lock through an ancestor that happens to outlive it is not the same, that ancestor can die first
+    private boolean holdsTheLock(long pid) throws IOException {
+        try (var fds = Files.list(Path.of("/proc/" + pid + "/fd"))) {
+            for (var fd : (Iterable<Path>) fds::iterator) {
+                try {
+                    if (Files.isSameFile(fd, lock) && Files.readAllLines(Path.of("/proc/" + pid + "/fdinfo/" + fd.getFileName())).stream().anyMatch(l -> l.startsWith("lock:"))) {
+                        return true;
+                    }
+                } catch (java.nio.file.NoSuchFileException gone) {
+                    // the fd closed between the listing and the read: not the lock
+                }
+            }
+        }
+
+        return false;
+    }
+
     /// the SigIgn mask of a live process (bit 0 is SIGHUP)
     private static long sigIgn(long pid) throws IOException {
         for (var line : Files.readAllLines(Path.of("/proc/" + pid + "/status"))) {
@@ -405,6 +423,7 @@ class BbCheckoutLockIT {
         var parked = ProcessHandle.of(awaitPid(gate.resolve("pid-" + verb), run)).orElseThrow();
 
         orphans.add(parked);
+        assertThat(holdsTheLock(parked.pid())).as("the parked git " + verb + " itself has the lock fd: an enclosing subshell is not the holder").isTrue();
         signal("KILL", run.process().pid());
         run.process().onExit().get(30, TimeUnit.SECONDS);
         assertThat(lockHeld()).as("the lock stays with the parked git " + verb).isTrue();
