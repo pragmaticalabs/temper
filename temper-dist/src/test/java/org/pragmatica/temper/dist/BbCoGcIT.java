@@ -16,6 +16,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Random;
 import java.util.TreeMap;
 import java.util.concurrent.TimeUnit;
 
@@ -1469,7 +1470,10 @@ class BbCoGcIT {
         var neighbour = checkout("neighbour", 1);
         var ended = Instant.now().minus(Duration.ofDays(9));
 
-        Files.write(big.resolve("module/target/big.bin"), new byte[5 * 1024 * 1024]);
+        var data = new byte[5 * 1024 * 1024];
+
+        new Random(7).nextBytes(data);   // incompressible: zeros measure 0 MB on a compressing file system (bigboy)
+        Files.write(big.resolve("module/target/big.bin"), data);
         ticketLog("big", "first", ended);
         ticketLog("big", "second", ended);
         var mvs = procRoot.resolve("mv.calls");
