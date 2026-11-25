@@ -640,6 +640,32 @@ class BbProbesIT {
         assertThat(pin("BB_REAP_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-probe-reap")));
         assertThat(pin("PROBES_INIT_NEW")).isEqualTo(BbFixtures.md5(INIT));
         assertThat(pin("BB_CHECKOUT_OLD")).isEqualTo("7098ea8dee142600771968559e15e4db").isEqualTo(BbFixtures.md5(originalBbCheckout()));
+        assertThat(pin("BB_CHECKOUT_PREV")).isEqualTo("07a63e0eacd70c7269a9bf38f699b23d").isEqualTo(BbFixtures.md5(preMirrorLockBbCheckout()));
+    }
+
+    private static byte[] preMirrorLockBbCheckout() throws IOException {
+        try (var in = BbProbesIT.class.getResourceAsStream("/bb/bb-checkout.pre119")) {
+            assertThat(in).as("test resource bb/bb-checkout.pre119").isNotNull();
+            var bytes = in.readAllBytes();
+
+            assertThat(BbFixtures.md5(bytes)).as("the vendored fixture holds the installed probes-aware file verbatim").isEqualTo(pin("BB_CHECKOUT_PREV"));
+
+            return bytes;
+        }
+    }
+
+    /// #119: the hosts carry the probes-aware bb-checkout without the mirror lock; the installer must upgrade exactly that file.
+    @Test
+    void install_upgradesTheInstalledProbesAwareBbCheckoutWithoutTheMirrorLock_keepingABackup() throws Exception {
+        installShim();
+        var hostHome = host("h1", preMirrorLockBbCheckout());
+        var run = install(INSTALL, "builder@h1");
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        assertThat(run.stdout().lines().toList()).contains("installed builder@h1 bb-checkout before=" + pin("BB_CHECKOUT_PREV")
+                                                          + " after=" + pin("BB_CHECKOUT_NEW"));
+        assertThat(hostHome.resolve("tools/bb-checkout")).hasBinaryContent(Files.readAllBytes(OPS_BB.resolve("bb-checkout")));
+        assertThat(hostHome.resolve("tools/bb-checkout.bak-" + pin("BB_CHECKOUT_PREV"))).hasBinaryContent(preMirrorLockBbCheckout());
     }
 
     @Test

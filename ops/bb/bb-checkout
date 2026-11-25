@@ -6,6 +6,17 @@
 # probes/<owner>/<name> resolves ONLY as refs/remotes/probes/<owner>/<name> in the clone (a public branch or tag of that name in
 # the mirror never shadows it); any other <ref> is tried in the mirror first; a ref that resolves in neither makes the run fail and leaves no checkout dir. At most once per 24 h a best-effort
 # bb-probe-reap runs afterwards; its failure never fails the checkout.
+# Mirror lock (#119): the fetch, the rev-parse and the clone of the mirror run under an exclusive flock on $HOME/work/pragmatica.git.lock
+# (next to the mirror, never in the queue dir), so concurrent callers queue instead of racing on ref locks ("cannot lock ref ...: is at X
+# but expected Y") or on a repack under a clone. Anyone else that writes the mirror must take the same lock. The lock fd is closed in every
+# child (a git child can never outlive the script holding the lock) and gc runs in the foreground (gc.autoDetach=false), inside the lock
+# and inside the fetch bound; the kernel drops the lock when the script dies, kill -9 included. A caller that has to queue says so on
+# stderr ("waiting for the mirror lock"). Bounds, in seconds, both overridable by a [0-9]+ environment variable:
+#   BB_MIRROR_LOCK_WAIT     default 420   wait for the lock; must cover one hung holder (the fetch bound) plus one normal fetch
+#   BB_MIRROR_FETCH_TIMEOUT default 300   the fetch itself (a cold fetch takes seconds to about a minute); TERM, KILL 10 s later
+# Exit codes: 2 usage, 3 dir exists, 4 owner guard, 5 ref not found (existing); 6 the mirror lock was not obtained within the wait (or
+# no flock/timeout on this host); 7 the mirror fetch exceeded its bound. Any other fetch failure keeps git's own exit code. On 6 and 7
+# no checkout dir exists.
 set -euo pipefail
 [ $# -eq 2 ] || { echo "usage: bb-checkout <name> <sha-or-ref>" >&2; exit 2; }
 NAME=$1; REF=$2
@@ -18,19 +29,36 @@ case "$NAME" in "$BB_OWNER"-*) ;; *) echo "refusing: checkout name must start wi
 MIRROR=$HOME/work/pragmatica.git
 CO=$HOME/work/co/$NAME
 [ -e "$CO" ] && { echo "refusing: $CO exists (one dir per agent/SHA; remove it yourself if it is yours)" >&2; exit 3; }
-git -C "$MIRROR" fetch -q --prune origin
 PROBES=$HOME/work/probes.git
 MADE=
 # a failed run removes only the dir this run created
 trap 'rc=$?; [ "$rc" = 0 ] || [ -z "$MADE" ] || rm -rf "$CO"' EXIT
+LOCK_WAIT=${BB_MIRROR_LOCK_WAIT:-420}; FETCH_T=${BB_MIRROR_FETCH_TIMEOUT:-300}
+case "$LOCK_WAIT$FETCH_T" in *[!0-9]*|"") echo "refusing: BB_MIRROR_LOCK_WAIT and BB_MIRROR_FETCH_TIMEOUT must be [0-9]+ seconds" >&2; exit 2;; esac
+command -v flock > /dev/null 2>&1 && command -v timeout > /dev/null 2>&1 || { echo "refusing: flock and timeout are required for the mirror lock" >&2; exit 6; }
+LOCK=$MIRROR.lock
+exec 9>> "$LOCK" || { echo "refusing: cannot open the mirror lock $LOCK" >&2; exit 6; }
+if ! flock -n 9; then
+  echo "bb-checkout: waiting for the mirror lock $LOCK (up to ${LOCK_WAIT}s)" >&2
+  flock -w "$LOCK_WAIT" 9 || { echo "refusing: mirror lock $LOCK not obtained within ${LOCK_WAIT}s (another fetch holds it); nothing created" >&2; exit 6; }
+fi
+# fd 9 is closed (9>&-) in every command below: a child must never inherit the lock
+rc=0
+timeout -k 10 "$FETCH_T" git -c gc.autoDetach=false -C "$MIRROR" fetch -q --prune origin 9>&- || rc=$?
+case $rc in
+  0) ;;
+  124|137) echo "refusing: the mirror fetch exceeded ${FETCH_T}s (BB_MIRROR_FETCH_TIMEOUT); nothing created" >&2; exit 7 ;;
+  *) exit "$rc" ;;
+esac
 PROBE_REF=
 case $REF in probes/*/*) PROBE_REF=$REF ;; esac
 SHA=
-[ -n "$PROBE_REF" ] || SHA=$(git -C "$MIRROR" rev-parse --verify "$REF^{commit}" 2> /dev/null) || SHA=
+[ -n "$PROBE_REF" ] || SHA=$(git -C "$MIRROR" rev-parse --verify "$REF^{commit}" 2> /dev/null 9>&-) || SHA=
 [ -n "$SHA" ] || [ -d "$PROBES" ] || { echo "refusing: $REF is not in the mirror (and there is no $PROBES)" >&2; exit 5; }
 mkdir -p "$HOME/work/co"
-git clone -q --no-checkout "$MIRROR" "$CO"
+git clone -q --no-checkout "$MIRROR" "$CO" 9>&-
 MADE=1
+exec 9>&-   # the mirror is no longer read: release the lock before the probes steps
 if [ -d "$PROBES" ]; then
   git -C "$CO" remote add probes "$PROBES"
   if ! git -C "$CO" fetch -q probes '+refs/probes/*:refs/remotes/probes/*'; then
