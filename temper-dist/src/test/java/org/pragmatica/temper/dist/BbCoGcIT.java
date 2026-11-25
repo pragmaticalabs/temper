@@ -1454,6 +1454,131 @@ class BbCoGcIT {
         assertEveryProbeFree(probes, 6);
     }
 
+    // ---- what a run says and does (G7)
+    /// One removal, end to end: the size, owner (the FIRST of two ticket-log rows that end together), days and the totals reach the stdout and the log;
+    /// the move goes to `.gc-<epoch>-<name>` exactly and every rm is limited to one file system. Mutations o3, o12 (size 0), o13 (days fixed at 3),
+    /// t5 (the later of two equal rows owns it), n77 (the RUN end line without its counts), o5 (the move target gets a suffix) and o8 (rm without
+    /// --one-file-system: the flag is pinned on the call, a bind mount cannot be made without root).
+    @Test
+    void aRemoval_isReportedAndLogged_withSizeOwnerDaysAndTotals() throws Exception {
+        skeleton();
+        var big = checkout("big", 10);
+        var neighbour = checkout("neighbour", 1);
+        var ended = Instant.now().minus(Duration.ofDays(9));
+
+        Files.write(big.resolve("module/target/big.bin"), new byte[5 * 1024 * 1024]);
+        ticketLog("big", "first", ended);
+        ticketLog("big", "second", ended);
+        var mvs = procRoot.resolve("mv.calls");
+        var rms = procRoot.resolve("rm.calls");
+
+        stub("mv", "echo \"$*\" >> " + mvs + "\nexec mv \"$@\"\n");
+        stub("rm", "echo \"$*\" >> " + rms + "\nexec rm \"$@\"\n");
+        var run = gcWith(stubbed(), "--live", "--days", "5", "--pace", "0");
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        assertThat(big).doesNotExist();
+        assertThat(neighbour.resolve("module/target/payload.bin")).exists();
+        assertThat(run.stdout()).contains("removed big size_mb=5 newest=", " owner=first", "total: removed 1 of 1 candidates, freed 5 MB, failed 0, skipped 0, kept 1 (recent=1), days=5, blind=0 unlisted-blind=0");
+        assertThat(logLines()).anyMatch(l -> l.contains(" REMOVED path=" + co().toRealPath() + "/big size_mb=5 last_activity=") && l.endsWith(" owner=first days=5"));
+        assertLogHas("RUN end removed=1 candidates=1 freed_mb=5 failed=0 skipped=0 kept=1 blind=0 unlisted_blind=0");
+        assertThat(Files.readAllLines(mvs)).anyMatch(l -> l.matches("-T -- \\S+/big \\S+/\\.gc-\\d+-big"));
+        assertThat(Files.readAllLines(rms)).isNotEmpty().allMatch(l -> l.contains("--one-file-system"));
+    }
+
+    /// A removal that fails (the move is done, the rm is not) is logged RM-FAILED with the moved path, counted, left in place for the next run to
+    /// take as a leftover, and the run ends with 74 although nothing was skipped; the checkout that can be removed still is. Mutations o9 (exit 0)
+    /// and n80 (74 only when a skip came with the failure).
+    @Test
+    void aFailedRemoval_isLoggedCounted_andTheRunExitsWith74() throws Exception {
+        skeleton();
+        var bad = checkout("bad", 10);
+        var good = checkout("good", 10);
+
+        stub("rm", "case \"$*\" in *-bad) exit 1 ;; esac\nexec rm \"$@\"\n");
+        var run = gcWith(stubbed(), "--live", "--days", "3", "--pace", "0");
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isEqualTo(74);
+        assertThat(good).as(run.stdout()).doesNotExist();
+        assertThat(bad).doesNotExist();
+        assertThat(logLines()).anyMatch(l -> l.contains(" RM-FAILED path=" + co().toRealPath() + "/bad moved=" + co().toRealPath() + "/.gc-"));
+        assertThat(run.stdout()).contains("failed bad ", "total: removed 1 of 2 candidates", "failed 1, skipped 0");
+        assertLogHas("failed=1 skipped=0 kept=0 blind=0 unlisted_blind=0");
+        try (var names = Files.list(co())) {
+            assertThat(names.map(x -> x.getFileName().toString()).toList()).hasSize(1).allMatch(x -> x.startsWith(".gc-") && x.endsWith("-bad"));
+        }
+    }
+
+    /// A directory without write permission blocks the removal of its contents: the tool makes the tree writable and removes again. Mutation o7
+    /// (no chmod: RM-FAILED, exit 74). Not run as root, where permissions do not bind.
+    @Test
+    void aReadOnlyDirectoryInACheckout_isMadeWritableAndRemoved() throws Exception {
+        skeleton();
+        assumeTrue(!"root".equals(System.getProperty("user.name")), "root ignores directory permissions");
+        var ro = checkout("ro", 10);
+        var locked = Files.createDirectories(ro.resolve("module/locked"));
+
+        Files.writeString(locked.resolve("f"), "x");
+        Files.setPosixFilePermissions(locked, java.nio.file.attribute.PosixFilePermissions.fromString("r-xr-xr-x"));
+        var run = live();
+
+        assertThat(ro).as(run.stdout()).doesNotExist();
+        assertThat(run.stdout()).contains("removed ro ", "failed 0");
+    }
+
+    /// BB_CO_GC_LOCK_WAIT is an integer: anything else is refused with 65 before any write. Mutation n08 (the check dropped: bash fails on the
+    /// arithmetic instead, rc is not 65). n09 (10#) is equivalent: flock reads the number as decimal, 08 and 8 wait the same.
+    @Test
+    void aLockWaitThatIsNotAnInteger_isRefusedWith65_beforeAnyWrite() throws Exception {
+        skeleton();
+        var idle = checkout("idle", 10);
+
+        for (var bad : List.of("abc", "1.5", "-1", "1x")) {
+            var run = gcWith(Map.of("BB_CO_GC_LOCK_WAIT", bad), "--live", "--days", "3", "--pace", "0");
+
+            assertThat(run.rc()).as(bad + "\n" + run.stdout() + run.stderr()).isEqualTo(65);
+            assertThat(run.stderr()).contains("BB_CO_GC_LOCK_WAIT is not an integer");
+            assertThat(idle.resolve("module/target/payload.bin")).as(bad).exists();
+        }
+
+        assertThat(home.resolve("work/co-gc.log")).doesNotExist();
+    }
+
+    /// The host cap is a positive integer on its own line: `0` is no cap (the default 3 applies, one running ticket does not defer); with no
+    /// ticket in running/ nothing counts as running even under cap 1. Mutations n44 (0 accepted as a cap: 1 running defers) and n46 (the empty
+    /// glob counted as a ticket: running=1 under cap 1).
+    @Test
+    void theHostCap_isPositive_andAnEmptyRunningDirectoryCountsNothing() throws Exception {
+        skeleton();
+        var idle = checkout("idle", 10);
+
+        Files.writeString(home.resolve("work/max-reactors"), "1\n");
+        var empty = live();
+
+        assertThat(idle).as(empty.stdout()).doesNotExist();
+        assertThat(empty.stdout()).doesNotContain("deferred");
+        var again = checkout("again", 10);
+
+        ticket("running", "r1", "busy1");
+        Files.writeString(home.resolve("work/max-reactors"), "0\n");
+        var zero = live();
+
+        assertThat(again).as(zero.stdout()).doesNotExist();
+        assertThat(zero.stdout()).doesNotContain("deferred").contains("removed again ");
+    }
+
+    /// The DRY total names the unreadable processes too (an unlisted one among them), and still removes nothing. Mutation n76.
+    @Test
+    void dry_totalNamesTheBlindProcesses() throws Exception {
+        skeleton();
+        var idle = checkout("idle", 10);
+        var run = gcWith(fakeProcWithBlindProcess("rogue"), "--days", "3");
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        assertThat(run.stdout()).contains("keep idle reasons=blind", "blind=1 unlisted-blind=1; nothing removed");
+        assertThat(idle.resolve("module/target/payload.bin")).exists();
+    }
+
     // ---- run exclusion (G4)
     /// Starts a child that holds `flock` on `lock` until `release` exists; returns once it holds it (polled, 5 s bound, no sleep as synchronisation).
     private Process holdFlock(Path lock, Path release) throws Exception {
