@@ -510,15 +510,43 @@ class BbCoGcIT {
                   .doesNotContain("\nremoved ", "removed control ", "removed victim ");
     }
 
-    /// The allowlist is the whole difference: the same unreadable process named `sshd` (a login's session monitor) keeps nothing.
+    /// The allowlist is the whole difference: the same unreadable process named `sshd` (a login's session monitor), `systemd` (the user manager) or
+    /// `(sd-pam)` keeps nothing. Mutations n20 and n21 (a name dropped from the allowlist): each name has its own row of the loop.
     @Test
     void aBlindProcessOnTheAllowlist_keepsNothing() throws Exception {
         skeleton();
-        var control = checkout("control", 10);
-        var run = liveWith(fakeProcWithBlindProcess("sshd"));
 
-        assertThat(control).as(run.stdout()).doesNotExist();
-        assertThat(run.stdout()).contains("removed control ", "blind=1 unlisted-blind=0");
+        for (var comm : List.of("sshd", "systemd", "(sd-pam)")) {
+            var control = checkout("control-" + comm.replaceAll("\\W", ""), 10);
+            var run = liveWith(fakeProcWithBlindProcess(comm));
+
+            assertThat(control).as(comm + "\n" + run.stdout()).doesNotExist();
+            assertThat(run.stdout()).as(comm).contains("removed control-", "blind=1 unlisted-blind=0");
+        }
+    }
+
+    /// A blind process that exits while the guard reads its name is no longer blind (the existence check after the read): `cat` of its comm
+    /// prints `rogue` and removes the process, the way a real one exits between the reads. A DRY run has one scan, so its candidate line is the
+    /// scan's own verdict: not `blind`, though the process was counted (blind=1) and named `rogue` (not on the allowlist). Mutation n18 (that
+    /// check dropped: the name read before the exit counts, unlisted-blind=1, the candidate is kept `blind`). n17 (the check BEFORE the read) is
+    /// equivalent: a pid gone before the read gives an empty name and the check after it skips the pid just the same.
+    @Test
+    void aBlindProcessThatExitsWhileItsNameIsRead_isNotCounted() throws Exception {
+        skeleton();
+        var victim = checkout("victim", 10);
+
+        fakeProcWithBlindProcess("rogue");
+        stub("cat", """
+                    for a; do :; done
+                    case $a in @PROC@/4242/comm) cat -- "$a"; rm -rf @PROC@/4242; exit 0 ;; esac
+                    exec cat "$@"
+                    """);
+        Files.move(procRoot.resolve("fakeproc/4242"), hookProc().resolve("4242"));
+        var run = gcWith(stubbed(), "--days", "3");
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        assertThat(run.stdout()).contains("candidate victim ", "blind=1 unlisted-blind=0").doesNotContain("reasons=blind");
+        assertThat(victim.resolve("module/target/payload.bin")).exists();
     }
 
     /// Finding 2: a leftover .gc dir gets the second look of a fresh move: keep, queued and a ticket each send it back to its name; none is removed.
@@ -602,6 +630,82 @@ class BbCoGcIT {
             assertThat(co().resolve(n)).as("control: removed").doesNotExist();
         }
         assertThat(Files.readAllLines(home.resolve("sleep.calls"))).as(run.stdout()).containsExactly("1 co=2", "1 co=1", "1 co=0");
+    }
+
+    // ---- pace (G6)
+    private Path recordSleeps() throws IOException {
+        var calls = procRoot.resolve("sleep.calls");
+
+        stub("sleep", "echo \"$*\" >> " + calls);
+
+        return calls;
+    }
+
+    /// --pace S is read in both spellings, defaults to 2, and a leading zero is a decimal (08 -> 8, never an octal error): the recorded `sleep`
+    /// gets exactly the number, after the one removal, and the RUN log line names it. Mutations n02 (--pace= ignored), n04 (08 left as typed),
+    /// n06 (default 0: no sleep call), n31 (sleep 1 whatever S is), n47 (RUN line without pace).
+    @Test
+    void pace_isReadInBothSpellings_defaultsToTwo_andLeadingZerosAreDecimal() throws Exception {
+        skeleton();
+        var calls = recordSleeps();
+        var cases = List.of(Map.entry(List.of("--pace", "3"), "3"),
+                            Map.entry(List.of("--pace=4"), "4"),
+                            Map.entry(List.of("--pace", "08"), "8"),
+                            Map.entry(List.<String>of(), "2"));
+        var i = 0;
+
+        for (var c : cases) {
+            var victim = checkout("p" + i++, 10);
+            var args = new ArrayList<>(List.of("--live", "--days", "3"));
+
+            args.addAll(c.getKey());
+            var run = gcWith(stubbed(), args.toArray(String[]::new));
+
+            assertThat(run.rc()).as(c + "\n" + run.stdout() + run.stderr()).isZero();
+            assertThat(victim).as(c.toString()).doesNotExist();
+            assertThat(Files.readAllLines(calls)).as(c.toString()).containsExactly(c.getValue());
+            assertLogHas("RUN live days=3 pace=" + c.getValue());
+            Files.delete(calls);
+        }
+    }
+
+    /// --pace is an integer 0..3600: 3601, a sign, a fraction, trailing text, an empty value and a missing value are usage errors (rc 2, the usage
+    /// line names --pace) before any write; 3600 is accepted. Mutations n03 (no digit check: -1 passes), n05 (upper bound 36000), n79 (usage without --pace).
+    @Test
+    void pace_outsideZeroToThreeThousandSixHundredOrNotANumber_isRefusedBeforeAnyWrite() throws Exception {
+        skeleton();
+        var idle = checkout("idle", 10);
+
+        recordSleeps();
+        for (var bad : List.of("3601", "-1", "1.5", "1x", "")) {
+            var run = gcWith(stubbed(), "--live", "--days", "3", "--pace", bad);
+
+            assertThat(run.rc()).as("[" + bad + "]\n" + run.stdout() + run.stderr()).isEqualTo(2);
+            assertThat(run.stderr()).contains("usage: bb-co-gc", "[--pace S]");
+            assertThat(idle.resolve("module/target/payload.bin")).as(bad).exists();
+        }
+
+        var missing = gcWith(stubbed(), "--live", "--pace");
+
+        assertThat(missing.rc()).as(missing.stderr()).isEqualTo(2);
+        assertThat(home.resolve("work/co-gc.log")).doesNotExist();
+        assertThat(gcWith(stubbed(), "--pace", "3600").rc()).isZero();
+    }
+
+    /// A removed leftover is followed by the pace like a removed checkout. Mutation n33 (no pace after a leftover).
+    @Test
+    void aRemovedLeftover_isFollowedByThePace() throws Exception {
+        skeleton();
+        var leftover = co().resolve(".gc-1700000000-crashed");
+        var calls = recordSleeps();
+
+        Files.createDirectories(leftover.resolve("module"));
+        Files.writeString(leftover.resolve("module/payload.bin"), "x");
+        var run = gcWith(stubbed(), "--live", "--days", "3", "--pace", "5");
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        assertThat(leftover).as(run.stdout()).doesNotExist();
+        assertThat(Files.readAllLines(calls)).containsExactly("5");
     }
 
     /// Finding 4: a running port-group ticket defers the whole live pass; nothing is read for removal, exit 0, one log line.
@@ -954,6 +1058,7 @@ class BbCoGcIT {
         skeleton();
         var victim = checkout("a-keep", 10);
         var control = checkout("control", 10);
+        var probes = probeTheQueueLockAtEveryScan();
 
         stub("flock", """
                       flock "$@" || exit $?
@@ -965,6 +1070,7 @@ class BbCoGcIT {
         assertThat(victim.resolve("module/target/payload.bin")).exists();
         assertThat(run.stdout()).contains("keep a-keep reasons=keep-file (changed during the run)").doesNotContain("changed-after-move");
         assertLogHas("KEPT path=" + co().toRealPath() + "/a-keep reasons=keep-file");
+        assertEveryProbeFree(probes, 3);   // mutation n68: no release after the keep, the next candidate's scan meets a held lock
     }
 
     // ---- guard inputs (G2): what each one reads decides what is removed
@@ -1313,6 +1419,39 @@ class BbCoGcIT {
         assertThat(control).doesNotExist();
         assertThat(co().resolve("a-held/module/target/payload.bin")).exists();
         assertEveryProbeFree(probes, 4);
+    }
+
+    /// The queue lock is let go on every way out of a candidate's turn: a target name that is taken (SKIP), a move that fails (MOVE-FAILED) and a
+    /// removal, each followed by a /proc scan (the next candidate's, the post-move one) that finds it free. Mutations n72 (no release on the
+    /// skip), n73 (none on the failed move), n70 (none after the move: the post-move scan runs under the lock), n29 (qunlock does nothing).
+    /// The clash is made by the `flock -w` stub once, under the lock: .gc-<now..now+2>-a-skip exist, so whichever second the tool reads is taken.
+    @Test
+    void theQueueLock_isFreeAfterASkipAFailedMoveAndARemoval() throws Exception {
+        skeleton();
+        var skipped = checkout("a-skip", 10);
+        var stuck = checkout("b-mvfail", 10);
+        var removed = checkout("c-remove", 10);
+        var last = checkout("d-last", 10);
+        var probes = probeTheQueueLockAtEveryScan();
+
+        stub("flock", """
+                      flock "$@" || exit $?
+                      case "$1" in -w) [ -e @Q@/hooked ] || { : > @Q@/hooked; t=$(date +%s); for e in $t $((t + 1)) $((t + 2)); do mkdir @CO@/.gc-$e-a-skip; done; } ;; esac
+                      """);
+        stub("mv", """
+                   case "$*" in "-T -- "*"/b-mvfail "*"/.gc-"*) echo "mv: stubbed failure" >&2; exit 1 ;; esac
+                   exec mv "$@"
+                   """);
+        var run = gcWith(stubbed(), "--live", "--days", "3", "--pace", "0");
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isEqualTo(74);
+        assertThat(skipped.resolve("module/target/payload.bin")).exists();
+        assertThat(stuck.resolve("module/target/payload.bin")).exists();
+        assertThat(removed).as(run.stdout()).doesNotExist();
+        assertThat(last).doesNotExist();
+        assertThat(logLines()).anyMatch(l -> l.contains("SKIP path=" + co().toRealPath() + "/a-skip reason="))
+                              .anyMatch(l -> l.endsWith("MOVE-FAILED path=" + co().toRealPath() + "/b-mvfail"));
+        assertEveryProbeFree(probes, 6);
     }
 
     // ---- run exclusion (G4)
