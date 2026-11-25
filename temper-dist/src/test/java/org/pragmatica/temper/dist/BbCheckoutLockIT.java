@@ -404,7 +404,9 @@ class BbCheckoutLockIT {
 
         assertThat(next.finish()).as(next.stderr()).isNotZero();
         assertThat(next.stderr()).contains("File exists", "lock files in the mirror", "-name '*.lock' -type f -delete");
-        left.forEach(f -> assertThat(next.stderrLines()).as("listed: " + f).anyMatch(l -> l.contains(f)));
+        var stderrLines = next.stderrLines();
+
+        left.forEach(f -> assertThat(stderrLines).as("listed: " + f).anyMatch(l -> l.contains(f)));
         assertThat(lockFiles()).as("the script deleted none of them").isEqualTo(left);
         assertThat(Files.exists(co("s1-b"))).isFalse();
         var operator = BbFixtures.run(List.of("find", home.resolve("work/pragmatica.git").toString(), "-name", "*.lock", "-type", "f", "-delete"),
