@@ -1356,7 +1356,10 @@ class BbCoGcIT {
             Files.delete(home.resolve("work/queue/running/r1"));
         } finally {
             Files.writeString(release, "go");
-            stop(holder);
+            // the holder leaves by itself: a forcibly killed flock child leaves its `sleep` holding the lock for up to 0.1 s
+            if (!holder.waitFor(10, TimeUnit.SECONDS)) {
+                stop(holder);
+            }
         }
 
         var later = live();
