@@ -1,0 +1,11 @@
+# Daily pass of bb-co-gc.service (issue #113). Not installed by the repo; see bb-co-gc.service.
+[Unit]
+Description=bb checkout GC, daily
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=30min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

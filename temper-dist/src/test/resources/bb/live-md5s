@@ -13,6 +13,7 @@ bb-portgroup.py 884caf3cf37b12cf5cf1d97e96f76a4c
 bb-modules.py absent
 bb-jbct-bootstrap 3e5396ecee48b99949456cf805df1e60
 bb-result 2b99dd5c414175c4fd40a9836da76298
+bb-co-gc absent
 bb-queue-lib.sh 2569b8af2cf8acc063024e553be66a93
 bb-queue 9cb677b671867eecdf90c9514bbd0732
 bb-build 24183c7d359b4030faeef894bbe4ba52

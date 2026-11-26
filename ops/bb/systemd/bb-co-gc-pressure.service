@@ -1,0 +1,11 @@
+# Extra bb-co-gc pass when the home filesystem is at 80% or more (issue #113; the soak runner stops submitting at 85%).
+# ExecCondition exiting 1 skips the start without marking the unit failed. Not installed by the repo; see bb-co-gc.service.
+[Unit]
+Description=bb checkout GC when home use is at 80% or more
+
+[Service]
+Type=oneshot
+ExecCondition=/bin/sh -c 'test "$(df --output=pcent "$HOME" | tail -n 1 | tr -dc 0-9)" -ge 80'
+ExecStart=%h/tools/bb-co-gc --live --days 3
+SuccessExitStatus=75
+Nice=10

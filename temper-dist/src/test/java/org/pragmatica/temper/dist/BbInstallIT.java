@@ -229,6 +229,7 @@ class BbInstallIT {
         assertThat(pin("BB_BUILD_PREJBCT")).isEqualTo(BbFixtures.md5(prev("bb-build.prejbct")));
         assertThat(pin("BB_BUILD_PREHELP")).isEqualTo(BbFixtures.md5(prev("bb-build.prehelp")));
         assertThat(pin("BB_RESULT_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-result")));
+        assertThat(pin("BB_COGC_NEW")).isEqualTo(BbFixtures.md5(OPS_BB.resolve("bb-co-gc")));
         assertThat(pin("BB_RESULT_PRECP")).isEqualTo(BbFixtures.md5(prev("bb-result.precp")));
         assertThat(pin("BB_BUILD_PRE80")).isEqualTo(BbFixtures.md5(prev("bb-build.pre80")));
         assertThat(pin("BB_QUEUE_PRE80")).isEqualTo(BbFixtures.md5(prev("bb-queue.pre80")));
@@ -324,6 +325,7 @@ class BbInstallIT {
                                                                     "installed builder@h1 bb-modules.py before=absent after=" + pin("BB_MODULES_NEW"),
                                                                     "installed builder@h1 bb-jbct-bootstrap before=absent after=" + pin("BB_JBCTBOOT_NEW"),
                                                                     "installed builder@h1 bb-result before=absent after=" + pin("BB_RESULT_NEW"),
+                                                                    "installed builder@h1 bb-co-gc before=absent after=" + pin("BB_COGC_NEW"),
                                                                     "installed builder@h1 bb-queue-lib.sh before=" + BbFixtures.BB_LIB_OLD
                                                                    + " after=" + pin("BB_LIB_NEW"),
                                                                     "installed builder@h1 bb-queue before=" + BbFixtures.BB_QUEUE_OLD
@@ -373,6 +375,7 @@ class BbInstallIT {
                                                                      "unchanged builder@h1 bb-modules.py " + pin("BB_MODULES_NEW"),
                                                                      "unchanged builder@h1 bb-jbct-bootstrap " + pin("BB_JBCTBOOT_NEW"),
                                                                      "unchanged builder@h1 bb-result " + pin("BB_RESULT_NEW"),
+                                                                     "unchanged builder@h1 bb-co-gc " + pin("BB_COGC_NEW"),
                                                                      "unchanged builder@h1 bb-queue-lib.sh " + pin("BB_LIB_NEW"),
                                                                      "unchanged builder@h1 bb-queue " + pin("BB_QUEUE_NEW"),
                                                                      "unchanged builder@h1 bb-build " + pin("BB_BUILD_NEW"),
@@ -911,6 +914,7 @@ class BbInstallIT {
                              "bb-cp-record",
                              "bb-test",
                              "bb-testcount",
+                             "bb-co-gc",
                              "bb-result")) {
             Files.copy(OPS_BB.resolve(f), tools.resolve(f), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
         }
@@ -1463,6 +1467,7 @@ class BbInstallIT {
                                 "bb-modules.py",
                                 "bb-jbct-bootstrap",
                                 "bb-result",
+                                "bb-co-gc",
                                 "bb-mutate",
                                 "bb-cp-record",
                                 "bb-test",

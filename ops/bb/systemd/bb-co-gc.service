@@ -1,0 +1,11 @@
+# systemd --user unit for ops/bb/bb-co-gc (issue #113). NOT INSTALLED by anything in the repo: copying it to ~/.config/systemd/user and
+# enabling the timers is a host change that needs the owner's approval, as does the first --live run.
+# Exit 75 is bb-co-gc's "another run holds the lock": not a failure.
+[Unit]
+Description=bb checkout GC: remove ~/work/co checkouts idle for more than 3 days
+
+[Service]
+Type=oneshot
+ExecStart=%h/tools/bb-co-gc --live --days 3
+SuccessExitStatus=75
+Nice=10
