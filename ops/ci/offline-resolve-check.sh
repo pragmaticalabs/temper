@@ -21,7 +21,7 @@ mvn_cmd="${MVN:-mvn}"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 cp -a "$repo" "$tmp/repo"
-removed=$(find "$tmp/repo" -type f \( -name 'maven-metadata-*.xml*' ! -name 'maven-metadata-local.xml*' -o -name resolver-status.properties \) -print -delete | wc -l)
+removed=$(find "$tmp/repo" -type f \( -name 'maven-metadata-*.xml*' ! -name 'maven-metadata-local.xml*' -o -name resolver-status.properties \) -print -delete | wc -l | tr -d " ")
 echo "offline-resolve-check: removed $removed remote-metadata files from the copy of $repo"
 
 if ! "$mvn_cmd" -B -ntp -o -Dmaven.repo.local="$tmp/repo" -Pacceptance test-compile; then
