@@ -1053,21 +1053,21 @@ class BbCheckoutLockIT {
 
     /// q18 (`-type f` dropped: a directory named *.lock would be listed and removed) and q19 (`-name '*'` under refs/: every loose ref would be removed):
     /// the printed command, run verbatim, removes exactly the files that were listed. Decoys: a loose ref, near-miss names, directories named *.lock
-    /// (one empty, one not), and files outside refs/ that are not on the list
+    /// (one empty, one not), and files outside refs/ that are not on the list. The loose ref is `stable`, which the origin also has: the failed fetch
+    /// prunes refs the origin lacks before it fails on the stale lock, so a ref the origin lacks would be gone before the printed command ran
     @Test
     void thePrintedCommand_removesExactlyTheListedFiles_andNothingElse() throws Exception {
         var mirror = home.resolve("work/pragmatica.git");
 
         controlFailure(mirror);
         var listed = mirror.resolve("refs/heads/main.lock");
-        var looseRef = mirror.resolve("refs/tags/kept-ref");
+        var looseRef = mirror.resolve("refs/heads/stable");
         var plain = List.of(mirror.resolve("refs/tags/lock"), mirror.resolve("refs/tags/x.lockfile"), mirror.resolve("refs/tags/x.lock.bak"),
                             mirror.resolve("HEAD.locked"), mirror.resolve("packed-refs.lockx"), mirror.resolve("refs/heads/readme.txt"),
                             mirror.resolve("description"));
         var emptyDir = mirror.resolve("refs/tags/empty.lock");
         var fullDir = mirror.resolve("refs/tags/full.lock");
 
-        Files.createDirectories(looseRef.getParent());
         Files.writeString(looseRef, c1 + "\n");
         for (var file : plain) {
             Files.writeString(file, "keep\n");
