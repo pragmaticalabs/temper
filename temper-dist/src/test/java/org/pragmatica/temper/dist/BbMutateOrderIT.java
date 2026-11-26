@@ -3,6 +3,7 @@ package org.pragmatica.temper.dist;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -45,7 +46,7 @@ class BbMutateOrderIT {
 
     private static final String DRIVER = """
         #!/usr/bin/env python3
-        # stand-in driver: <checkout> <call file> [NAME=value (SELF = this pid, START[-1] = its start in ns) | NAME (removed)]...
+        # stand-in driver (DRIVER_ARGS: its bb-build arguments, default `run`): <checkout> <call file> [NAME=value (SELF = this pid, START[-1] = its start in ns) | NAME (removed)]...
         # takes its order_at, writes <call file>.up, waits while <call file>.gate exists, then makes its call
         import os, subprocess, sys, time
         co, call, changes = sys.argv[1], sys.argv[2], sys.argv[3:]
@@ -64,7 +65,7 @@ class BbMutateOrderIT {
         os.rename(call + ".up.tmp", call + ".up")
         while os.path.exists(call + ".gate"):
             time.sleep(0.1)
-        cp = subprocess.run([os.environ["HOME"] + "/tools/bb-build", co, "run"], stdin=subprocess.DEVNULL, capture_output=True, text=True, env=env)
+        cp = subprocess.run([os.environ["HOME"] + "/tools/bb-build", co] + env.get("DRIVER_ARGS", "run").split(), stdin=subprocess.DEVNULL, capture_output=True, text=True, env=env)
         open(call + ".tmp", "w").write(f"{cp.returncode}\\n{cp.stdout}\\n{cp.stderr}")
         os.rename(call + ".tmp", call)
         time.sleep(1200)
@@ -1061,6 +1062,35 @@ class BbMutateOrderIT {
         assertThat(field("done", id, "bound_hit")).isEmpty();
         assertThat(Long.parseLong(field("done", id, "job_end")) - Long.parseLong(field("done", id, "started"))).isLessThan(15);
         assertThat(Files.readString(dir.resolve("work/co/mo-1/.bb/rc")).strip()).isEqualTo("0");
+    }
+
+    /// A bounded job whose jbct bootstrap helper fails returns by itself: the ticket carries job_end= (decided under the lock, as at the job's end
+    /// of a maven run), no bound_hit=, and the helper's rc. Mutation: drop `bound_or_end` from the helper-failure site -> no job_end=, red.
+    @Test
+    void aBoundedJobWhoseBootstrapHelperFails_recordsItsJobEnd() throws Exception {
+        BbFixtures.executable(tools.resolve("bb-jbct-bootstrap"), "#!/bin/bash\nexit 7\n");
+        var id = drive("mo", "mo-1", "BB_MUTANT_BOUND=600", "DRIVER_ARGS=jbct:check").ticket();
+
+        assertThat(within(60, () -> in("done", id))).as(in("running", id) + " " + in("waiting", id)).isTrue();
+        assertThat(field("done", id, "rc")).isEqualTo("7");
+        assertThat(field("done", id, "job_end")).isNotEmpty();
+        assertThat(field("done", id, "bound_hit")).isEmpty();
+    }
+
+    /// A job that returns after the bound runner marked its ticket (bound_hit=, the stop not yet done) neither records job_end= nor writes its own
+    /// rc: the ticket ends by the runner's word. Mutation: drop the bound_hit test (`exit 124`) from bound_or_end -> job_end= and rc 0, red.
+    @Test
+    void aJobReturningAfterTheBoundHitMark_writesNeitherJobEndNorRc() throws Exception {
+        Files.writeString(dir.resolve("hold.mo-1"), "");
+        var id = drive("mo", "mo-1", "BB_MUTANT_BOUND=600").ticket();
+
+        assertThat(within(60, () -> runs().contains("mo-1"))).isTrue();
+        Files.writeString(queue.resolve("running").resolve(id), "bound_hit=1\n", StandardOpenOption.APPEND);
+        release("mo-1");
+        assertThat(within(60, () -> in("done", id))).isTrue();
+        assertThat(field("done", id, "job_end")).as("no job_end=").isEmpty();
+        assertThat(dir.resolve("work/co/mo-1/.bb/rc")).as("the job wrote no rc").satisfiesAnyOf(path -> assertThat(path).doesNotExist(),
+                                                                                                path -> assertThat(unchecked(() -> Files.readString(path)).strip()).isNotEqualTo("0"));
     }
 
     private static int boundRunners(String id) {

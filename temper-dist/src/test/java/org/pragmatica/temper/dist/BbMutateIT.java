@@ -491,6 +491,29 @@ class BbMutateIT {
         assertThat(bounds.stream().map(line -> line[1]).distinct()).singleElement().asString().matches("[0-9]{19}");
     }
 
+    /// A bound is whole seconds (bb-build takes digits): a fractional mutantTimeoutSecs is rounded UP, never down to 0 (which bb-build refuses).
+    /// Mutation: `int(...)` for `math.ceil(...)` in the bound sent to bb-build -> 0 here, red.
+    @Test
+    void aFractionalBound_isRoundedUpToAWholeSecond() throws Exception {
+        extra = List.of("--timeout", "2");
+        buildJson = "{\"mutantTimeoutSecs\":0.4}";
+        batch(modules(null), mutation("mA", "A", "ATest", "MUT"));
+        var bounds = Files.readAllLines(home.resolve("bounds.log")).stream().map(line -> line.split(" ")[0]).toList();
+
+        assertThat(bounds).startsWith("120", "1").containsOnly("120", "1");
+    }
+
+    /// The control's bound is its --timeout, at least 1 s: --timeout 0 sends 1, not 0. Mutation: `max(0, ...)` for `max(1, ...)` -> 0, red.
+    @Test
+    void aZeroTimeout_sendsABoundOfOneSecondNotZero() throws Exception {
+        killableBuilds();
+        extra = List.of("--timeout", "0");
+        okRcs = List.of(4);
+        batch(modules("nostart"), mutation("mA", "A", "ATest", "MUT"));
+
+        assertThat(Files.readAllLines(home.resolve("bounds.log")).stream().map(line -> line.split(" ")[0]).toList()).first().isEqualTo("1");
+    }
+
     /// The queue wait expires for a batch that never starts: the run is aborted (exit 4) and every member is NOT-RUN with no build credited.
     @Test
     void aRunAbortedByTheQueueWait_leavesTheRestNotRunCreditedDash() throws Exception {
