@@ -179,6 +179,9 @@ class BbRepeatedGoalIT {
         refused("test", "install");
         refused("package", "verify");
         refused("pre-integration-test", "test");
+        refused("prepare-package", "test");
+        refused("post-integration-test", "test");
+        refused("deploy", "test");
         refused("verify", "install");
     }
 
