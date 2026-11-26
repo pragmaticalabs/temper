@@ -443,6 +443,24 @@ class BbMutateIT {
         assertThat(out.rc()).isZero();
     }
 
+    /// The production order of a stopped build (bb-build writes .bb/rc 124, its waiter then moves the ticket to done/, bb-mutate polls every 5 s):
+    /// bb-mutate finds the ticket carrying bound_hit= in done/, never in running/, and still reads TIMEOUT, credited solo. The fake moves the ticket
+    /// to done/ before it exits, so the running/ copy is gone when bb-mutate reads. Control: [#aBuildStoppedByTheBoundRunner_readsAsTheDriversOwnTimeout]
+    /// leaves the same ticket in running/. Mutation: `ticket_has` reads running/ only (`for state in ("running",)`) -> BUILD-FAIL here, red.
+    @Test
+    void aBoundHitTicketAlreadyInDone_readsAsTheDriversOwnTimeout() throws Exception {
+        buildJson = "{\"mutantTimeoutSecs\":60}";
+        var out = batch(modules("boundeddone"), mutation("mA", "A", "ATest", "MUT"));
+        var queue = home.resolve("work/queue");
+
+        assertThat(queue.resolve("running/T1")).as("the ticket moved on, as the waiter's to_done leaves it").doesNotExist();
+        assertThat(Files.readString(queue.resolve("done/T1"))).contains("bound_hit=");
+        assertThat(out.outcomes()).containsEntry("mA", "TIMEOUT");
+        assertThat(out.credited()).containsEntry("mA", "solo");
+        assertThat(out.detail("mA")).isEqualTo("exceeded 60s from its own Maven start; job killed (counted detected)");
+        assertThat(out.rc()).isZero();
+    }
+
     /// --timeout above 16666 min is a bound bb-build refuses (six digits): bb-mutate refuses it at the start, exit 2, one line naming --timeout, no
     /// build queued (the fake bb-build never ran). So is a mutantTimeoutSecs over 999999. Control: 16666 min starts (a build is made).
     /// Mutation: drop the check -> the control build is refused by bb-build instead, with no word of --timeout, red.
@@ -476,6 +494,41 @@ class BbMutateIT {
 
         assertThat(out.outcomes()).containsEntry("mA", "RED");
         assertThat(builds()).isNotEmpty();
+    }
+
+    /// A mutantTimeoutSecs of exactly 999999 (the most a bound can be) starts: the build is made and its bound is sent as is. Control: 1000000 is
+    /// refused in [#aTimeoutOverSixDigitsOfSeconds_isRefusedAtTheStart_namingTheOption]. Mutation: `>` to `>=` in the mutantTimeoutSecs check -> refused
+    /// here, red.
+    @Test
+    void aMutantTimeoutOfExactlySixNines_starts_andIsSentAsIs() throws Exception {
+        buildJson = "{\"mutantTimeoutSecs\":999999}";
+        var out = batch(modules(null), mutation("mA", "A", "ATest", "MUT"));
+        var bounds = Files.readAllLines(home.resolve("bounds.log")).stream().map(line -> line.split(" ")[0]).toList();
+
+        assertThat(out.outcomes()).containsEntry("mA", "RED");
+        assertThat(bounds).hasSize(builds().size()).endsWith("999999");
+    }
+
+    /// The derived bound (3 x the control's Maven time) is capped at 999999: a control of 400000 s of Maven (the fake clock: its .bb/start reads that
+    /// far back) would derive 1200000, over what bb-build accepts, and sends 999999. Control: [#aDerivedBound_isThreeTimesTheControlsMavenTime].
+    /// Mutation: drop the `min(..., MAX_BOUND)` cap on the derived bound -> 1200000 here, red.
+    @Test
+    void aDerivedBound_isCappedAtSixNines() throws Exception {
+        var out = batch(withKey(modules(null), "mvnSecs", 400000), mutation("mA", "A", "ATest", "MUT"));
+        var bounds = Files.readAllLines(home.resolve("bounds.log")).stream().map(line -> line.split(" ")[0]).toList();
+
+        assertThat(out.log()).contains("control maven 400000s; per-mutant bound 999999s");
+        assertThat(bounds).hasSize(builds().size()).last().isEqualTo("999999");
+    }
+
+    /// Control of [#aDerivedBound_isCappedAtSixNines]: a control of 100 s of Maven derives 300, sent to the mutant's build, so the cap is not a constant.
+    @Test
+    void aDerivedBound_isThreeTimesTheControlsMavenTime() throws Exception {
+        var out = batch(withKey(modules(null), "mvnSecs", 100), mutation("mA", "A", "ATest", "MUT"));
+        var bounds = Files.readAllLines(home.resolve("bounds.log")).stream().map(line -> line.split(" ")[0]).toList();
+
+        assertThat(out.log()).contains("control maven 100s; per-mutant bound 300s");
+        assertThat(bounds).hasSize(builds().size()).last().isEqualTo("300");
     }
 
     /// Every build carries its bound to bb-build (#116): a mutant's own, the control's --timeout; and the run's one submit time.
