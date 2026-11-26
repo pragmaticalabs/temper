@@ -256,6 +256,7 @@ class BbInstallIT {
         assertThat(pin("BB_LIB_PRE116")).isEqualTo(BbFixtures.md5(prev("bb-queue-lib.sh.pre116")));
         assertThat(pin("BB_BUILD_PRE116")).isEqualTo(BbFixtures.md5(prev("bb-build.pre116")));
         assertThat(pin("BB_MUTATE_PRE116")).isEqualTo(BbFixtures.md5(prev("bb-mutate.pre116")));
+        assertThat(pin("BB_BUILD_PRE133")).isEqualTo(BbFixtures.md5(prev("bb-build.pre133")));
     }
 
     /// The bb-test lane helpers go in before bb-build (which calls bb-cp-record); a host holding a stranger's bb-test is refused, naming the one pin and
@@ -1358,6 +1359,7 @@ class BbInstallIT {
                                                                  + "|" + pin("BB_BUILD_PRE102")
                                                                  + "|" + pin("BB_BUILD_PRE112")
                                                                  + "|" + pin("BB_BUILD_PRE116")
+                                                                 + "|" + pin("BB_BUILD_PRE133")
                                                                  + "|" + pin("BB_BUILD_NEW"));
         assertThat(listing(good)).isEqualTo(goodBefore);
         assertThat(listing(diverged)).isEqualTo(divergedBefore);

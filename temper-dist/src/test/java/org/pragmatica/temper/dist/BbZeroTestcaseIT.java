@@ -388,6 +388,25 @@ class BbZeroTestcaseIT {
         assertRefused(run, "FooTest=2 BbFooIT=2 BbBarIT=0", "BbBarIT");
     }
 
+    /// CTO 2026-11-27 (f3812b, aether/forge/forge-tests: surefire skip=true): a class named by BOTH selectors that only failsafe ran
+    /// is one token, counted over both plugins' reports; before, its surefire count 0 refused the build.
+    @Test
+    void pos_aTokenInBothSelectors_isOneCount_summedOverBothPlugins() throws Exception {
+        var run = run(report("m/target/failsafe-reports", "org.x.AwaitsTest", TWO.replace("</testsuite>", "<testcase classname='x' name='c'/><testcase classname='x' name='d'/></testsuite>")) + " && " + report("m/target/failsafe-reports", "org.x.ObsTest", "<testsuite><testcase classname='x' name='a'/></testsuite>"),
+                      "-Dtest=AwaitsTest", "-Dit.test=AwaitsTest,ObsTest");
+
+        assertThat(run.rc()).as(run.log()).isEqualTo("0");
+        assertThat(run.fileRc()).isEqualTo("0");
+        assertThat(run.log()).contains("bb-build: selected testcases: AwaitsTest=4 ObsTest=1\n").doesNotContain("refused");
+    }
+
+    @Test
+    void pos_aTokenInBothSelectorsThatNeitherRan_isRefusedOnce() throws Exception {
+        var run = run(report("m/target/failsafe-reports", "org.x.ObsTest", "<testsuite><testcase classname='x' name='a'/></testsuite>"), "-Dtest=AwaitsTest", "-Dit.test=AwaitsTest,ObsTest");
+
+        assertRefused(run, "AwaitsTest=0 ObsTest=1", "AwaitsTest");
+    }
+
     @Test
     void all_emptySOfAPluginThatRan_isCountedWhole_aSkippedGoalDidNotRun() throws Exception {
         assertRefused(run(goal("surefire", "test") + "; echo '[INFO] No tests to run.'", "-Dit.test=none"), "surefire(all)=0", "surefire(all)");
