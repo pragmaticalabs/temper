@@ -254,6 +254,7 @@ class BbInstallIT {
         assertThat(pin("BB_BUILD_PRE112")).isEqualTo(BbFixtures.md5(prev("bb-build.pre112")));
         assertThat(pin("BB_MODULES_PRE112")).isEqualTo(BbFixtures.md5(prev("bb-modules.py.pre112")));
         assertThat(pin("BB_LIB_PRE116")).isEqualTo(BbFixtures.md5(prev("bb-queue-lib.sh.pre116")));
+        assertThat(pin("BB_LIB_PRE130")).isEqualTo(BbFixtures.md5(prev("bb-queue-lib.sh.pre130")));
         assertThat(pin("BB_BUILD_PRE116")).isEqualTo(BbFixtures.md5(prev("bb-build.pre116")));
         assertThat(pin("BB_MUTATE_PRE116")).isEqualTo(BbFixtures.md5(prev("bb-mutate.pre116")));
         assertThat(pin("BB_BUILD_PRE133")).isEqualTo(BbFixtures.md5(prev("bb-build.pre133")));
@@ -1243,6 +1244,22 @@ class BbInstallIT {
         }
     }
 
+    /// A host holding main's bb-queue-lib.sh from before #130 (no queue claims to come) is accepted and upgraded; its .bak file is the old lib.
+    /// Mutation: drop BB_LIB_PRE130 from accepted_of -> the host is refused, exit 65, red.
+    @Test
+    void aHostWithTheLibBefore130_isAcceptedAndUpgraded() throws Exception {
+        var tools = host("h1");
+
+        Files.write(tools.resolve("bb-queue-lib.sh"), prev("bb-queue-lib.sh.pre130"));
+        var run = install("builder@h1");
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        assertThat(run.stdout()).doesNotContain("refused");
+        assertThat(run.stdout()).contains("installed builder@h1 bb-queue-lib.sh before=" + pin("BB_LIB_PRE130") + " after=" + pin("BB_LIB_NEW"));
+        assertThat(tools.resolve("bb-queue-lib.sh")).hasBinaryContent(Files.readAllBytes(OPS_BB.resolve("bb-queue-lib.sh")));
+        assertThat(tools.resolve("bb-queue-lib.sh.bak-" + pin("BB_LIB_PRE130"))).hasBinaryContent(prev("bb-queue-lib.sh.pre130"));
+    }
+
     /// #116: the lib goes first, then bb-build, then bb-mutate (the last of all files), and the .bak files put back in the reverse order give back
     /// the host before the install, so a host only ever holds the mixes [BbMutateOrderIT] pins as free of leaks. The order is read from
     /// what the install printed, not from FILES.
@@ -1416,6 +1433,7 @@ class BbInstallIT {
                            + "|" + pin("BB_LIB_PRE88")
                            + "|" + pin("BB_LIB_PRE90")
                            + "|" + pin("BB_LIB_PRE116")
+                           + "|" + pin("BB_LIB_PRE130")
                            + "|" + pin("BB_LIB_NEW"))
                   .contains("bb-queue installed=" + BbFixtures.md5("unrelated tool\n".getBytes())
                            + " expected=" + BbFixtures.BB_QUEUE_OLD

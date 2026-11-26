@@ -162,6 +162,8 @@ class BbMemClaimIT {
 
         assertThat(within(40_000, () -> up("a"))).as("no ticket of any kind runs: #53's override grants the starved ticket").isTrue();
         assertThat(Files.readString(queue.resolve("running").resolve(a))).contains("mem_override=");
+        assertThat(field("running", a, "mem_avail_kb_grant")).as("the override grant is recorded too").isEqualTo(Long.toString(5 * GIB_KB));
+        assertThat(field("running", a, "oom_kill_grant")).isEqualTo("7");
     }
 
     @Test
@@ -216,6 +218,51 @@ class BbMemClaimIT {
         } finally {
             holder.destroyForcibly();
         }
+    }
+
+    @Test
+    void aPickForAnotherCaller_recordsNothing_andThePickForTheGrantedTicketRecordsOnce() throws Exception {
+        var first = waitingTicket("first", 20);
+        var second = waitingTicket("second", 10);
+
+        assertThat(lib("pick 0 " + second).stdout().strip()).as("the first ticket is the candidate").isEqualTo(first);
+        assertThat(Files.readString(queue.resolve("waiting").resolve(first))).doesNotContain("mem_avail_kb_grant");
+        assertThat(lib("pick 0 " + first).stdout().strip()).isEqualTo(first);
+        assertThat(Files.readAllLines(queue.resolve("waiting").resolve(first)).stream().filter(l -> l.startsWith("mem_avail_kb_grant=")).count())
+                .isEqualTo(1);
+        assertThat(Files.readAllLines(queue.resolve("waiting").resolve(first)).stream().filter(l -> l.startsWith("oom_kill_grant=")).count())
+                .isEqualTo(1);
+    }
+
+    @Test
+    void aClaimHeldGrant_alsoSubtractsTheOffQueueHeadroom() throws Exception {
+        var holder = BbFixtures.process("sleep", "600").start();
+
+        try {
+            memAvailableKb(25 * GIB_KB);
+            Files.writeString(queue.resolve("running").resolve("job-" + BbFixtures.RUN), "started=1\n");
+            BbFixtures.recordLaunch(queue, "job-" + BbFixtures.RUN, holder.pid());
+            // an off-queue JVM: -Xmx8g, RSS 1 GB -> 7 GB of headroom still to come
+            Files.writeString(dir.resolve("ps"), "999999 1 " + GIB_KB + " java -Xmx8g Tlc\n");
+            assertThat(lib("mem_held").stdout().strip())
+                    .isEqualTo("held: MemAvailable 25.0 GB - off-queue JVM headroom 7.0 GB - queue claims to come 6.0 GB (job-" + BbFixtures.RUN
+                               + " 6.0 GB) - this grant 6.0 GB = 6.0 GB < floor 8 GB");
+            Files.writeString(dir.resolve("ps"), "");
+            assertThat(lib("mem_held").stdout().strip()).as("without the off-queue JVM: 25 - 6 - 6 = 13 >= 8").isEmpty();
+        } finally {
+            holder.destroyForcibly();
+        }
+    }
+
+    /// A waiting ticket created `ageSecs` ago, as BbMemFloorIT writes one; no waiter: only `pick` is called on it.
+    private String waitingTicket(String name, long ageSecs) throws IOException {
+        var id = name + "-" + BbFixtures.RUN;
+        var created = (System.currentTimeMillis() / 1000 - ageSecs) * 1_000_000_000L;
+
+        Files.writeString(queue.resolve("waiting").resolve(id),
+                          "owner=memclaim\nsha=0000000\ncreated=" + created + "\nco=" + dir.resolve("co-" + name) + "\nargs=-B install\n");
+
+        return id;
     }
 
     private Map<String, String> env() {
