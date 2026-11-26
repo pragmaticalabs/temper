@@ -48,6 +48,22 @@
 
     <dependencyManagement>
         <dependencies>
+            <!-- #123: pragmatica-lite tcp -> bcpkix-jdk18on:1.80 -> bcutil-jdk18on -> bcprov-jdk18on; bcpkix-1.80.pom declares bcutil
+                 and bcutil-1.80.pom declares bcprov as the RANGE [1.80,1.81). Maven resolves a range from maven-metadata, so the build needed that metadata
+                 (a Central fetch, or the cached copy) on every run where the update policy fired, and failed with "No versions available"
+                 although the jars were cached. A managed version replaces the range before it is resolved: no metadata is read.
+                 1.80.2 is what the range resolved to when this pin was written. ops/ci/offline-resolve-check.sh fails CI when another
+                 range-only dependency appears. -->
+            <dependency>
+                <groupId>org.bouncycastle</groupId>
+                <artifactId>bcutil-jdk18on</artifactId>
+                <version>1.80.2</version>
+            </dependency>
+            <dependency>
+                <groupId>org.bouncycastle</groupId>
+                <artifactId>bcprov-jdk18on</artifactId>
+                <version>1.80.2</version>
+            </dependency>
             <dependency>
                 <groupId>org.pragmatica-lite</groupId>
                 <artifactId>core</artifactId>

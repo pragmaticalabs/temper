@@ -10,7 +10,7 @@
 #   BB_INSTALL_SSH (tests only) replaces everything before <target>, and then no config is read.
 # Phase 0, local: bb-checkout, bb-probe-reap and probes-init.sh next to this script must be the pinned reviewed files, else exit 65.
 # Phase 1, read-only, EVERY target first: the installed bb-checkout must be BB_CHECKOUT_OLD (the 2026-11-09 snapshot, identical on all
-#   hosts) or BB_CHECKOUT_NEW, and bb-probe-reap absent or BB_REAP_NEW. A mismatch prints `refused <target> <file> installed=<md5|absent>
+#   hosts), BB_CHECKOUT_PREV (the probes-aware file before #119's mirror lock) or BB_CHECKOUT_NEW, and bb-probe-reap absent or BB_REAP_NEW. A mismatch prints `refused <target> <file> installed=<md5|absent>
 #   expected=<pin>[|<pin>]` and the run exits 65 having written nothing anywhere; an unreachable target is 69.
 # Phase 2, per target: bb-probe-reap, then probes-init.sh (idempotent), then bb-checkout, each file as in install-bb-fields.sh:
 #   ~/tools/<f>.new (base64 on stdin), md5 checked, installed file re-checked against phase 1, chmod 0755, cp -p an existing
@@ -22,7 +22,8 @@
 set -euo pipefail
 
 readonly BB_CHECKOUT_OLD=7098ea8dee142600771968559e15e4db
-readonly BB_CHECKOUT_NEW=07a63e0eacd70c7269a9bf38f699b23d
+readonly BB_CHECKOUT_PREV=07a63e0eacd70c7269a9bf38f699b23d
+readonly BB_CHECKOUT_NEW=6501340810798652bdaf7a50945ba26e
 readonly BB_REAP_NEW=f322bb6d6e8967fe0d71c508ba3ae75d
 readonly PROBES_INIT_NEW=a4b1b264837dda6f1e536fb4fba5c11d
 readonly TARGET_RE='^[a-z_][a-z0-9_-]{0,31}@[A-Za-z0-9.:-]+$'
@@ -73,8 +74,8 @@ for t in "${targets[@]}"; do
   r=$(printf '%s\n' "$out" | awk '$1 == "bb-probe-reap" { print $2 }' | head -n 1)
   [ -n "$c" ] && [ -n "$r" ] || { echo "install-probes: $t gave no answer; nothing written" >&2; exit 69; }
   CV[i]=$c; RV[i]=$r; i=$((i + 1))
-  if [ "$c" != "$BB_CHECKOUT_OLD" ] && [ "$c" != "$BB_CHECKOUT_NEW" ]; then
-    echo "refused $t bb-checkout installed=$c expected=$BB_CHECKOUT_OLD|$BB_CHECKOUT_NEW"; refused=1; fi
+  if [ "$c" != "$BB_CHECKOUT_OLD" ] && [ "$c" != "$BB_CHECKOUT_PREV" ] && [ "$c" != "$BB_CHECKOUT_NEW" ]; then
+    echo "refused $t bb-checkout installed=$c expected=$BB_CHECKOUT_OLD|$BB_CHECKOUT_PREV|$BB_CHECKOUT_NEW"; refused=1; fi
   if [ "$r" != absent ] && [ "$r" != "$BB_REAP_NEW" ]; then
     echo "refused $t bb-probe-reap installed=$r expected=absent|$BB_REAP_NEW"; refused=1; fi
 done
