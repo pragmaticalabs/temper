@@ -856,6 +856,25 @@ class BbCoGcIT {
         return Files.createDirectories(procRoot.resolve("fakeproc-hook/self")).getParent();
     }
 
+    /// `du` counts allocated blocks, and a copy-on-write file system (bigboy's ZFS) reports a fresh file as 2 KB until its transaction group is
+    /// written, seconds later. The row asserts the tool's size, not the file system's lag: it polls the same `du -sk -P` the tool runs until
+    /// the tree reads at least `kb` (30 s bound; the poll only ends early, a slow file system makes the assertion that follows red, never a sleep).
+    private static void waitUntilAllocated(Path tree, long kb) throws Exception {
+        var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+
+        while (duKb(tree) < kb && System.nanoTime() < deadline) {
+            Thread.sleep(50);
+        }
+    }
+
+    private static long duKb(Path tree) throws Exception {
+        var du = BbFixtures.process("du", "-sk", "-P", "--", tree.toString()).redirectErrorStream(true).start();
+        var out = new String(du.getInputStream().readAllBytes()).trim();
+
+        du.waitFor();
+        return Long.parseLong(out.split("\\s+")[0]);
+    }
+
     private List<String> logLines() throws IOException {
         return Files.readAllLines(home.resolve("work/co-gc.log"));
     }
@@ -1472,8 +1491,9 @@ class BbCoGcIT {
 
         var data = new byte[5 * 1024 * 1024];
 
-        new Random(7).nextBytes(data);   // incompressible: zeros measure 0 MB on a compressing file system (bigboy)
+        new Random(7).nextBytes(data);   // incompressible: zeros measure 0 MB on a compressing file system
         Files.write(big.resolve("module/target/big.bin"), data);
+        waitUntilAllocated(big, 5000);
         ticketLog("big", "first", ended);
         ticketLog("big", "second", ended);
         var mvs = procRoot.resolve("mv.calls");
