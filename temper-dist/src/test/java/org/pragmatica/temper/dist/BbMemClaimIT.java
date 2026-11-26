@@ -284,9 +284,11 @@ class BbMemClaimIT {
         return Files.exists(dir.resolve(name + ".up"));
     }
 
-    private long ups() throws IOException {
+    private long ups() {
         try (var names = Files.list(dir)) {
             return names.filter(p -> p.getFileName().toString().endsWith(".up")).count();
+        } catch (IOException e) {
+            throw new IllegalStateException(e);
         }
     }
 
