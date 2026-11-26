@@ -9,7 +9,7 @@
 # 7 identical build running/queued elsewhere; 8 identical build already finished (paths printed); 19 BB_QUEUE=0 with a counted selector
 # (ZERO-TESTCASE REFUSAL); 10 -Dtest without
 # -Dit.test on forge-tests (failsafe ignores -Dtest); 11 -pl without -am/-amd, a lifecycle phase at or after `compile`, and a reactor module the run resolves not installed (UNINSTALLED SIBLING, below). BB_DEDUP=0
-# skips dedup. DEDUP IDENTITY (#80, 2026-11-21): a finished identical build is still the checkout's result only while .bb/ticket names ITS ticket (not while
+# skips dedup; a bb-mutate call (BB_VIA bb-mutate:*) has no dedup key, so nothing dedups onto its ticket either. DEDUP IDENTITY (#80, 2026-11-21): a finished identical build is still the checkout's result only while .bb/ticket names ITS ticket (not while
 # .bb/start equals its started=: two runs granted in one second shared a start, and dedup answered with the newer run's result). A checkout with no
 # .bb/ticket (run before this change) is not current: no dedup, the safe direction. BB_QUEUE=0 runs the pre-queue script (bb-build-direct) -- it also bypasses the port group -- after removing .bb/ticket (that run writes .bb/start only, so an older ticket must not stay current).
 # PORT GROUP (2026-09-29): a run that will execute tests of a fixed-port module (~/work/port-group-modules; decided by
@@ -24,6 +24,41 @@
 # mounted read-only, checkout and $HOME at the same paths, own loopback), so identical fixed ports cannot collide and up to N
 # (~/work/port-group-slots, default 3) group tickets run at once per host, each holding a slot (bb-queue shows it). No change to the
 # tests. BB_PG_ISOLATE=0 at enqueue = the old host-exclusive behaviour for that ticket (ticket has no iso=1).
+# MUTANT TICKETS (#116): a ticket with via=bb-mutate:* (BB_VIA). bb-mutate also passes BB_ORDER_AT (epoch NANOseconds, the submit time of its
+# whole run, taken once before the control build), BB_DRIVER_PID and BB_DRIVER_START (its pid and /proc start time) and BB_MUTANT_BOUND
+# (seconds); the ticket then carries order_at= driver_pid= driver_start= bound=.
+#   TURN, per host: a waiting mutant ticket is ELIGIBLE only while its owner has no mutant ticket in running/ and none in waiting/ with a smaller
+#     created= (tie: ticket id). grantable() in the lib tests it at every grant test, in the lock hold that moves the ticket to running/, so
+#     at most ONE mutant ticket per owner runs on a host and an owner's batches alternate build by build. A ticket that is not eligible
+#     takes no part in pick: no blocked_since=, never in an override, blocks nothing. The call is never refused for it. NOT COVERED: other
+#     hosts; a waiter that sourced the lib of before #116 (it grants its own ticket by the old rule). Every mutant ticket counts, with or
+#     without order_at=. Priority does not reorder one owner's mutant tickets among themselves: the older one goes first.
+#   ORDER: order() in the lib sorts a ticket by order_at= instead of created= WITHIN its priority (a higher priority still goes first), so it
+#     places the eligible one against OTHER owners' tickets. It is still gated (load, memory, caps, port group) at its own grant; created=
+#     (turn, starvation override, ticket log) is its true enqueue time. FAIRNESS BOUND: at one priority, a ticket created at c is overtaken by
+#     later-created tickets only of runs that started before c: at most one at a time per owner, and in all at most the builds such a run
+#     still has (control + mutants + batch re-runs). No time bound, and blocked_since= does not limit it.
+#   ACCEPTED ONLY when ALL hold, else call rc 2 and nothing queued: BB_ORDER_AT is 19 digits, not later than now and not earlier than the driver's
+#     start (start_ns: up to 1 s of slack; a forward step of the wall clock by more during a run refuses its later builds ("before the start of its driver"),
+#     and so does a BACKWARD step by more than the run's age, the time since its BB_ORDER_AT ("is in the future"): rc 2 for each later call until the clock is back); BB_VIA matches
+#     ^bb-mutate:[A-Za-z0-9._-]{1,20}:[A-Za-z0-9._-]+$; BB_MUTANT_BOUND is 1 to 6 digits, not 0; the driver pid runs with that start time, its
+#     command line is `python* .../bb-mutate` and it is an ancestor process of this call. WHAT THAT DOES NOT COVER: BB_VIA alone is an env
+#     value anyone can set (such a ticket takes turns with its owner's, no more); the driver check ties the call to a live process NAMED
+#     bb-mutate, not to a reviewed bb-mutate. It stops a stray or inherited BB_ORDER_AT, not a deliberate same-uid forgery.
+#   DRIVER GONE: the ticket's waiter checks the driver at every poll (5 s), in the lock hold of its grant test, and moves a WAITING ticket
+#     whose driver is gone to done/ (state=abandoned, .bb/rc 9). A RUNNING ticket is never touched on driver death.
+#   BOUND: the waiter starts a runner (`bb-build __bound`) with the job: a job still running bound= seconds after its start is stopped (its process
+#     tree, its container, java processes whose cwd is the checkout; nothing else, so not a driver or shell standing there), with a live driver or without; the
+#     ticket gets bound_hit=, rc=124 and .bb/rc 124. A job that returned by itself first gets job_end= instead (its rc is kept, whatever the count
+#     and bb-cp-record after it take). WHEN: bound_hit= comes bound to bound + 2 s after the grant (whole seconds rounded up, so never before the
+#     bound; one test a second; plus a wait for the queue lock). Then TERM after one /proc scan, KILL 5 s later to what ignores it, two more scans,
+#     .bb/rc: measured 4 to 8 s after bound_hit=, 9 to 10 s for a job that ignores TERM (300 processes on the host; a scan grows with them,
+#     and a stop that left survivors is retried, so there is no fixed upper limit).
+#     A runner outlives its waiter; NOT COVERED: the runner itself killed, and tickets without bound= (a bb-mutate of before #116). A ticket still WAITING
+#     when bb-build is rolled back (the installer's reverse order) runs WITHOUT its bound: its waiter starts the runner as `bash <this file> __bound`, at
+#     the grant, and the file is then the bb-build of before #116, which has no such mode (it ends at once; the ticket gets no bound_hit=).
+#     bb-mutate reads .bb/rc 124 as the bound only when the ticket carries bound_hit=; a job's own exit 124 is an ordinary rc.
+# The four variables are unset before the waiter (or, under BB_QUEUE=0, bb-build-direct) starts, so a build never inherits them.
 # LOAD GATE (2026-11-11): a ticket is also granted only while load5/cores < 1.2 (BB_LOAD_MAX); the oldest grantable ticket goes
 # once it waited > 1200 s (BB_LOAD_STARVE_SECS) while < 2 queue launches run (BB_LOAD_STARVE_REACTORS). MEMORY FLOOR (#53): a grant also
 # needs MemAvailable >= the per-host floor; the oldest ticket overrides it only while no ticket runs at all. pick() in the lib decides.
@@ -283,10 +318,28 @@ if [ "${1:-}" != __run ] && [ "${BB_QUEUE:-1}" = 0 ]; then
   A=("$@"); if [ "${A[0]:-}" = --since ]; then A=("${A[@]:3}"); else A=("${A[@]:1}"); fi   # the maven args after [--since <sha>] <checkout>
   selected_testcases / / select 0 ${A[@]+"${A[@]}"} \
     || { echo "refusing (rc 19): BB_QUEUE=0 cannot count a -Dtest/-Dit.test selection (bb-build-direct writes .bb/rc from its own detached job; ZERO-TESTCASE REFUSAL, #86); run it through the queue" >&2; exit 19; }
+  unset BB_ORDER_AT BB_DRIVER_PID BB_DRIVER_START BB_MUTANT_BOUND   # no ticket here: nothing to order
   exec "$(dirname "$SELF")/bb-build-direct" "$@"
 fi
 . "$(dirname "$SELF")/bb-queue-lib.sh"
 MVN=${BB_LAUNCH:-${BB_TEST_MVN:-$HOME/tools/maven/bin/mvn}}   # BB_LAUNCH: bb-test enqueues a ticket whose job is its own __launch mode, not maven
+
+if [ "${1:-}" = __bound ]; then
+  # ---- bound runner (header: MUTANT TICKETS, BOUND): __bound <id> <checkout> <job pid> <job start> <deadline, epoch s>; a child of the waiter ----
+  set +e
+  ID=$2 CO=$3 J=$4 JS=$5 END=$6; B=$CO/.bb; T=$Q/running/$ID
+  job_runs() { proc_live "$J" && [ "$(pstart_now "$J")" = "$JS" ]; }
+  while job_runs && [ "$(date +%s)" -lt "$END" ]; do sleep 1; done
+  job_runs || exit 0
+  exec 8> "$Q/.lock"; flock 8
+  [ -f "$T" ] && job_runs && [ -z "$(field "$T" job_end)" ] || exit 0   # a job that ended by itself is never hit: its ticket carries the one or the other (bound_or_end)
+  echo "bound_hit=$(date +%s)" >> "$T"
+  exec 8>&-
+  echo "bb-build: bound of $(field "$T" bound)s reached: job stopped (rc 124)" >> "$B/build.log"
+  until stop_ticket_processes "$ID" "$CO" java > /dev/null; do sleep 5; done
+  [ -f "$B/rc" ] || { date +%s > "$B/end"; write_rc "$B" 124; }
+  exit 0
+fi
 
 if [ "${1:-}" = __run ]; then
   # ---- waiter: one detached process per ticket; becomes the maven job wrapper when granted ----
@@ -298,6 +351,7 @@ if [ "${1:-}" = __run ]; then
   while :; do
     flock 8
     [ -f "$T" ] || exit 0   # cancelled or reaped while we slept
+    if driver_gone "$T"; then abandon "$T" "driver process gone"; exit 0; fi   # header: MUTANT TICKETS; before the grant test, in its lock hold
     RL=$(reap)   # reap's launch count, passed to pick within this lock hold (#90)
     if [ "$(pick "$RL" "$ID")" = "$ID" ]; then break; fi   # backfill + starvation bound, see pick() in bb-queue-lib.sh
     if [ "$LIMIT" -gt 0 ] && [ "$WAITED" -ge "$LIMIT" ]; then
@@ -316,13 +370,23 @@ if [ "${1:-}" = __run ]; then
   # own ledger entry, keyed to its own pid, before it closes fd 8. The waiter closes its fd 8 instead of `flock -u` (which would unlock the
   # shared description for both), so the lock is released only once BOTH have closed it: a waiter SIGKILLed after the spawn can no longer
   # let the next grant read a ledger without this launch. A subshell killed before its entry has launched nothing.
+  BOUND=$(field "$T" bound)   # header: MUTANT TICKETS, BOUND
+  # bound_or_end (the job subshell, as soon as its job returned): the job of a bounded ticket ended by itself (job_end=) or at its bound
+  # (bound_hit=), decided under the lock, never both. Hit: no .bb/rc from here, the bound runner is stopping this job and writes it.
+  bound_or_end() {
+    [ -n "$BOUND" ] || return 0
+    exec 8> "$Q/.lock"; flock 8
+    [ -z "$(field "$T" bound_hit)" ] || exit 124
+    [ ! -f "$T" ] || echo "job_end=$(date +%s)" >> "$T"   # no file: waiter gone and reaped meanwhile
+    exec 8>&-
+  }
   (
     ledger_add "$ID" "$BASHPID"; exec 8>&-
     cd "$CO"; : > "$B/build.log"
     if wants_jbct "$@"; then   # jbct plugin bootstrap (see bb-jbct-bootstrap); any other ticket never touches the helper, installed or not
       HELPER=$(dirname "$SELF")/bb-jbct-bootstrap
       if [ ! -x "$HELPER" ]; then echo "bootstrap: refused: helper $HELPER missing or not executable (rc=88)" >> "$B/build.log"; date +%s > "$B/end"; write_rc "$B" 88; exit 88; fi
-      "$HELPER" "$CO" "$MVN" "$T" "$@" >> "$B/build.log" 2>&1 || { rc=$?; date +%s > "$B/end"; write_rc "$B" "$rc"; exit "$rc"; }
+      "$HELPER" "$CO" "$MVN" "$T" "$@" >> "$B/build.log" 2>&1 || { rc=$?; bound_or_end; date +%s > "$B/end"; write_rc "$B" "$rc"; exit "$rc"; }
     fi
     if [ "$(field "$T" iso)" = 1 ]; then
       "$(dirname "$SELF")/bb-netns-run" "$ID" "$CO" "$MVN" "$@" ${RDF[@]+"${RDF[@]}"} >> "$B/build.log" 2>&1
@@ -330,6 +394,7 @@ if [ "${1:-}" = __run ]; then
       env -u HCLOUD_TOKEN BB_TICKET="$ID" JAVA_HOME=/usr/lib/jvm/java-25-openjdk-amd64 "$MVN" "$@" ${RDF[@]+"${RDF[@]}"} >> "$B/build.log" 2>&1
     fi
     rc=$?
+    bound_or_end
     c=0   # ZERO-TESTCASE REFUSAL (header, #86): THE TABLE on every job rc, a build's or a bb-test launch's; 19 replaces rc, 0 keeps it
     selected_testcases "$CO" "$B/run.marker" "$([ -z "${BB_LAUNCH:-}" ] && echo mvn || echo "launch:$ID")" "$rc" "$@" >> "$B/build.log" 2>&1 || c=$?
     case $c in
@@ -353,7 +418,10 @@ if [ "${1:-}" = __run ]; then
   ) &
   C=$!   # the job subshell lives as long as maven / bb-test's java / bb-netns-run (and survives a kill -9 of this waiter)
   exec 8>&-   # the lock covers the slot decision and the ledger write only, never the launch's run time (released when the subshell closes fd 8)
+  W=""
+  if [ -n "$BOUND" ]; then bash "$SELF" __bound "$ID" "$CO" "$C" "$(pstart "$C")" $((NOW + BOUND + 1)) < /dev/null > /dev/null 2>&1 & W=$!; fi
   wait "$C"; BRC=$?   # the build's exit status: the verdict. Never re-read from $B/rc, which a lane can delete or rewrite
+  if [ -n "$W" ] && [ -n "$(field "$T" bound_hit)" ]; then wait "$W"; [ "$BRC" -le 128 ] || BRC=124; fi   # stopped by its bound: 124, recorded once nothing of the job is left
   LF="" REJ=""   # LAUNCH FIELDS (header): read before the lock, so a slow or hostile file never holds the queue; set -e: every read is || true
   rej() { case ",$REJ," in *",$1,"*) ;; *) REJ=${REJ:+$REJ,}$1;; esac; echo "bb-build: launch fields: rejected $1${2:+: $2}" >> "$B/build.log"; }
   HT=$(run_ticket "$CO" 2> /dev/null | head -c 128 | head -n 1) || true   # the lib's reader (#80); bounded: head ends the pipe (SIGPIPE) after 128 bytes; an absent run ticket reads as "" = mismatch. run_ticket's [ -f ] follows a symlink but refuses a FIFO or device, so a planted FIFO cannot hang the read, and head bounds a huge file
@@ -415,6 +483,18 @@ if [ -n "$SINCE" ]; then
   esac
 fi
 case "${BB_REQUIRE_DOCKER:-1}" in 0|1) ;; *) echo "refusing: BB_REQUIRE_DOCKER must be 0 or 1 (or unset)" >&2; exit 2;; esac
+MUTANT_FIELDS=""   # header: MUTANT TICKETS
+if [ -n "${BB_ORDER_AT+x}" ]; then
+  [[ $BB_ORDER_AT =~ ^[1-9][0-9]{18}$ ]] || { echo "refusing: BB_ORDER_AT must be epoch nanoseconds (19 digits)" >&2; exit 2; }
+  [[ ! $BB_ORDER_AT > $(date +%s%N) ]] || { echo "refusing: BB_ORDER_AT $BB_ORDER_AT is in the future" >&2; exit 2; }   # 19 digits on both sides: string order is number order, and a value above 2^63 is compared too
+  [[ ${BB_VIA:-} =~ ^bb-mutate:[A-Za-z0-9._-]{1,20}:[A-Za-z0-9._-]+$ && ${#BB_VIA} -le 64 ]] || { echo "refusing: BB_ORDER_AT is accepted only from bb-mutate (BB_VIA is not a bb-mutate marker)" >&2; exit 2; }
+  [[ ${BB_MUTANT_BOUND:-} =~ ^[1-9][0-9]{0,5}$ ]] || { echo "refusing: BB_ORDER_AT needs BB_MUTANT_BOUND (seconds, 1 to 6 digits)" >&2; exit 2; }
+  [[ ${BB_DRIVER_PID:-} =~ ^[1-9][0-9]{0,9}$ && ${BB_DRIVER_START:-} =~ ^[1-9][0-9]{0,18}$ ]] && mutate_driver "$BB_DRIVER_PID" "$BB_DRIVER_START" \
+    || { echo "refusing: BB_ORDER_AT is accepted only from bb-mutate (BB_DRIVER_PID/BB_DRIVER_START name no running bb-mutate above this call)" >&2; exit 2; }
+  [ "$BB_ORDER_AT" -ge "$(start_ns "$BB_DRIVER_START")" ] || { echo "refusing: BB_ORDER_AT $BB_ORDER_AT is before the start of its driver" >&2; exit 2; }
+  MUTANT_FIELDS=$(printf 'order_at=%s\ndriver_pid=%s\ndriver_start=%s\nbound=%s' "$BB_ORDER_AT" "$BB_DRIVER_PID" "$BB_DRIVER_START" "$BB_MUTANT_BOUND")$'\n'
+fi
+unset BB_ORDER_AT BB_DRIVER_PID BB_DRIVER_START BB_MUTANT_BOUND   # also without BB_ORDER_AT: a stray BB_DRIVER_* or BB_MUTANT_BOUND must not reach the waiter or maven
 B=$CO/.bb; mkdir -p "$B"
 if [ ! -f "$B/rc" ] && [ -f "$B/start" ]; then
   # .bb/start without .bb/rc: a build still running, or a finished build whose .bb/rc a lane deleted (CTO 2026-11-13: three verifier
@@ -492,6 +572,10 @@ else
   echo "dedup: skipped (working tree has changes vs $SHA)"
 fi
 
+# A bb-mutate call (BB_VIA bb-mutate:*) has NO dedup key: it is never deduped, and nothing dedups onto its ticket (key= is written empty; the two
+# dedup loops below skip an empty key). Its control is a clean-tree build, and a plain identical build deduped onto it would get no result when its
+# driver dies (the waiting ticket is dropped, .bb/rc 9; N4 of the #117 review). The only readers of key= are those two loops.
+case ${BB_VIA:-} in bb-mutate:*) KEY="";; esac
 exec 8> "$Q/.lock"; flock 8
 reap >/dev/null   # its stdout is the launch count, for pick only (#90)
 QD=$(cat "$B/queued" 2>/dev/null || true)
@@ -549,7 +633,7 @@ echo "$ID" > "$B/queued"
     "$ID" "$BB_OWNER" "$CO" "$SHA" "$KEY" "$CAP" "$LIMIT" "$(date +%s%N)"
   printf 'group=%s\ngroup_reason=%s\n' "${GROUP%% *}" "${GROUP#* }"
   [ "${GROUP%% *}" = 1 ] && [ "${BB_PG_ISOLATE:-1}" != 0 ] && command -v docker > /dev/null && printf 'iso=1\n'
-  printf '%s' "$OWNER_FIELDS"
+  printf '%s%s' "$OWNER_FIELDS" "$MUTANT_FIELDS"
   printf 'args='; printf '%q ' "$@"; printf '\n'; } > "$T"
 setsid nohup bash "$SELF" __run "$ID" "$@" < /dev/null > /dev/null 2>&1 8>&- &
 for _ in $(seq 50); do waiter_alive "$ID" && break; sleep 0.1; done

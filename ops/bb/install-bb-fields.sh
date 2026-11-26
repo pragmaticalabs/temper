@@ -12,12 +12,13 @@
 #   everything before <target>, and then no config is read.
 # Phase 0, local: the seventeen files of ops/bb (next to this script) named below must be the pinned reviewed files, else exit 65
 #   with no ssh made.
-# Phase 1, read-only, EVERY target first: installed bb-build is one of BB_BUILD_OLD|MID|PREV|LIVE|PRE31|PRERC|PREVIA|PREMEM|PRECAP|PREJBCT|PREHELP|PRESINCE|PREFIELDS|PRESESSION|PRE80|PRE76|PRE86|PRE90|PRE91|PRE102|PRE112|NEW, bb-queue-lib.sh one of BB_LIB_OLD|PREV|PRERC|PREMEM|PRECAP|PREOFFQ|PRELEDGER|PRE80|PRE88|PRE90|NEW,
+# Phase 1, read-only, EVERY target first: installed bb-build is one of BB_BUILD_OLD|MID|PREV|LIVE|PRE31|PRERC|PREVIA|PREMEM|PRECAP|PREJBCT|PREHELP|PRESINCE|PREFIELDS|PRESESSION|PRE80|PRE76|PRE86|PRE90|PRE91|PRE102|PRE112|PRE116|NEW, bb-queue-lib.sh one of BB_LIB_OLD|PREV|PRERC|PREMEM|PRECAP|PREOFFQ|PRELEDGER|PRE80|PRE88|PRE90|PRE116|NEW,
 #   bb-queue one of BB_QUEUE_OLD|PREV|LIVE|PRE31|PRERC|PREVIA|PREMEM|PRECAP|PREOFFQ|PRELEDGER|PRE80|PRE90|NEW, bb-tickets is absent, BB_TICKETS_OLD|PRE31|PREOFFQ|NEW, bb-hold is absent, BB_HOLD_OLD (the 2026-11-09
-#   host snapshot), BB_HOLD_PRELEDGER, BB_HOLD_PRE90 or BB_HOLD_NEW, bb-wait is absent, BB_WAIT_PRERC, BB_WAIT_PREREFUSED, BB_WAIT_PRE80, BB_WAIT_PRE90 or its NEW, bb-await is absent, BB_AWAIT_PREREFUSED, BB_AWAIT_PRE90 or BB_AWAIT_NEW, bb-netns-run is absent, BB_NETNS_PREV, BB_NETNS_PREMOUNTS or BB_NETNS_NEW, bb-portgroup.py is absent, BB_PORTGROUP_PREV, BB_PORTGROUP_PRESINCE or BB_PORTGROUP_NEW, bb-modules.py is absent, BB_MODULES_PRE112 or BB_MODULES_NEW, bb-mutate is absent, BB_MUTATE_OLD, BB_MUTATE_PREVIA, BB_MUTATE_PRE97, BB_MUTATE_PRE100 or BB_MUTATE_NEW, bb-jbct-bootstrap is absent or BB_JBCTBOOT_NEW, bb-result is absent, BB_RESULT_PRECP, BB_RESULT_PRE80 or BB_RESULT_NEW, bb-co-gc is absent or BB_COGC_NEW, bb-test is absent, BB_TEST_PRE76, BB_TEST_PRE86 or BB_TEST_NEW, and bb-cp-record and bb-testcount (the bb-test lane) are absent or their NEW pin. Any mismatch prints `refused <target> <file> installed=<md5|absent>
+#   host snapshot), BB_HOLD_PRELEDGER, BB_HOLD_PRE90 or BB_HOLD_NEW, bb-wait is absent, BB_WAIT_PRERC, BB_WAIT_PREREFUSED, BB_WAIT_PRE80, BB_WAIT_PRE90 or its NEW, bb-await is absent, BB_AWAIT_PREREFUSED, BB_AWAIT_PRE90 or BB_AWAIT_NEW, bb-netns-run is absent, BB_NETNS_PREV, BB_NETNS_PREMOUNTS or BB_NETNS_NEW, bb-portgroup.py is absent, BB_PORTGROUP_PREV, BB_PORTGROUP_PRESINCE or BB_PORTGROUP_NEW, bb-modules.py is absent, BB_MODULES_PRE112 or BB_MODULES_NEW, bb-mutate is absent, BB_MUTATE_OLD, BB_MUTATE_PREVIA, BB_MUTATE_PRE97, BB_MUTATE_PRE100, BB_MUTATE_PRE116 or BB_MUTATE_NEW, bb-jbct-bootstrap is absent or BB_JBCTBOOT_NEW, bb-result is absent, BB_RESULT_PRECP, BB_RESULT_PRE80 or BB_RESULT_NEW, bb-co-gc is absent or BB_COGC_NEW, bb-test is absent, BB_TEST_PRE76, BB_TEST_PRE86 or BB_TEST_NEW, and bb-cp-record and bb-testcount (the bb-test lane) are absent or their NEW pin. Any mismatch prints `refused <target> <file> installed=<md5|absent>
 #   expected=<pin>[|<pin>...]` (every accepted pin except `absent`, in the order above) for every mismatch on every target and exits 65 having written nothing anywhere; an unreachable target is 69.
-# Phase 2, per target and per file to change (bb-cp-record, bb-test, bb-testcount, bb-mutate, bb-tickets, bb-hold, bb-wait, bb-await, bb-netns-run, bb-portgroup.py, bb-modules.py, bb-jbct-bootstrap, bb-result, bb-co-gc, bb-queue-lib.sh, bb-queue,
-#   then bb-build: the helpers and the lib before the tools that call or source them; bb-build calls bb-cp-record), one remote `bash -s` script: receive the file as
+# Phase 2, per target and per file to change (bb-cp-record, bb-test, bb-testcount, bb-tickets, bb-hold, bb-wait, bb-await, bb-netns-run, bb-portgroup.py, bb-modules.py, bb-jbct-bootstrap, bb-result, bb-co-gc, bb-queue-lib.sh, bb-queue,
+#   then bb-build, then bb-mutate: the helpers and the lib before the tools that call or source them; bb-build calls bb-cp-record; bb-mutate after
+#   bb-build, which takes its BB_ORDER_AT/BB_DRIVER_*/BB_MUTANT_BOUND out of the build's environment, #116; a rollback from the .bak files goes in the reverse order: bb-mutate, bb-build, lib; a ticket still WAITING when bb-build is rolled back runs WITHOUT its bound=: its waiter starts the bound runner from the bb-build file of the grant, which is then the one before #116 and has no __bound mode), one remote `bash -s` script: receive the file as
 #   ~/tools/<f>.new (base64 on stdin); its md5 must be the pinned one; re-check that the installed file is still what phase 1
 #   saw (closes the race with phase 1); chmod 0755; cp -p an existing file (not bb-tickets) to <f>.bak-<oldmd5> (an existing .bak of that name is
 #   kept; the older .pre-* / .bak-* backups are never touched); mv -f .new into place. The mv is atomic, so a running
@@ -43,7 +44,8 @@ readonly BB_LIB_PRELEDGER=2569b8af2cf8acc063024e553be66a93   # the #66 version: 
 readonly BB_LIB_PRE80=e607b50fda23b34c7468cd89d0e9f247   # the #70 version: no run_ticket/run_current (issue #80)
 readonly BB_LIB_PRE88=f5bd1cc5ac79506f341a414b79558852   # the #81 version: pick re-reads the ledger after reap kept a running ticket (issue #88)
 readonly BB_LIB_PRE90=745b72b5d32d6c7e8fd81c889edc81b1   # the #88 version: pick reads the reap count from the global REAP_LAUNCHES (issue #90)
-readonly BB_LIB_NEW=bca5488e9abb94003471286f2ac35ca5
+readonly BB_LIB_PRE116=bca5488e9abb94003471286f2ac35ca5   # the version before #116: order() has no order_at= and no driver check
+readonly BB_LIB_NEW=7d5898b17a56ef5552fd0d80fc4f1dd2
 readonly BB_QUEUE_OLD=7efbfbecb9739fed35223cdc97eb185d
 readonly BB_QUEUE_PREV=a04b7be02f840d4f1e2bd19c54c52b3f
 readonly BB_QUEUE_LIVE=af86457ae18f4ca331e47137cd088bc7   # what the 2026-11-11 hosts run: its header says `group tickets running:`, which the worker cannot parse
@@ -77,7 +79,8 @@ readonly BB_BUILD_PRE90=ad84d8ec0f36096b0de9b4f29142f730   # the #88 version: th
 readonly BB_BUILD_PRE91=12f2c9b52c09724be2a07e8058bc6a43   # the #91 version: the waiter passes reap's count to pick; an rc-0 run that ran 0 testcases stays rc 0 (issue #86)
 readonly BB_BUILD_PRE102=0b01f3522843051950e95ba6e52ec5e3   # the #86/#91 version: the args guards pipe printf into grep -q, so a long arg list can make a guard miss its match under pipefail (issue #102)
 readonly BB_BUILD_PRE112=b10f1e002113eafa50a05b8f4fe58eae   # the #102 version: -pl without -am is queued although a reactor dependency is not installed (issue #112)
-readonly BB_BUILD_NEW=f1478564c91a6ab3544d1a7c9efec568
+readonly BB_BUILD_PRE116=f1478564c91a6ab3544d1a7c9efec568   # the version before #116: mutant tickets carry no order_at= and have no one-per-owner rule
+readonly BB_BUILD_NEW=cfb4be8d2cd1261867572e7318b04850
 # bb-jbct-bootstrap: absent on every host before its first install; bb-build calls it, so it is installed first.
 readonly BB_JBCTBOOT_NEW=3e5396ecee48b99949456cf805df1e60
 # bb-result: absent on every host before its first install. No trailing comment on a pin line: bb-drift reads it by pattern.
@@ -126,7 +129,8 @@ readonly BB_MUTATE_OLD=f9bfbd37c5feafe67995f6716e8fecb0   # the host snapshot, i
 readonly BB_MUTATE_PREVIA=2c341d44d428ba445db7ea03ee90af64   # the batch-sound version (#41): does not export BB_VIA (issue #46)
 readonly BB_MUTATE_PRE97=130f094861c0f835869ff42230d7bffb   # a batch is credited from a build with failures (issue #97)
 readonly BB_MUTATE_PRE100=4869a07cdaf3252905ceb0800c64cda7   # a solo build failing only unlisted tests reads SURVIVED (issue #100); live on hosts or pending install (#98)
-readonly BB_MUTATE_NEW=3dc63455b03b7f166ec18e29bf9da25f
+readonly BB_MUTATE_PRE116=3dc63455b03b7f166ec18e29bf9da25f   # the version before #116: passes no BB_ORDER_AT and takes one mutant ticket per driver
+readonly BB_MUTATE_NEW=1b28a7ca8f1c76edd7e4f675224443cf
 readonly TARGET_RE='^[a-z_][a-z0-9_-]{0,31}@[A-Za-z0-9.:-]+$'
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -143,7 +147,7 @@ done
 
 # The files, in install order (helpers and the lib before the tools that call or source them), with what each may be on a host.
 # absent_ok: the file may be missing. bash 3.2 compatible: no associative arrays.
-FILES=(bb-cp-record bb-test bb-testcount bb-mutate bb-tickets bb-hold bb-wait bb-await bb-netns-run bb-portgroup.py bb-modules.py bb-jbct-bootstrap bb-result bb-co-gc bb-queue-lib.sh bb-queue bb-build)
+FILES=(bb-cp-record bb-test bb-testcount bb-tickets bb-hold bb-wait bb-await bb-netns-run bb-portgroup.py bb-modules.py bb-jbct-bootstrap bb-result bb-co-gc bb-queue-lib.sh bb-queue bb-build bb-mutate)
 PROBE_ORDER=(bb-cp-record bb-test bb-testcount bb-build bb-queue-lib.sh bb-queue bb-tickets bb-hold bb-wait bb-await bb-netns-run bb-portgroup.py bb-modules.py bb-mutate bb-jbct-bootstrap bb-result bb-co-gc)   # refusal lines come in this order
 new_of() {
   case $1 in
@@ -160,8 +164,8 @@ new_of() {
 }
 accepted_of() {  # the md5s a host may hold besides absent, in the order the refusal names them
   case $1 in
-    bb-build) echo "$BB_BUILD_OLD $BB_BUILD_MID $BB_BUILD_PREV $BB_BUILD_LIVE $BB_BUILD_PRE31 $BB_BUILD_PRERC $BB_BUILD_PREVIA $BB_BUILD_PREMEM $BB_BUILD_PRECAP $BB_BUILD_PREJBCT $BB_BUILD_PREHELP $BB_BUILD_PRESINCE $BB_BUILD_PREFIELDS $BB_BUILD_PRESESSION $BB_BUILD_PRE80 $BB_BUILD_PRE76 $BB_BUILD_PRE86 $BB_BUILD_PRE90 $BB_BUILD_PRE91 $BB_BUILD_PRE102 $BB_BUILD_PRE112 $BB_BUILD_NEW" ;;
-    bb-queue-lib.sh) echo "$BB_LIB_OLD $BB_LIB_PREV $BB_LIB_PRERC $BB_LIB_PREMEM $BB_LIB_PRECAP $BB_LIB_PREOFFQ $BB_LIB_PRELEDGER $BB_LIB_PRE80 $BB_LIB_PRE88 $BB_LIB_PRE90 $BB_LIB_NEW" ;;
+    bb-build) echo "$BB_BUILD_OLD $BB_BUILD_MID $BB_BUILD_PREV $BB_BUILD_LIVE $BB_BUILD_PRE31 $BB_BUILD_PRERC $BB_BUILD_PREVIA $BB_BUILD_PREMEM $BB_BUILD_PRECAP $BB_BUILD_PREJBCT $BB_BUILD_PREHELP $BB_BUILD_PRESINCE $BB_BUILD_PREFIELDS $BB_BUILD_PRESESSION $BB_BUILD_PRE80 $BB_BUILD_PRE76 $BB_BUILD_PRE86 $BB_BUILD_PRE90 $BB_BUILD_PRE91 $BB_BUILD_PRE102 $BB_BUILD_PRE112 $BB_BUILD_PRE116 $BB_BUILD_NEW" ;;
+    bb-queue-lib.sh) echo "$BB_LIB_OLD $BB_LIB_PREV $BB_LIB_PRERC $BB_LIB_PREMEM $BB_LIB_PRECAP $BB_LIB_PREOFFQ $BB_LIB_PRELEDGER $BB_LIB_PRE80 $BB_LIB_PRE88 $BB_LIB_PRE90 $BB_LIB_PRE116 $BB_LIB_NEW" ;;
     bb-queue) echo "$BB_QUEUE_OLD $BB_QUEUE_PREV $BB_QUEUE_LIVE $BB_QUEUE_PRE31 $BB_QUEUE_PRERC $BB_QUEUE_PREVIA $BB_QUEUE_PREMEM $BB_QUEUE_PRECAP $BB_QUEUE_PREOFFQ $BB_QUEUE_PRELEDGER $BB_QUEUE_PRE80 $BB_QUEUE_PRE90 $BB_QUEUE_NEW" ;;
     bb-hold) echo "$BB_HOLD_OLD $BB_HOLD_PRELEDGER $BB_HOLD_PRE90 $BB_HOLD_NEW" ;;
     bb-tickets) echo "$BB_TICKETS_OLD $BB_TICKETS_PRE31 $BB_TICKETS_PREOFFQ $BB_TICKETS_NEW" ;;
@@ -170,7 +174,7 @@ accepted_of() {  # the md5s a host may hold besides absent, in the order the ref
     bb-netns-run) echo "$BB_NETNS_PREV $BB_NETNS_PREMOUNTS $BB_NETNS_NEW" ;;
     bb-wait) echo "$BB_WAIT_PRERC $BB_WAIT_PREREFUSED $BB_WAIT_PRE80 $BB_WAIT_PRE90 $BB_WAIT_NEW" ;;
     bb-await) echo "$BB_AWAIT_PREREFUSED $BB_AWAIT_PRE90 $BB_AWAIT_NEW" ;;
-    bb-mutate) echo "$BB_MUTATE_OLD $BB_MUTATE_PREVIA $BB_MUTATE_PRE97 $BB_MUTATE_PRE100 $BB_MUTATE_NEW" ;;
+    bb-mutate) echo "$BB_MUTATE_OLD $BB_MUTATE_PREVIA $BB_MUTATE_PRE97 $BB_MUTATE_PRE100 $BB_MUTATE_PRE116 $BB_MUTATE_NEW" ;;
     bb-result) echo "$BB_RESULT_PRECP $BB_RESULT_PRE80 $BB_RESULT_NEW" ;;
     bb-test) echo "$BB_TEST_PRE76 $BB_TEST_PRE86 $BB_TEST_NEW" ;;
     *) new_of "$1" ;;
