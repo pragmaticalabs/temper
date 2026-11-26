@@ -176,11 +176,14 @@ class BbKillLabelIT {
 
     @Test
     void unreadableCounters_areRecordedAsUnavailable_neverAsZero() throws Exception {
-        var id = start("blind", KILL_SELF, "", Map.of("BB_TEST_VMSTAT", dir.resolve("no-such-vmstat").toString()));
+        var id = start("blind", KILL_SELF, "", Map.of("BB_TEST_VMSTAT", dir.resolve("no-such-vmstat").toString(),
+                                                      "BB_TEST_MEMINFO", dir.resolve("no-such-meminfo").toString()));
 
         finished(id);
         assertThat(field(id, "oom_kill_start")).isEqualTo("unavailable");
         assertThat(field(id, "oom_kill_end")).isEqualTo("unavailable");
+        assertThat(field(id, "mem_avail_kb_start")).isEqualTo("unavailable");
+        assertThat(field(id, "mem_avail_kb_end")).isEqualTo("unavailable");
     }
 
     @Disabled("lane131c: printers")
