@@ -58,6 +58,11 @@ jobs:
       - name: Compile the acceptance module
         run: mvn -B -ntp -Pacceptance -pl temper-acceptance test-compile
 
+      # A dependency reached through a version range needs remote maven-metadata on every run (#123: flaked CI with "No versions
+      # available" for bcprov). Builds the reactor offline on a copy of the repository with that metadata removed.
+      - name: No dependency resolves through a version range
+        run: ops/ci/offline-resolve-check.sh
+
       - name: Test reports
         if: failure()
         uses: actions/upload-artifact@v7
