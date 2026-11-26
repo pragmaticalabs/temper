@@ -491,16 +491,16 @@ class BbMutateIT {
         assertThat(bounds.stream().map(line -> line[1]).distinct()).singleElement().asString().matches("[0-9]{19}");
     }
 
-    /// A bound is whole seconds (bb-build takes digits): a fractional mutantTimeoutSecs is rounded UP, never down to 0 (which bb-build refuses).
-    /// Mutation: `int(...)` for `math.ceil(...)` in the bound sent to bb-build -> 0 here, red.
+    /// A bound is whole seconds (bb-build takes digits): a fractional mutantTimeoutSecs is rounded UP (2.5 -> 3), not down.
+    /// Mutation: `int(...)` for `math.ceil(...)` in the bound sent to bb-build -> 2 here, red (a bound under 1 s is 1 either way: max(1, ...)).
     @Test
     void aFractionalBound_isRoundedUpToAWholeSecond() throws Exception {
         extra = List.of("--timeout", "2");
-        buildJson = "{\"mutantTimeoutSecs\":0.4}";
+        buildJson = "{\"mutantTimeoutSecs\":2.5}";
         batch(modules(null), mutation("mA", "A", "ATest", "MUT"));
         var bounds = Files.readAllLines(home.resolve("bounds.log")).stream().map(line -> line.split(" ")[0]).toList();
 
-        assertThat(bounds).startsWith("120", "1").containsOnly("120", "1");
+        assertThat(bounds).startsWith("120", "3").containsOnly("120", "3");
     }
 
     /// The control's bound is its --timeout, at least 1 s: --timeout 0 sends 1, not 0. Mutation: `max(0, ...)` for `max(1, ...)` -> 0, red.
