@@ -122,8 +122,8 @@ rc=0; t0=$(now_ms)
 # every process of the fetch (git, remote helper, ssh, hooks) is in it unless it left on purpose (setsid/setpgid). timeout's own KILL goes out only
 # while its direct child is still alive, so a TERM-ignoring helper of a git that died at the TERM survives timeout: after the fetch command has
 # returned, whatever status it had, this script KILLs what is left of that group. Only that group is signalled (a pgid is not reused while the group
-# has a member; if it is empty kill finds nothing). stdin is passed on (an async job would get /dev/null).
-timeout -k 10 "$FETCH_T" git -c gc.autoDetach=false -c maintenance.autoDetach=false -C "$MIRROR" fetch -q --prune origin <&0 &
+# has a member; if it is empty kill finds nothing). The fetch gets /dev/null as stdin (an async job does; fetch -q reads none).
+timeout -k 10 "$FETCH_T" git -c gc.autoDetach=false -c maintenance.autoDetach=false -C "$MIRROR" fetch -q --prune origin &
 tp=$!
 wait "$tp" || rc=$?
 kill -KILL -- "-$tp" 2> /dev/null || true
