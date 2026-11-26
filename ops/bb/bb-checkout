@@ -21,7 +21,8 @@
 #    helper that ignores TERM. What does: when the fetch command has returned, whatever its status (0, the bound, an outside kill of git or of
 #    timeout itself, git's own failure), this script KILLs the rest of timeout's process group (the fetch runs as a background job, `wait`ed for,
 #    to know the group id). After bb-checkout returns from the fetch, no process of that fetch that is still in the group (git, remote helper,
-#    index-pack, ssh, a hook, a background child) holds the lock; a process that left the group is a named limit. Nothing outside the group is signalled.
+#    index-pack, ssh, a hook, a background child) holds the lock; a process that left the group is a named limit, and so is a bb-checkout that is itself
+#    killed during the fetch (below). Nothing outside the group is signalled.
 #  - gc runs in the foreground (gc.autoDetach=false; maintenance.autoDetach=false, unknown and inert on git 2.43), inside the lock and the fetch bound:
 #    the fetch's own auto gc is the collector, and a detached gc can never hold the lock past the script.
 #  - A caller that has to queue says so on stderr ("waiting for the mirror lock ... held by pid: ...") and waits at most BB_MIRROR_LOCK_WAIT.
@@ -37,6 +38,12 @@
 #  - kill -9 of the `timeout` process while bb-checkout lives: git is unbounded from then on, but bb-checkout sees timeout's 137 at once and KILLs
 #    the group (git included), so the lock is released and the run fails with 137 and the "not a bound expiry" line. Kill -9 of bb-checkout AND of
 #    timeout leaves git unbounded and holding the lock until it ends; callers exit 6 after the wait.
+#  - bb-checkout ITSELF killed (TERM, HUP, INT, KILL) during the fetch while a helper of that fetch that ignores TERM runs: that helper keeps the
+#    lock UNBOUNDED, for as long as it lives. Mechanism: git ends at timeout's TERM at the bound and timeout then exits without its KILL (it
+#    sends one only while its direct child is alive), and the group KILL above is bb-checkout's, which is gone. A helper that handles TERM
+#    (index-pack, ssh, upload-pack do) ends with git at the bound; a git that dies at the bound is thus freed by the bound, a TERM-ignoring
+#    helper is seen only with a test shim. Not fixed: a fix needs a process that outlives bb-checkout (a watcher), which a kill of
+#    bb-checkout's own process group takes with it; callers then exit 6 after the wait.
 #  - a process of the fetch that left timeout's process group (setsid, setpgid, a daemonised helper such as an ssh ControlPersist master, not
 #    measured here) keeps the lock for as long as it lives: the group KILL does not reach it. The origin of the mirror is https.
 #  - a caller that ignores SIGHUP (started under nohup or setsid) is not killed by it: no kill, so nothing to guarantee; the other signals apply.
@@ -125,7 +132,9 @@ rc=0; t0=$(now_ms)
 # has a member; if it is empty kill finds nothing). The fetch gets /dev/null as stdin (an async job does; fetch -q reads none).
 timeout -k 10 "$FETCH_T" git -c gc.autoDetach=false -c maintenance.autoDetach=false -C "$MIRROR" fetch -q --prune origin &
 tp=$!
-wait "$tp" || rc=$?
+# wait's stderr is silenced: when timeout itself is killed from outside, bash prints a "Killed timeout -k ..." job line there; the status is
+# reported by the message below (137, "not a bound expiry"), which is the one line a reader needs
+wait "$tp" 2> /dev/null || rc=$?
 kill -KILL -- "-$tp" 2> /dev/null || true
 elapsed=$(($(now_ms) - t0))
 expired=

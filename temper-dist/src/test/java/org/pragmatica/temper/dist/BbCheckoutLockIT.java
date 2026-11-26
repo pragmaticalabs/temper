@@ -558,7 +558,7 @@ class BbCheckoutLockIT {
         signal("KILL", git.parent().orElseThrow().pid());
 
         assertThat(run.finish()).as(run.stderr()).isEqualTo(137);
-        assertThat(run.stderr()).contains("not a bound expiry");
+        assertThat(run.stderr()).as("bash's own job line for the killed timeout is not printed").contains("not a bound expiry").doesNotContain("Killed");
         assertThat(ends(git, 10)).as("the git of the killed timeout was killed with its group by bb-checkout").isTrue();
         assertThat(lockHeld()).as("and the lock is free").isFalse();
     }
@@ -908,6 +908,243 @@ class BbCheckoutLockIT {
         assertThat(run.finish()).as(run.stderr()).isNotZero();
         assertThat(run.stderr()).contains("File exists", "blocking files in the mirror", "refs/heads/main.lock", "the command below removes exactly");
         assertPrintedCommandRecovers(run);
+    }
+
+    // ---- the guards and messages around the lock (v120c survivors q04-q38, closed in lane119g): one row per line, each row names its mutant
+
+    private static Path onPath(String tool) {
+        for (var entry : System.getenv("PATH").split(":")) {
+            var candidate = Path.of(entry, tool);
+
+            if (Files.isExecutable(candidate)) {
+                return candidate;
+            }
+        }
+        throw new IllegalStateException("no " + tool + " on PATH");
+    }
+
+    /// a PATH directory holding exactly the named tools (symlinks): the script itself runs from it, so `bash` is always among them
+    private Path toolsOnly(String name, String... tools) throws IOException {
+        var bin = Files.createDirectories(dir.resolve(name));
+
+        Files.createSymbolicLink(bin.resolve("bash"), onPath("bash"));
+        for (var tool : tools) {
+            Files.createSymbolicLink(bin.resolve(tool), onPath(tool));
+        }
+
+        return bin;
+    }
+
+    /// q05 (exit 6 became 2) and q06 (`timeout` not required): a host without flock, or without timeout, is refused with exit 6 before anything is created
+    @Test
+    void aHostWithoutFlock_orWithoutTimeout_isRefusedWithExit6_andLeavesNothing() throws Exception {
+        var withoutFlock = start("s1-a", c2, Map.of("PATH", toolsOnly("no-flock", "timeout", "git").toString()));
+
+        assertThat(withoutFlock.finish()).as(withoutFlock.stderr()).isEqualTo(6);
+        assertThat(withoutFlock.stderr()).contains("refusing: flock, timeout and bash 5");
+        var withoutTimeout = start("s1-b", c2, Map.of("PATH", toolsOnly("no-timeout", "flock", "git").toString()));
+
+        assertThat(withoutTimeout.finish()).as(withoutTimeout.stderr()).isEqualTo(6);
+        assertThat(withoutTimeout.stderr()).contains("refusing: flock, timeout and bash 5");
+        assertThat(Files.exists(co("s1-a"))).isFalse();
+        assertThat(Files.exists(co("s1-b"))).isFalse();
+        assertThat(mirrorRef("refs/heads/main")).as("no fetch ran").isEqualTo(c1);
+    }
+
+    /// q04 (no `10#` on the converted bounds): bash reads 08 and 09 as bad octal, and its arithmetic error does NOT stop the script, so the bound stays "08":
+    /// the fetch is still bounded (timeout reads 08 as 8) but the expiry test `FETCH_T * 1000` errors and the expiry is passed on as status 124 instead of 7
+    @Test
+    void aFetchBoundWithALeadingZeroThatIsNotAnOctalDigit_isDecimal_andItsExpiryIsExit7() throws Exception {
+        var env = new HashMap<>(gitShim("exec sleep 600"));
+
+        env.put("BB_MIRROR_FETCH_TIMEOUT", "08");
+        var hung = start("s1-a", c2, env);
+
+        assertThat(hung.finish()).as(hung.stderr()).isEqualTo(7);
+        assertThat(hung.stderr()).contains("the mirror fetch exceeded 8s").doesNotContain("08s");
+        assertThat(Files.exists(co("s1-a"))).isFalse();
+    }
+
+    /// q04, the lock-wait half: the wait 09 is 9 seconds, printed as 9s
+    @Test
+    void aLockWaitWithALeadingZeroThatIsNotAnOctalDigit_isDecimal_andItsExpiryIsExit6() throws Exception {
+        arm();
+        var first = start("s1-a", c2);
+
+        awaitHeld(first);
+        var second = start("s1-b", c2, Map.of("BB_MIRROR_LOCK_WAIT", "09"));
+
+        assertThat(second.finish()).as(second.stderr()).isEqualTo(6);
+        assertThat(second.stderr()).contains("not obtained within 9s").doesNotContain("09s");
+        release();
+
+        assertThat(first.finish()).as(first.stderr()).isZero();
+    }
+
+    /// q07 (no `lock:` filter in holders) and q38 (exit-6 message without the holders): the lock file is also open in a process that does NOT hold the flock
+    /// (a decoy with it as stdin) and in the waiting caller itself: only the holder is named, in the waiting line and in the exit-6 line
+    @Test
+    void theHoldersNamedToAQueuedCaller_areOnlyTheProcessesThatHoldTheFlock() throws Exception {
+        arm();
+        var first = start("s1-a", c2);
+
+        awaitHeld(first);
+        var builder = BbFixtures.process(List.of("sleep", "600"), env(Map.of()));
+
+        builder.redirectInput(ProcessBuilder.Redirect.from(lock.toFile()));
+        var decoy = builder.start();
+
+        started.add(decoy);
+        orphans.add(decoy.toHandle());
+        var second = start("s1-b", c2, Map.of("BB_MIRROR_LOCK_WAIT", "1"));
+
+        assertThat(second.finish()).as(second.stderr()).isEqualTo(6);
+        var named = second.stderrLines().stream().filter(l -> l.contains("held by pid:")).toList();
+
+        assertThat(named).as("the waiting line and the exit-6 line both name the holders: " + second.stderr()).hasSize(2);
+        assertThat(named).allSatisfy(line -> assertThat(line).contains(" " + first.process().pid() + " (bash)")
+                                                             .doesNotContain(" " + decoy.pid() + " (")
+                                                             .doesNotContain(" " + second.process().pid() + " ("));
+        release();
+
+        assertThat(first.finish()).as(first.stderr()).isZero();
+    }
+
+    /// q11 (the wait bound fixed at 2 s): a caller allowed 60 s that queues for longer than 3 s is still waiting, and succeeds when the holder ends
+    @Test
+    void aQueuedCaller_waitsLongerThanTwoSeconds_whenItsBoundAllowsIt() throws Exception {
+        arm();
+        var first = start("s1-a", c2);
+
+        awaitHeld(first);
+        var second = start("s1-b", c2, Map.of("BB_MIRROR_LOCK_WAIT", "60"));
+
+        await("the second caller to queue", () -> contains(second.err(), "waiting for the mirror lock") || !second.process().isAlive());
+        var until = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(3500);
+
+        await("3.5 s of queueing", () -> System.nanoTime() >= until);
+        assertThat(second.process().isAlive()).as("still waiting after 3.5 s: " + second.stderr()).isTrue();
+        release();
+
+        assertThat(second.finish()).as(second.stderr()).isZero();
+        assertThat(first.finish()).as(first.stderr()).isZero();
+        assertThat(head("s1-b")).isEqualTo(c2);
+    }
+
+    /// q13 (the mirror path is put into find's -path pattern unescaped): a HOME with glob characters, here `[a]*?`, whose literal name the unescaped
+    /// pattern does not match
+    @Test
+    void aMirrorPathWithGlobCharacters_isListed_andThePrintedCommandWorksOnIt() throws Exception {
+        var odd = Files.createDirectories(dir.resolve("h[a]*?me"));
+
+        Files.move(home.resolve("work"), odd.resolve("work"));
+        var stale = odd.resolve("work/pragmatica.git/refs/heads/main.lock");
+
+        Files.writeString(stale, "");
+        var run = start("s1-b", c2, Map.of("HOME", odd.toString()));
+
+        assertThat(run.finish()).as(run.stderr()).isNotZero();
+        assertThat(run.stderr()).contains("File exists", "blocking files in the mirror", stale.toString(), "the command below removes exactly");
+        var operator = BbFixtures.run(List.of("bash", "-c", printedCommand(run)), env(Map.of("HOME", odd.toString())), null, null);
+
+        assertThat(operator.rc()).as(operator.stderr()).isZero();
+        assertThat(Files.exists(stale)).as("the printed command removed it").isFalse();
+    }
+
+    /// q18 (`-type f` dropped: a directory named *.lock would be listed and removed) and q19 (`-name '*'` under refs/: every loose ref would be removed):
+    /// the printed command, run verbatim, removes exactly the files that were listed. Decoys: a loose ref, near-miss names, directories named *.lock
+    /// (one empty, one not), and files outside refs/ that are not on the list
+    @Test
+    void thePrintedCommand_removesExactlyTheListedFiles_andNothingElse() throws Exception {
+        var mirror = home.resolve("work/pragmatica.git");
+
+        controlFailure(mirror);
+        var listed = mirror.resolve("refs/heads/main.lock");
+        var looseRef = mirror.resolve("refs/tags/kept-ref");
+        var plain = List.of(mirror.resolve("refs/tags/lock"), mirror.resolve("refs/tags/x.lockfile"), mirror.resolve("refs/tags/x.lock.bak"),
+                            mirror.resolve("HEAD.locked"), mirror.resolve("packed-refs.lockx"), mirror.resolve("refs/heads/readme.txt"),
+                            mirror.resolve("description"));
+        var emptyDir = mirror.resolve("refs/tags/empty.lock");
+        var fullDir = mirror.resolve("refs/tags/full.lock");
+
+        Files.createDirectories(looseRef.getParent());
+        Files.writeString(looseRef, c1 + "\n");
+        for (var file : plain) {
+            Files.writeString(file, "keep\n");
+        }
+        Files.createDirectories(emptyDir);
+        Files.createDirectories(fullDir);
+        Files.writeString(fullDir.resolve("inner"), "keep\n");
+        var run = start("s1-b", c2);
+
+        assertThat(run.finish()).as(run.stderr()).isNotZero();
+        var lines = run.stderrLines();
+
+        assertThat(lines).as("the stale ref lock is listed").anyMatch(l -> l.startsWith("-") && l.contains(listed.toString()));
+        for (var kept : plain) {
+            assertThat(lines).as("not listed: " + kept).noneMatch(l -> l.contains(kept.toString()));
+        }
+        assertThat(lines).as("not listed: the loose ref").noneMatch(l -> l.contains(looseRef.toString()));
+        assertThat(lines).as("not listed: directories named *.lock").noneMatch(l -> l.contains(emptyDir.toString()) || l.contains(fullDir.toString()));
+        var operator = BbFixtures.run(List.of("bash", "-c", printedCommand(run)), env(Map.of()), null, null);
+
+        assertThat(operator.rc()).as(operator.stderr()).isZero();
+        assertThat(Files.exists(listed)).as("the listed file is gone").isFalse();
+        assertThat(Files.readString(looseRef)).as("the loose ref survived").isEqualTo(c1 + "\n");
+        for (var kept : plain) {
+            assertThat(Files.exists(kept)).as("survived: " + kept).isTrue();
+        }
+        assertThat(Files.isDirectory(emptyDir)).as("the empty *.lock directory survived").isTrue();
+        assertThat(Files.exists(fullDir.resolve("inner"))).as("the non-empty *.lock directory survived").isTrue();
+        assertThat(Files.exists(mirror.resolve("HEAD"))).isTrue();
+        assertThat(Files.exists(mirror.resolve("packed-refs"))).isTrue();
+    }
+
+    /// q20 (no listing after a bound expiry): exit 7 lists the leftover files and prints the command like any other failed fetch
+    @Test
+    void aBoundExpiry_listsTheLeftoverFiles_andPrintsTheCommand_likeAnyOtherFailure() throws Exception {
+        var mirror = home.resolve("work/pragmatica.git");
+
+        Files.writeString(mirror.resolve("refs/heads/main.lock"), "");
+        var env = new HashMap<>(gitShim("exec sleep 600"));
+
+        env.put("BB_MIRROR_FETCH_TIMEOUT", "1");
+        var run = start("s1-a", c2, env);
+
+        assertThat(run.finish()).as(run.stderr()).isEqualTo(7);
+        assertThat(run.stderr()).contains("the mirror fetch exceeded 1s", "blocking files in the mirror", "refs/heads/main.lock", "the command below removes exactly");
+        assertThat(Files.exists(co("s1-a"))).isFalse();
+    }
+
+    /// q25 (ms divisor off by 10) and q27 (bound compare off by 10): an outside SIGKILL after about 1 s, with a 5 s bound, is not an expiry, and the elapsed
+    /// time it prints is in milliseconds (a mutant with either factor reads it as past the bound; the printed figure pins the unit itself)
+    @Test
+    void anOutsideSigkillAfterAboutASecond_underAFiveSecondBound_isNotAnExpiry_andTheElapsedTimeIsInMilliseconds() throws Exception {
+        var env = new HashMap<>(gitShim("sleep 1\nkill -KILL $$"));
+
+        env.put("BB_MIRROR_FETCH_TIMEOUT", "5");
+        var run = start("s1-a", c2, env);
+
+        assertThat(run.finish()).as(run.stderr()).isEqualTo(137);
+        assertThat(run.stderr()).contains("not a bound expiry", "before its 5s bound").doesNotContain("exceeded");
+        var matcher = java.util.regex.Pattern.compile("after (\\d+) ms").matcher(run.stderr());
+
+        assertThat(matcher.find()).as(run.stderr()).isTrue();
+        assertThat(Long.parseLong(matcher.group(1))).as("elapsed ms").isBetween(900L, 4900L);
+    }
+
+    /// q30 (grace -k 10 became -k 1): at the bound git gets TERM and then 10 s to clean up (it removes its own lock files then): a git that needs 3 s
+    /// is allowed them. With a 1 s grace the KILL comes at 2 s, before the cleanup is done
+    @Test
+    void aGitThatNeedsAFewSecondsToCleanUpAfterTerm_getsThem_beforeTheKill() throws Exception {
+        var done = dir.resolve("cleanup.done");
+        var env = new HashMap<>(gitShim("trap 'sleep 3; : > " + done + "; exit 1' TERM\nsleep 600 &\nwait"));
+
+        env.put("BB_MIRROR_FETCH_TIMEOUT", "1");
+        var run = start("s1-a", c2, env);
+
+        assertThat(run.finish()).as(run.stderr()).isEqualTo(7);
+        assertThat(Files.exists(done)).as("git finished its cleanup after the TERM, before any KILL: " + run.stderr()).isTrue();
     }
 
     // ---- many callers, refs moving
