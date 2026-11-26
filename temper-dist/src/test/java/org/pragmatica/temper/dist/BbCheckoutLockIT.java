@@ -173,14 +173,14 @@ class BbCheckoutLockIT {
     }
 
     /// a bb-checkout run, started and left running; stdout and stderr go to files. HUP is reset to its default for the run: a build started
-    /// under nohup/setsid hands its children SIGHUP as ignored, and an ignoring process cannot be killed by it (nothing to guarantee then)
+    /// under nohup/setsid hands its children SIGHUP (an async start also SIGINT) as ignored, and an ignoring process cannot be killed by it (nothing to guarantee then)
     private Run start(String name, String ref, Map<String, String> extra) throws IOException {
         var out = dir.resolve(name + ".out");
         var err = dir.resolve(name + ".err");
         var env = new HashMap<>(extra);
 
         env.put("BB_OWNER", "s1");
-        var builder = BbFixtures.process(List.of("env", "--default-signal=HUP", "bash", home.resolve("tools/bb-checkout").toString(), name, ref), env(env));
+        var builder = BbFixtures.process(List.of("env", "--default-signal=HUP,INT", "bash", home.resolve("tools/bb-checkout").toString(), name, ref), env(env));
 
         builder.redirectOutput(out.toFile());
         builder.redirectError(err.toFile());
@@ -529,7 +529,8 @@ class BbCheckoutLockIT {
         assertThat(Files.exists(co("s1-a"))).isFalse();
     }
 
-    /// timeout runs in its own process group and signals all of it: a helper of the git that ignores TERM dies at timeout's KILL
+    /// timeout runs in its own process group and, when its git outlives the grace, signals all of it: here git ALSO ignores TERM, so timeout's own KILL
+    /// reaches the helper (a git that dies at the TERM is another row: there timeout sends no KILL)
     @Test
     void timeoutsKill_reachesTheWholeProcessGroup_soAHelperThatIgnoresTermDies() throws Exception {
         var helperPid = dir.resolve("helper.pid");
@@ -545,10 +546,10 @@ class BbCheckoutLockIT {
         assertThat(Files.exists(co("s1-a"))).isFalse();
     }
 
-    /// the named limit: the `timeout` process itself killed leaves its git unbounded, running and holding the lock; the next caller names that git and
-    /// gives up with exit 6 after its wait
+    /// timeout killed (-9) while bb-checkout lives: its git is unbounded from then on, but bb-checkout sees 137 at once and KILLs the group: the git ends
+    /// and the lock is free (was a named limit at 533340909: the git outlived its timeout, holding the lock, and callers exited 6)
     @Test
-    void aKilledTimeout_leavesItsGitRunningAndHoldingTheLock_aNamedLimit() throws Exception {
+    void aKilledTimeout_isFollowedByAKillOfItsGroup_soItsGitNoLongerHoldsTheLock() throws Exception {
         var gitPid = dir.resolve("git.pid");
         var run = start("s1-a", c2, gitShim("echo $$ > " + gitPid + "\nexec sleep 600"));
         var git = ProcessHandle.of(awaitPid(gitPid, run)).orElseThrow();
@@ -558,14 +559,104 @@ class BbCheckoutLockIT {
 
         assertThat(run.finish()).as(run.stderr()).isEqualTo(137);
         assertThat(run.stderr()).contains("not a bound expiry");
-        assertThat(git.isAlive()).as("the git outlives its killed timeout").isTrue();
-        assertThat(lockHeld()).as("and holds the lock").isTrue();
-        var next = start("s1-b", c2, Map.of("BB_MIRROR_LOCK_WAIT", "1"));
+        assertThat(ends(git, 10)).as("the git of the killed timeout was killed with its group by bb-checkout").isTrue();
+        assertThat(lockHeld()).as("and the lock is free").isFalse();
+    }
 
-        assertThat(next.finish()).as(next.stderr()).isEqualTo(6);
-        assertThat(next.stderr()).contains("held by pid:", " " + git.pid() + " (");
-        git.destroyForcibly();
-        assertThat(ends(git, 20)).isTrue();
+    /// a TERM- and HUP-ignoring child of the fetch's git, in the git's process group: it holds fd 9 (the flock) for as long as it lives. The shim starts
+    /// it and waits for its pid before the real work, so the child is always running when the fetch ends
+    private String stray(Path pidFile) {
+        return "sh -c 'trap \"\" TERM HUP; echo $$ > " + pidFile + "; exec sleep 600' &\n"
+               + "while [ ! -s " + pidFile + " ]; do sleep 0.02; done\n";
+    }
+
+    /// F-a: whatever status the bounded fetch returned with, bb-checkout leaves no process of that fetch holding the lock
+    private void assertNoStrayHoldsTheLockAfter(Run run, ProcessHandle helper) throws Exception {
+        assertThat(ends(helper, 10)).as("the TERM- and HUP-ignoring child of the fetch was killed when bb-checkout returned from the fetch: " + run.stderr()).isTrue();
+        assertThat(lockHeld()).as("the lock is free").isFalse();
+    }
+
+    /// v120b's ignterm repro: git dies at timeout's TERM, so timeout exits at once and never sends its KILL; the child that ignores TERM would keep the lock
+    @Test
+    void aTermIgnoringChildOfAGitThatDiedAtTerm_isKilledWhenTheBoundedFetchReturns_exit7() throws Exception {
+        var helperPid = dir.resolve("helper.pid");
+        var env = new HashMap<>(gitShim(stray(helperPid) + "exec sleep 600"));
+
+        env.put("BB_MIRROR_FETCH_TIMEOUT", "1");
+        var run = start("s1-a", c2, env);
+        var helper = ProcessHandle.of(awaitPid(helperPid, run)).orElseThrow();
+
+        orphans.add(helper);
+        assertThat(run.finish()).as(run.stderr()).isEqualTo(7);
+        assertNoStrayHoldsTheLockAfter(run, helper);
+        var next = start("s1-b", c2, Map.of("BB_MIRROR_LOCK_WAIT", "60"));
+
+        assertThat(next.finish()).as(next.stderr()).isZero();
+        assertThat(next.stderr()).doesNotContain("waiting for the mirror lock");
+    }
+
+    /// the same child after a git that was killed from outside (SIGKILL, e.g. the OOM killer): rc 137 before the bound
+    @Test
+    void aTermIgnoringChildOfAGitKilledFromOutside_isKilledWhenTheBoundedFetchReturns_keeps137() throws Exception {
+        var helperPid = dir.resolve("helper.pid");
+        var run = start("s1-a", c2, gitShim(stray(helperPid) + "kill -KILL $$"));
+        var helper = ProcessHandle.of(awaitPid(helperPid, run)).orElseThrow();
+
+        orphans.add(helper);
+        assertThat(run.finish()).as(run.stderr()).isEqualTo(137);
+        assertThat(run.stderr()).contains("not a bound expiry");
+        assertNoStrayHoldsTheLockAfter(run, helper);
+    }
+
+    /// a normal fetch (rc 0) that leaves a child of its group running: killed too, and a process that is not of the fetch is not touched
+    @Test
+    void aChildOfASuccessfulFetch_isKilledWhenTheFetchReturns_andAnUnrelatedProcessIsNot() throws Exception {
+        var helperPid = dir.resolve("helper.pid");
+        var unrelated = BbFixtures.process(List.of("sleep", "600"), env(Map.of())).start();
+
+        started.add(unrelated);
+        orphans.add(unrelated.toHandle());
+        var run = start("s1-a", c2, gitShim(stray(helperPid)));
+        var helper = ProcessHandle.of(awaitPid(helperPid, run)).orElseThrow();
+
+        orphans.add(helper);
+        assertThat(run.finish()).as(run.stderr()).isZero();
+        assertThat(head("s1-a")).isEqualTo(c2);
+        assertNoStrayHoldsTheLockAfter(run, helper);
+        assertThat(unrelated.isAlive()).as("a process outside the fetch's group is left alone").isTrue();
+    }
+
+    /// the named limit: a process that LEFT the fetch's process group (here: setsid) keeps the lock for as long as it lives; the group KILL does not reach it
+    @Test
+    void aChildThatLeftTheProcessGroup_keepsTheLockAsLongAsItLives_aNamedLimit() throws Exception {
+        var pidFile = dir.resolve("bg.pid");
+        var body = "setsid sleep 600 > /dev/null 2>&1 < /dev/null &\n" + "echo $! > " + pidFile;
+        var run = start("s1-a", c2, gitShim(body));
+
+        assertThat(run.finish()).as(run.stderr()).isZero();
+        var background = ProcessHandle.of(Long.parseLong(Files.readString(pidFile).strip())).orElseThrow();
+
+        orphans.add(background);
+        assertThat(background.isAlive()).as("the child outside the group is still running").isTrue();
+        assertThat(lockHeld()).as("the lock is held by it").isTrue();
+        background.destroyForcibly();
+        assertThat(ends(background, 20)).isTrue();
+        awaitLockFree();
+    }
+
+    /// SIGINT during the fetch ends bb-checkout like TERM (measured: before the fetch became a background job bash deferred it): git stays, with the lock
+    @Test
+    void sigintDuringTheFetch_endsBbCheckout_andTheLockStaysWithItsGit() throws Exception {
+        arm();
+        var first = start("s1-a", c2);
+
+        awaitHeld(first);
+        first.process().descendants().forEach(orphans::add);
+        assertThat(sigIgn(first.process().pid()) & 2).as("SIGINT is not ignored by bb-checkout").isZero();
+        signal("INT", first.process().pid());
+        assertThat(first.finish()).as(first.stderr()).isEqualTo(130);
+        assertThat(lockHeld()).as("the lock stays with the git that bb-checkout started").isTrue();
+        release();
         awaitLockFree();
     }
 
@@ -717,22 +808,106 @@ class BbCheckoutLockIT {
         assertThat(head("s1-c")).isEqualTo(c2);
     }
 
-    /// the named limit: a child that outlives its git (here: left running in the background) keeps the lock for as long as it lives
+    // ---- the listing of leftover files never changes the exit code (F-b); a symlinked mirror is listed (F-c)
+
+    private static String printedCommand(Run run) throws IOException {
+        var lines = run.stderrLines();
+        var at = lines.indexOf(lines.stream().filter(l -> l.contains("the command below removes exactly")).findFirst().orElseThrow());
+
+        return lines.get(at + 1);
+    }
+
+    /// a stale ref lock (a git killed mid-update) makes every fetch fail; returns that failure's exit code (git's own), from a control run
+    private int controlFailure(Path mirror) throws Exception {
+        Files.writeString(mirror.resolve("refs/heads/main.lock"), "");
+        var control = start("s1-ctl", c2);
+
+        assertThat(control.finish()).as(control.stderr()).isNotZero().isNotEqualTo(2).isNotEqualTo(7);
+        assertThat(control.stderr()).contains("File exists", "the command below removes exactly");
+
+        return control.process().exitValue();
+    }
+
+    private void assertPrintedCommandRecovers(Run failed) throws Exception {
+        var operator = BbFixtures.run(List.of("bash", "-c", printedCommand(failed)), env(Map.of()), null, null);
+
+        assertThat(operator.rc()).as(operator.stderr()).isZero();
+        assertThat(lockLike().stream().filter(BbCheckoutLockIT::blocks).toList()).as("the printed command removed every blocking file").isEmpty();
+        var recovered = start("s1-ok", c2);
+
+        assertThat(recovered.finish()).as(recovered.stderr()).isZero();
+        assertThat(head("s1-ok")).isEqualTo(c2);
+    }
+
+    /// unreadable directory under refs/: find fails after listing what it could. Was: exit 2 (or find's status), no command
     @Test
-    void aChildThatOutlivesItsGit_keepsTheLockAsLongAsItLives_aNamedLimit() throws Exception {
-        var pidFile = dir.resolve("bg.pid");
-        var body = "sleep 600 > /dev/null 2>&1 < /dev/null &\n" + "echo $! > " + pidFile;
-        var run = start("s1-a", c2, gitShim(body));
+    void anUnreadableDirUnderRefs_isAWarning_notAnotherExitCode_andTheCommandIsStillPrinted() throws Exception {
+        assumeTrue(!"root".equals(System.getProperty("user.name")), "root reads every directory");
+        var mirror = home.resolve("work/pragmatica.git");
+        var expected = controlFailure(mirror);
+        var unreadable = Files.createDirectories(mirror.resolve("refs/tags/locked"));
 
-        assertThat(run.finish()).as(run.stderr()).isZero();
-        var background = ProcessHandle.of(Long.parseLong(Files.readString(pidFile).strip())).orElseThrow();
+        Files.setPosixFilePermissions(unreadable, java.nio.file.attribute.PosixFilePermissions.fromString("---------"));
+        try {
+            var run = start("s1-b", c2);
 
-        orphans.add(background);
-        assertThat(background.isAlive()).as("the child that outlives bb-checkout is still running").isTrue();
-        assertThat(lockHeld()).as("the lock is held by it").isTrue();
-        background.destroyForcibly();
-        assertThat(ends(background, 20)).isTrue();
-        awaitLockFree();
+            assertThat(run.finish()).as(run.stderr()).isEqualTo(expected);
+            assertThat(run.stderr()).contains("warning: listing the blocking files failed", "blocking files in the mirror", "refs/heads/main.lock");
+            assertThat(run.stderr()).contains("the command below removes exactly");
+            assertThat(Files.exists(co("s1-b"))).isFalse();
+        } finally {
+            Files.setPosixFilePermissions(unreadable, java.nio.file.attribute.PosixFilePermissions.fromString("rwx------"));
+        }
+    }
+
+    /// a newline in a lock file's name: listed as one name (NUL-separated), the printed command quotes it and removes it. Was: split at the newline, ls failed, exit 2
+    @Test
+    void aNewlineInALockFileName_isListedAsOneName_andDoesNotChangeTheExitCode() throws Exception {
+        var mirror = home.resolve("work/pragmatica.git");
+        var expected = controlFailure(mirror);
+        var odd = mirror.resolve("refs/tags/a\nb.lock");
+
+        Files.createDirectories(odd.getParent());
+        Files.writeString(odd, "");
+        var run = start("s1-b", c2);
+
+        assertThat(run.finish()).as(run.stderr()).isEqualTo(expected);
+        assertThat(run.stderr()).doesNotContain("warning").contains("the command below removes exactly");
+        assertPrintedCommandRecovers(run);
+        assertThat(Files.exists(odd)).as("the file with the newline in its name is gone").isFalse();
+    }
+
+    /// a listed lock file that a lock-less git removes between the find and the ls: that name is a warning, git's exit code stays, the command is printed
+    @Test
+    void aLockFileRemovedBetweenTheFindAndTheLs_isAWarning_notAnotherExitCode() throws Exception {
+        var mirror = home.resolve("work/pragmatica.git");
+        var expected = controlFailure(mirror);
+        var shim = Files.createDirectories(dir.resolve("lsshim"));
+        var script = "#!/bin/sh\nfor a; do last=$a; done\nrm -f -- \"$last\"\nexec /bin/ls \"$@\"\n";
+
+        Files.writeString(shim.resolve("ls"), script);
+        BbFixtures.executable(shim.resolve("ls"), script);
+        var run = start("s1-b", c2, Map.of("PATH", shim + ":" + System.getenv("PATH")));
+
+        assertThat(run.finish()).as(run.stderr()).isEqualTo(expected);
+        assertThat(run.stderr()).contains("warning: cannot list", "refs/heads/main.lock", "the command below removes exactly");
+        assertThat(Files.exists(mirror.resolve("refs/heads/main.lock"))).as("the shim removed it, as the lock-less git would").isFalse();
+    }
+
+    /// F-c (the tool follows a symlinked mirror): listed, and the printed command works on it
+    @Test
+    void aSymlinkedMirror_isListed_andThePrintedCommandWorksOnIt() throws Exception {
+        var link = home.resolve("work/pragmatica.git");
+        var real = home.resolve("work/pragmatica-real.git");
+
+        Files.move(link, real);
+        Files.createSymbolicLink(link, real);
+        Files.writeString(real.resolve("refs/heads/main.lock"), "");
+        var run = start("s1-b", c2);
+
+        assertThat(run.finish()).as(run.stderr()).isNotZero();
+        assertThat(run.stderr()).contains("File exists", "blocking files in the mirror", "refs/heads/main.lock", "the command below removes exactly");
+        assertPrintedCommandRecovers(run);
     }
 
     // ---- many callers, refs moving
