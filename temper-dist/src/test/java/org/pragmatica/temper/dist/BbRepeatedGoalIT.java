@@ -178,6 +178,7 @@ class BbRepeatedGoalIT {
     void aLaterPhaseRunsTheEarlierGoalsToo_soTestThenInstall_isRefused() throws Exception {
         refused("test", "install");
         refused("package", "verify");
+        refused("pre-integration-test", "test");
         refused("verify", "install");
     }
 

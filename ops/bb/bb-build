@@ -158,6 +158,22 @@
 # token), a dotted or slashed one against the package path, %regex[...] against the class path (limit: a %regex holding ',' is split).
 # build.log: `bb-build: selected testcases: [run<i>:]<token>=<n> ... [surefire(all)=n] [failsafe(all)=n]`, then on refusal
 # `[ERROR] bb-build: refused rc <job rc> -> 19: <cell's reason>`; 19 lands in .bb/rc and the ticket's rc= (no bb-cp-record).
+# KILL LABEL (#131): the ticket carries the host kernel's window of its run: oom_kill_start= mem_avail_kb_start= (written with started=, under the grant's lock hold) and
+# oom_kill_end= mem_avail_kb_end= (read right after the job's wait, written with state=finished); oom_kill is /proc/vmstat's host-wide counter, MemAvailable is in kB, a
+# value is `unavailable` when it cannot be read. bb-result (and bb-wait, bb-await through it) turn them into the outcome, never from the number 137 alone:
+#   OOM-KILLED  rc 137 AND oom_kill_end > oom_kill_start AND no bound_hit=       the ticket's own process was SIGKILLed while the kernel killed something (some process: a
+#                                                                                host-wide counter; a hand-made kill -9 in the same window reads as OOM, see LIMITS)
+#   KILLED      rc 124 with bound_hit= (bb-build's bound), or rc 137 with no counter move or an unreadable counter     named in the line; never OOM-KILLED
+#   (none)      every other rc: a non-signal non-zero rc is a FAILURE as before, whatever the counter did meanwhile (two tickets at once see the same counter)
+# LIMITS: a ticket of before this change has no fields and gets no label; bb-mutate's own kill leaves a ticket with no numeric rc (reap records none); a SIGKILL by hand in a
+# window where another process was OOM-killed is labelled OOM-KILLED (the counter has no victim); an OOM kill of a surefire fork leaves maven's rc 1 and no label.
+# REPEATED TEST GOAL (#132): a call whose maven args run the same test goal more than once is refused, rc 2, nothing queued, before the first write, the message naming
+# `bb-test --repeat N` (one report directory per run): every run of surefire:test writes the same target/surefire-reports files, so a repeat is unobservable and its ticket
+# would claim N runs for one report set. UNITS: surefire `test` (the goal, or any phase from `test` on) and failsafe `integration-test` (the goal, or any phase from
+# `integration-test` on); a unit named twice in any mix of forms is refused: `surefire:test`, org.apache.maven.plugins:maven-surefire-plugin[:<version>]:test (same for failsafe),
+# `<goal>@<execution>` (any id), phases test prepare-package package integration-test post-integration-test verify install deploy (so `test install` is refused, `clean install` and
+# `test-compile surefire:test` are not). An option's separate value (-pl x, -T 2, -D k=v, -rf :x) is not a task. NOT refused: failsafe:verify (runs no test), another plugin's
+# `x:test`, a bb-test launch (BB_LAUNCH; its args are not a goal list). Checked on the queue path and under BB_QUEUE=0; the skip flags (-DskipTests) do not lift it.
 set -euo pipefail
 SELF=$(readlink -f "$0")
 # --help / -h as the only argument: print this header (the usage and the rules above) to stdout, exit 0, touch nothing
@@ -173,6 +189,33 @@ wants_jbct() {  # the ONE copy of the jbct-run test (the helper trusts it): a jb
     esac
   done
   return $w
+}
+repeated_test_goal() {  # the ONE copy of the repeated-test-goal test (#132): prints the unit and the tasks of the first test-running goal the maven args name more than once; prints nothing (return 0) when none
+  # UNITS: S = surefire `test`, F = failsafe `integration-test`. A task runs S when it is the goal (`surefire:test`, `org.apache.maven.plugins:maven-surefire-plugin[:<ver>]:test`, any `@<execution>`) or a lifecycle
+  # phase from `test` on (test prepare-package package pre-integration-test integration-test post-integration-test verify install deploy); F likewise for `failsafe`/maven-failsafe-plugin `integration-test` and the
+  # phases from `integration-test` on. An option and its separate value (-pl x, -T 2, -D k=v ...) is not a task; a plugin of another groupId, `failsafe:verify` and `x:test` of any other prefix run none.
+  local a skip=0 s=0 f=0 ts="" t
+  for a in "$@"; do
+    if [ "$skip" = 1 ]; then skip=0; continue; fi
+    case $a in
+      -pl|--projects|-f|--file|-T|--threads|-P|--activate-profiles|-s|--settings|-gs|--global-settings|-rf|--resume-from|-l|--log-file|-b|--builder|-t|--toolchains|-gt|--global-toolchains|-D) skip=1; continue ;;
+      -*) continue ;;
+    esac
+    t=${a%%@*}
+    case $t in
+      test|prepare-package|package|pre-integration-test) s=$((s + 1)); ts="$ts $a" ;;
+      integration-test|post-integration-test|verify|install|deploy) s=$((s + 1)); f=$((f + 1)); ts="$ts $a" ;;
+      surefire:test|org.apache.maven.plugins:maven-surefire-plugin:test|org.apache.maven.plugins:maven-surefire-plugin:*:test) s=$((s + 1)); ts="$ts $a" ;;
+      failsafe:integration-test|org.apache.maven.plugins:maven-failsafe-plugin:integration-test|org.apache.maven.plugins:maven-failsafe-plugin:*:integration-test) f=$((f + 1)); ts="$ts $a" ;;
+    esac
+  done
+  if [ "$s" -gt 1 ]; then printf 'surefire:test (%s)\n' "${ts# }"; elif [ "$f" -gt 1 ]; then printf 'failsafe:integration-test (%s)\n' "${ts# }"; fi
+  return 0
+}
+refuse_repeated_test_goal() {  # refuse_repeated_test_goal <maven args...>: rc 2, nothing queued, for a goal list that runs a test goal more than once (#132)
+  [ -z "${BB_LAUNCH:-}" ] || return 0   # bb-test's own call: its args are __launch <module> <repeat> <selectors>, not a goal list
+  local r; r=$(repeated_test_goal "$@")
+  [ -z "$r" ] || { echo "refusing (rc 2): the goal list runs $r more than once; every run writes the same target/surefire-reports files, so a repeat is one report set that claims N runs: use bb-test --repeat N (one report directory per run); nothing queued" >&2; exit 2; }
 }
 selected_testcases() {  # selected_testcases <co> <marker> mvn|launch:<ticket>|select <job rc> <job args...>: ZERO-TESTCASE REFUSAL (header), THE TABLE. Prints the count line; exit 0 = keep the job rc, 19 = refused, other = the count failed
   timeout -k 5 120 python3 - "$@" <<'PY'
@@ -323,6 +366,7 @@ if [ "${1:-}" != __run ] && [ "${BB_QUEUE:-1}" = 0 ]; then
   B=${1:-}; [ "$B" != --since ] || B=${3:-}; B=${B%/}/.bb
   [ ! -d "$B" ] || rm -f "$B/ticket"
   A=("$@"); if [ "${A[0]:-}" = --since ]; then A=("${A[@]:3}"); else A=("${A[@]:1}"); fi   # the maven args after [--since <sha>] <checkout>
+  refuse_repeated_test_goal ${A[@]+"${A[@]}"}   # #132, before anything runs
   selected_testcases / / select 0 ${A[@]+"${A[@]}"} \
     || { echo "refusing (rc 19): BB_QUEUE=0 cannot count a -Dtest/-Dit.test selection (bb-build-direct writes .bb/rc from its own detached job; ZERO-TESTCASE REFUSAL, #86); run it through the queue" >&2; exit 19; }
   unset BB_ORDER_AT BB_DRIVER_PID BB_DRIVER_START BB_MUTANT_BOUND   # no ticket here: nothing to order
@@ -352,6 +396,11 @@ if [ "${1:-}" = __run ]; then
   # ---- waiter: one detached process per ticket; becomes the maven job wrapper when granted ----
   set +e
   ID=$2; shift 2
+  # KERNEL WINDOW (#131): the host's OOM-kill counter (/proc/vmstat oom_kill) and MemAvailable (kB) at the grant and right after the job's wait, written into the
+  # ticket as oom_kill_start= mem_avail_kb_start= (with started=) and oom_kill_end= mem_avail_kb_end= (with state=finished); `unavailable` when the file or the line cannot be read.
+  # Seams (inert unless set): BB_TEST_VMSTAT, BB_TEST_MEMINFO. The counter is host-wide: it says "some process was OOM-killed meanwhile", never whose; bb-result decides (header).
+  oom_now() { local v; v=$(awk '$1 == "oom_kill" { print $2; exit }' "${BB_TEST_VMSTAT:-/proc/vmstat}" 2> /dev/null); case $v in ''|*[!0-9]*) echo unavailable;; *) echo "$v";; esac; }
+  mem_now() { local v; v=$(awk '$1 == "MemAvailable:" { print $2; exit }' "${BB_TEST_MEMINFO:-/proc/meminfo}" 2> /dev/null); case $v in ''|*[!0-9]*) echo unavailable;; *) echo "$v";; esac; }
   exec 8> "$Q/.lock"
   T=$Q/waiting/$ID; CO=$(field "$T" co); CAP=$(field "$T" cap); LIMIT=$(field "$T" limit); B=$CO/.bb
   WAITED=0
@@ -372,7 +421,7 @@ if [ "${1:-}" = __run ]; then
   rm -f "$B/queued" "$B/rc" "$B/end" "$B/refused" "$B"/fields.*; touch "$B/run.marker"; echo "$NOW" > "$B/start"; echo "$ID" > "$B/ticket"; printf '%q ' "$@" > "$B/args"   # for bb-report's EMPTY RUN check
   RDF=(-Daether.requireDocker=true); [ "$(field "$T" requireDocker)" != 0 ] || RDF=()   # #31: the ticket's own record decides
   SLOT=""; [ "$(field "$T" iso)" = 1 ] && SLOT=$(pg_free_slot)
-  printf 'started=%s\nwaited=%s\n' "$NOW" "$WAITED" >> "$T"; [ -z "$SLOT" ] || printf 'group_slot=%s\n' "$SLOT" >> "$T"; mv "$T" "$Q/running/$ID"; T=$Q/running/$ID
+  printf 'started=%s\nwaited=%s\noom_kill_start=%s\nmem_avail_kb_start=%s\n' "$NOW" "$WAITED" "$(oom_now)" "$(mem_now)" >> "$T"; [ -z "$SLOT" ] || printf 'group_slot=%s\n' "$SLOT" >> "$T"; mv "$T" "$Q/running/$ID"; T=$Q/running/$ID
   # GRANT + LEDGER ATOMIC (vbt6 B2): the job subshell inherits fd 8 (the same open file description, so the same flock) and writes its
   # own ledger entry, keyed to its own pid, before it closes fd 8. The waiter closes its fd 8 instead of `flock -u` (which would unlock the
   # shared description for both), so the lock is released only once BOTH have closed it: a waiter SIGKILLed after the spawn can no longer
@@ -428,6 +477,7 @@ if [ "${1:-}" = __run ]; then
   W=""
   if [ -n "$BOUND" ]; then bash "$SELF" __bound "$ID" "$CO" "$C" "$(pstart "$C")" $((NOW + BOUND + 1)) < /dev/null > /dev/null 2>&1 & W=$!; fi
   wait "$C"; BRC=$?   # the build's exit status: the verdict. Never re-read from $B/rc, which a lane can delete or rewrite
+  OOM_END=$(oom_now); MEM_END=$(mem_now)   # the window's end: before anything else this waiter does (the bound runner's stop, the launch-fields read, the lock wait)
   if [ -n "$W" ] && [ -n "$(field "$T" bound_hit)" ]; then wait "$W"; [ "$BRC" -le 128 ] || BRC=124; fi   # stopped by its bound: 124, recorded once nothing of the job is left
   LF="" REJ=""   # LAUNCH FIELDS (header): read before the lock, so a slow or hostile file never holds the queue; set -e: every read is || true
   rej() { case ",$REJ," in *",$1,"*) ;; *) REJ=${REJ:+$REJ,}$1;; esac; echo "bb-build: launch fields: rejected $1${2:+: $2}" >> "$B/build.log"; }
@@ -457,7 +507,7 @@ if [ "${1:-}" = __run ]; then
   [ -f "$T" ] || exit 0   # cancel or reap already finalized this ticket (first writer wins): do not recreate running/<id> or overwrite done/<id>
   # CTO 2026-11-21: under the lock, just before the append, the run ticket must still be ours; a launch whose marker changed since the read copies nothing (a process the job left behind can still rewrite its OWN fields in that window, within the grammar: accepted)
   if [ -n "${BB_LAUNCH:-}" ] && [ "$HT" = "$ID" ] && [ "$(run_ticket "$CO" 2> /dev/null | head -c 128 | head -n 1)" != "$ID" ]; then LF="fields_rejected=ticket_changed"$'\n'"verdict_source=missing"; [ "$BRC" != 0 ] || WRC=18; fi
-  { [ -z "$LF" ] || printf '%s\n' "$LF"; printf 'state=finished\nrc=%s\nended=%s\n' "$WRC" "$(cat "$B/end" 2>/dev/null || date +%s)"; } >> "$T"
+  { [ -z "$LF" ] || printf '%s\n' "$LF"; printf 'oom_kill_end=%s\nmem_avail_kb_end=%s\nstate=finished\nrc=%s\nended=%s\n' "$OOM_END" "$MEM_END" "$WRC" "$(cat "$B/end" 2>/dev/null || date +%s)"; } >> "$T"
   to_done "$T"
   exit 0
 fi
@@ -490,6 +540,7 @@ if [ -n "$SINCE" ]; then
   esac
 fi
 case "${BB_REQUIRE_DOCKER:-1}" in 0|1) ;; *) echo "refusing: BB_REQUIRE_DOCKER must be 0 or 1 (or unset)" >&2; exit 2;; esac
+refuse_repeated_test_goal "$@"   # #132: rc 2, nothing queued, before the first write
 MUTANT_FIELDS=""   # header: MUTANT TICKETS
 if [ -n "${BB_ORDER_AT+x}" ]; then
   [[ $BB_ORDER_AT =~ ^[1-9][0-9]{18}$ ]] || { echo "refusing: BB_ORDER_AT must be epoch nanoseconds (19 digits)" >&2; exit 2; }
