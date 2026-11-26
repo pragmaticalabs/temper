@@ -6,6 +6,61 @@
 # probes/<owner>/<name> resolves ONLY as refs/remotes/probes/<owner>/<name> in the clone (a public branch or tag of that name in
 # the mirror never shadows it); any other <ref> is tried in the mirror first; a ref that resolves in neither makes the run fail and leaves no checkout dir. At most once per 24 h a best-effort
 # bb-probe-reap runs afterwards; its failure never fails the checkout.
+# Mirror lock (#119): the fetch, the rev-parse and the clone of the mirror run under an exclusive flock on $HOME/work/pragmatica.git.lock
+# (next to the mirror, never in the queue dir), so concurrent callers queue instead of racing on ref locks ("cannot lock ref ...: is at X
+# but expected Y") or on a repack under a clone. Anyone else that writes the mirror must take the same lock.
+# Guarantees, each with its mechanism:
+#  - Mutual exclusion among callers that take this flock (one kernel flock on one open file). A process that does not take it (a hand-run
+#    fetch, an old bb-checkout) is not excluded.
+#  - The lock outlives bb-checkout exactly as long as a git it started: fd 9 is INHERITED by every git below (fetch, rev-parse, clone and what
+#    they spawn: remote helper, upload-pack, index-pack, hooks, gc) and the kernel drops the flock when the last holder of that open file ends. A
+#    bb-checkout killed by TERM, HUP or KILL therefore leaves the lock with its git; a second caller waits (it says so, naming the holder pids from
+#    /proc/<pid>/fdinfo) and then fetches a mirror no git of ours is still writing. The fetch keeps its bound (below), the clone has none.
+#  - The fetch is bounded: timeout -k 10 sends TERM at the bound and, only if its git is still alive 10 s later, KILL to its whole process group
+#    (timeout runs in its own group). When git dies at the TERM, timeout exits at once and sends no KILL, so that is not what frees the lock from a
+#    helper that ignores TERM. What does: when the fetch command has returned, whatever its status (0, the bound, an outside kill of git or of
+#    timeout itself, git's own failure), this script KILLs the rest of timeout's process group (the fetch runs as a background job, `wait`ed for,
+#    to know the group id). After bb-checkout returns from the fetch, no process of that fetch that is still in the group (git, remote helper,
+#    index-pack, ssh, a hook, a background child) holds the lock; a process that left the group is a named limit, and so is a bb-checkout that is itself
+#    killed during the fetch (below). Nothing outside the group is signalled.
+#  - gc runs in the foreground (gc.autoDetach=false; maintenance.autoDetach=false, unknown and inert on git 2.43), inside the lock and the fetch bound:
+#    the fetch's own auto gc is the collector, and a detached gc can never hold the lock past the script.
+#  - A caller that has to queue says so on stderr ("waiting for the mirror lock ... held by pid: ...") and waits at most BB_MIRROR_LOCK_WAIT.
+# Bounds, in seconds, overridable by environment variables of 1 to 5 ASCII digits, at least 1 (anything else: exit 2, nothing created):
+#   BB_MIRROR_LOCK_WAIT     default 420   wait for the lock; covers one hung holder (the fetch bound) plus one normal fetch
+#   BB_MIRROR_FETCH_TIMEOUT default 300   the fetch itself (a cold fetch takes seconds to about a minute)
+# Exit codes: 2 usage or bad bound, 3 dir exists, 4 owner guard, 5 ref not found (existing); 6 the mirror lock was not obtained within the wait (or
+# no flock/timeout/bash 5 on this host); 7 the mirror fetch exceeded its bound (status 124 or 137 once the bound has elapsed by the clock, in ms; the
+# same status before the bound is git's own or an outside SIGKILL, e.g. the OOM killer, and is passed on with a line saying so). Any other fetch
+# failure keeps git's own exit code, also when listing the leftover files (below) fails: that is a warning line, never another exit code.
+# On 6 and 7 no checkout dir exists.
+# Named limits:
+#  - kill -9 of the `timeout` process while bb-checkout lives: git is unbounded from then on, but bb-checkout sees timeout's 137 at once and KILLs
+#    the group (git included), so the lock is released and the run fails with 137 and the "not a bound expiry" line. Kill -9 of bb-checkout AND of
+#    timeout leaves git unbounded and holding the lock until it ends; callers exit 6 after the wait.
+#  - bb-checkout ITSELF killed (TERM, HUP, INT, KILL) during the fetch while a helper of that fetch that ignores TERM runs: that helper keeps the
+#    lock UNBOUNDED, for as long as it lives. Mechanism: git ends at timeout's TERM at the bound and timeout then exits without its KILL (it
+#    sends one only while its direct child is alive), and the group KILL above is bb-checkout's, which is gone. A helper that handles TERM
+#    (index-pack, ssh, upload-pack do) ends with git at the bound; a git that dies at the bound is thus freed by the bound, a TERM-ignoring
+#    helper is seen only with a test shim. Not fixed: a fix needs a process that outlives bb-checkout (a watcher), which a kill of
+#    bb-checkout's own process group takes with it; callers then exit 6 after the wait.
+#  - a process of the fetch that left timeout's process group (setsid, setpgid, a daemonised helper such as an ssh ControlPersist master, not
+#    measured here) keeps the lock for as long as it lives: the group KILL does not reach it. The origin of the mirror is https.
+#  - a caller that ignores SIGHUP (started under nohup or setsid) is not killed by it: no kill, so nothing to guarantee; the other signals apply.
+#  - the elapsed time that tells 124/137 expiry from git's own is read from the wall clock (EPOCHREALTIME): a clock step during a fetch can
+#    misclassify such a status (the fetch fails either way; only the message and exit 7 versus the status itself differ).
+#  - the clone under the lock is not bounded. SIGINT: during the clone (a foreground git) bash defers it and a tty Ctrl-C does not reach git
+#    (own process group), so an interrupted run continues to its end; during the fetch (a background job, `wait`ed for) it ends bb-checkout at once
+#    like TERM, with its git left running under timeout's bound and holding the lock (measured on host, bash 5.2). A bb-checkout killed by
+#    TERM/HUP/INT/KILL does not run its EXIT trap and may leave a partial
+#    checkout dir (a retry with that name exits 3); a failed clone leaving a partial dir is as it was before #119.
+#  - a git killed -9 mid-update (also our own KILL after the TERM grace) leaves blocking files in the mirror (measured on git 2.43: kill at the ref
+#    update leaves <ref>.lock, while packed-refs is rewritten packed-refs.lock AND packed-refs.new, during pack receipt only objects/pack/tmp_pack_*,
+#    which does not block; commit-graph/multi-pack-index locks, config.lock, shallow.lock, hooks/*.lock did not block a fetch) and every later
+#    fetch fails "Unable to create ... File exists". On a failed fetch this script lists every *.lock under refs/, HEAD.lock, packed-refs.lock
+#    and packed-refs.new (a mirror that is a symlink is followed; names are read NUL-separated, so a newline in a name is fine) and prints one command
+#    (paths quoted) that deletes exactly those under the flock. It deletes none itself: the lock-less
+#    hand-run scripts that also fetch the mirror may own them, and the flock does not stop those.
 set -euo pipefail
 [ $# -eq 2 ] || { echo "usage: bb-checkout <name> <sha-or-ref>" >&2; exit 2; }
 NAME=$1; REF=$2
@@ -18,11 +73,82 @@ case "$NAME" in "$BB_OWNER"-*) ;; *) echo "refusing: checkout name must start wi
 MIRROR=$HOME/work/pragmatica.git
 CO=$HOME/work/co/$NAME
 [ -e "$CO" ] && { echo "refusing: $CO exists (one dir per agent/SHA; remove it yourself if it is yours)" >&2; exit 3; }
-git -C "$MIRROR" fetch -q --prune origin
 PROBES=$HOME/work/probes.git
 MADE=
 # a failed run removes only the dir this run created
 trap 'rc=$?; [ "$rc" = 0 ] || [ -z "$MADE" ] || rm -rf "$CO"' EXIT
+LOCK_WAIT=${BB_MIRROR_LOCK_WAIT:-420}; FETCH_T=${BB_MIRROR_FETCH_TIMEOUT:-300}
+# 1 to 5 ASCII digits, value >= 1 (an explicit digit list: a range could match non-ASCII digits in some locales; 0 and a huge value would mean no bound)
+for v in "$LOCK_WAIT" "$FETCH_T"; do
+  case $v in *[!0123456789]*) v=x ;; esac
+  [ "${#v}" -le 5 ] && [ "$v" != x ] && [ "$((10#$v))" -ge 1 ] || { echo "refusing: BB_MIRROR_LOCK_WAIT and BB_MIRROR_FETCH_TIMEOUT must be 1 to 5 ASCII digits, at least 1 (seconds)" >&2; exit 2; }
+done
+LOCK_WAIT=$((10#$LOCK_WAIT)); FETCH_T=$((10#$FETCH_T))
+command -v flock > /dev/null 2>&1 && command -v timeout > /dev/null 2>&1 && [ -n "${EPOCHREALTIME:-}" ] || { echo "refusing: flock, timeout and bash 5 (EPOCHREALTIME) are required for the mirror lock" >&2; exit 6; }
+LOCK=$MIRROR.lock
+# pids that hold the lock: processes with the lock file open whose open file carries the flock (the kernel lists it in /proc/<pid>/fdinfo/<fd>)
+holders() {
+  local f pid n out=
+  for f in $(find -L /proc/[0-9]*/fd -maxdepth 1 -samefile "$LOCK" 2> /dev/null); do
+    pid=${f#/proc/}; pid=${pid%%/*}; n=${f##*/}
+    grep -q '^lock:' "/proc/$pid/fdinfo/$n" 2> /dev/null && out="$out $pid ($(cat "/proc/$pid/comm" 2> /dev/null))"
+  done
+  echo "${out:- none found (just released?)}"
+}
+exec 9>> "$LOCK" || { echo "refusing: cannot open the mirror lock $LOCK" >&2; exit 6; }
+if ! flock -n 9; then
+  echo "bb-checkout: waiting for the mirror lock $LOCK (up to ${LOCK_WAIT}s); held by pid:$(holders)" >&2
+  flock -w "$LOCK_WAIT" 9 || { echo "refusing: mirror lock $LOCK not obtained within ${LOCK_WAIT}s (held by pid:$(holders)); nothing created" >&2; exit 6; }
+fi
+# fd 9 is INHERITED by every command below, on purpose: the kernel holds the flock for as long as any process has the open file, so a
+# bb-checkout killed by TERM, HUP or KILL leaves the lock with its git (still running, still under timeout's bound) until that git ends
+# what a git killed -9 mid-update leaves in the mirror (measured, git 2.43) and blocks the next fetch: <ref>.lock, HEAD.lock, and when
+# packed-refs is rewritten packed-refs.lock + packed-refs.new. Nothing here deletes them (a lock-less hand-run fetch may own them): they are listed
+# with the operator's command. Not listed (measured not to block a fetch): objects/**/tmp_*, commit-graph and multi-pack-index locks, config.lock, shallow.lock, hooks/*.lock.
+PM=$(printf '%s' "$MIRROR" | sed 's/[][\*?]/\\&/g')
+BLOCKING=("$MIRROR" -type f '(' '(' -path "$PM/refs/*" -name '*.lock' ')' -o -path "$PM/HEAD.lock" -o -path "$PM/packed-refs.lock" -o -path "$PM/packed-refs.new" ')')
+# lock_files runs on the failure paths under set -e and must never change the exit code that follows it (git's own, or 7) nor swallow the printed
+# command: every command in it that can fail has its own guard and says so as a warning line. Sites: the find (an unreadable directory makes it
+# exit 1 after listing what it could read: kept, with a warning), the NUL-to-\001 translation (names are split on NUL, never on a newline), and
+# each ls -ld (a file removed between the find and the ls, or one ls cannot read: a warning for that name, the others are still listed).
+# -H: a mirror that is itself a symlink is followed (the printed command has it too).
+lock_files() {
+  local f fr=0 lr l
+  f=$(find -H "${BLOCKING[@]}" -print0 2> /dev/null | tr '\0' '\001'; exit "${PIPESTATUS[0]}") || fr=$?
+  [ "$fr" = 0 ] || echo "bb-checkout: warning: listing the blocking files failed (find status $fr; an unreadable directory?): the list and the command below may miss files" >&2
+  [ -z "$f" ] || {
+    echo "bb-checkout: blocking files in the mirror, left by a git killed mid-update (none is deleted here):" >&2
+    while IFS= read -r -d $'\001' l; do ls -ld -- "$l" >&2 || { lr=$?; echo "bb-checkout: warning: cannot list $(printf '%q' "$l") (ls status $lr; removed meanwhile?)" >&2; }; done <<< "$f"
+    echo "bb-checkout: the command below removes exactly the files listed above (every *.lock under refs/, HEAD.lock, packed-refs.lock, packed-refs.new); run it only when no git runs on the mirror (the flock stops callers that take it, not a lock-less hand-run git):" >&2
+    printf '%q ' flock "$LOCK" find -H "${BLOCKING[@]}" -delete >&2; echo >&2
+  }
+}
+now_ms() { local t=${EPOCHREALTIME/[.,]/}; echo $((t / 1000)); }
+rc=0; t0=$(now_ms)
+# The fetch runs as a background job so that its process group is known: timeout makes itself the leader of a new group (pgid = its pid) and
+# every process of the fetch (git, remote helper, ssh, hooks) is in it unless it left on purpose (setsid/setpgid). timeout's own KILL goes out only
+# while its direct child is still alive, so a TERM-ignoring helper of a git that died at the TERM survives timeout: after the fetch command has
+# returned, whatever status it had, this script KILLs what is left of that group. Only that group is signalled (a pgid is not reused while the group
+# has a member; if it is empty kill finds nothing). The fetch gets /dev/null as stdin (an async job does; fetch -q reads none).
+timeout -k 10 "$FETCH_T" git -c gc.autoDetach=false -c maintenance.autoDetach=false -C "$MIRROR" fetch -q --prune origin &
+tp=$!
+# wait's stderr is silenced: when timeout itself is killed from outside, bash prints a "Killed timeout -k ..." job line there; the status is
+# reported by the message below (137, "not a bound expiry"), which is the one line a reader needs
+wait "$tp" 2> /dev/null || rc=$?
+kill -KILL -- "-$tp" 2> /dev/null || true
+elapsed=$(($(now_ms) - t0))
+expired=
+# 124 is timeout's status for its TERM at the bound, 137 its KILL 10 s later; a 124 or 137 from elsewhere (git itself, an outside SIGKILL such as
+# the OOM killer) before the bound has passed is not an expiry
+case $rc in
+  124|137) [ "$elapsed" -lt $((FETCH_T * 1000)) ] || expired=1 ;;
+esac
+if [ -n "$expired" ]; then
+  echo "refusing: the mirror fetch exceeded ${FETCH_T}s (BB_MIRROR_FETCH_TIMEOUT); nothing created" >&2; lock_files; exit 7
+elif [ "$rc" != 0 ]; then
+  case $rc in 124|137) echo "bb-checkout: the mirror fetch ended with status $rc (137 is SIGKILL) after ${elapsed} ms, before its ${FETCH_T}s bound (an outside kill, e.g. the OOM killer, or git's own status): not a bound expiry" >&2 ;; esac
+  lock_files; exit "$rc"
+fi
 PROBE_REF=
 case $REF in probes/*/*) PROBE_REF=$REF ;; esac
 SHA=
@@ -31,6 +157,7 @@ SHA=
 mkdir -p "$HOME/work/co"
 git clone -q --no-checkout "$MIRROR" "$CO"
 MADE=1
+exec 9>&-   # the mirror is no longer read: release the lock before the probes steps
 if [ -d "$PROBES" ]; then
   git -C "$CO" remote add probes "$PROBES"
   if ! git -C "$CO" fetch -q probes '+refs/probes/*:refs/remotes/probes/*'; then
