@@ -443,18 +443,38 @@ class BbKillLabelIT {
         var served = dir.resolve("vmstat-served");
         var endRead = dir.resolve("vmstat-end-read");
         var runnerRc = dir.resolve("work").resolve(ME + "-late").resolve(".bb").resolve("rc");
-        // The server pairs ONE payload with ONE reader: it holds the FIFO's write end until the reader has closed its end (a probe write then fails with EPIPE) and only then
-        // reopens. Without that hold, a reopen succeeds while the previous reader (awk, exited from its loop but not yet gone: load) still has the FIFO open, so the server
-        // serves and logs a line that no read asked for (#150: 8 and 13 lines, all ":5", for 2 reads). The hold ends when the reader closes (a reader that stops early, like awk and
-        // `head -n 2`, but NOT `cat`, which waits for an EOF this server would never give) and is bounded at 30 s, so no reader can hang the server.
-        var server = BbFixtures.executable(dir.resolve("vmstatd.sh"),
-                                           "#!/bin/bash\ntrap '' PIPE\nn=0\nwhile :; do\n"
-                                          + "  exec 3> " + fifo + "\n"
-                                          + "  n=$((n+1)); if [ -e " + runnerRc + " ]; then v=6; else v=5; fi\n"
-                                          + "  printf 'nr_free_pages 1\\noom_kill %s\\npgfault 9\\n' \"$v\" >&3; echo \"$n:$v\" >> " + served + "\n"
-                                          + "  [ \"$n\" -lt 2 ] || : > " + endRead + "\n"
-                                          + "  for _ in $(seq 1500); do printf '\\n' >&3 2> /dev/null || break; sleep 0.02; done\n"
-                                          + "  exec 3>&-\ndone\n");
+        // The server pairs ONE payload with ONE reader (#150). It writes, closes its write end at once (the reader sees EOF: mawk, bigboy's awk, reads again after its first read and,
+        // were the write end back open already, would take a SECOND payload from the same open, a served line per payload: 5 lines for one read, no shim) and only then waits until the
+        // reader has closed its end too, a non-blocking write-open failing with ENXIO once no reader is left (a plain reopen would succeed while a lingering reader, gawk exited from
+        // its loop but not yet gone under load, still holds the FIFO, and serve it again: 8 and 13 lines, all ":5", for 2 reads). The wait is bounded at 30 s.
+        var server = BbFixtures.executable(dir.resolve("vmstatd.py"),
+                                           """
+                                           #!/usr/bin/env python3
+                                           import errno, os, sys, time
+                                           fifo, served, rc, end_read = sys.argv[1:5]
+                                           n = 0
+                                           while True:
+                                               fd = os.open(fifo, os.O_WRONLY)
+                                               n += 1
+                                               v = 6 if os.path.exists(rc) else 5
+                                               try:
+                                                   os.write(fd, ("nr_free_pages 1\\noom_kill %d\\npgfault 9\\n" % v).encode())
+                                               except OSError:
+                                                   pass
+                                               with open(served, "a") as f:
+                                                   f.write("%d:%d\\n" % (n, v))
+                                               if n >= 2:
+                                                   open(end_read, "w").close()
+                                               os.close(fd)
+                                               deadline = time.time() + 30
+                                               while time.time() < deadline:
+                                                   try:
+                                                       os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+                                                   except OSError as e:
+                                                       if e.errno == errno.ENXIO:
+                                                           break
+                                                   time.sleep(0.02)
+                                           """);
         // The load seam of #150, always on: every awk that reads the counter lingers 0.5 s after its read (the fd stays open), as a descheduled or slow-exiting reader does under load.
         var realAwk = BbFixtures.run(List.of("sh", "-c", "command -v awk"), Map.of(), null, null).stdout().strip();
         var slowAwkDir = Files.createDirectories(dir.resolve("slow-awk"));
@@ -467,7 +487,7 @@ class BbKillLabelIT {
                                              "#!/bin/bash\ntrap 'while [ ! -e " + endRead + " ]; do sleep 0.1; done; exit 0' TERM\nwhile :; do sleep 0.2; done\n");
 
         assertThat(BbFixtures.run(List.of("mkfifo", fifo.toString()), Map.of(), null, null).rc()).isZero();
-        started.add(BbFixtures.processClean(List.of("bash", server.toString()), Map.of("PATH", System.getenv("PATH")))
+        started.add(BbFixtures.processClean(List.of("python3", server.toString(), fifo.toString(), served.toString(), runnerRc.toString(), endRead.toString()), Map.of("PATH", System.getenv("PATH")))
                              .redirectErrorStream(true)
                              .redirectOutput(ProcessBuilder.Redirect.DISCARD)
                              .start());
