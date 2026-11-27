@@ -19,13 +19,13 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /// QUEUE CLAIMS TO COME (issue #130) in `ops/bb/bb-queue-lib.sh`: a grant must not leave MemAvailable, minus the off-queue headroom, minus
-/// what the queue's own live launches are still expected to claim (E - their tree's RSS, E = 6 GB by default), minus the grant's own E,
-/// below the floor (8 GB). Every row runs REAL `bb-build __run` waiters through the production path (reap, pick, grant, ledger line, all in
+/// what the queue's own live launches are still expected to claim (E - their tree's RSS, E = 6 GB by default), below the floor (8 GB);
+/// a floor below E is refused (CTO ruling 2026-11-27: the grant's own E is not subtracted again). Every row runs REAL `bb-build __run` waiters through the production path (reap, pick, grant, ledger line, all in
 /// one queue-lock hold); only MemAvailable (BB_TEST_MEMINFO), the process list (BB_TEST_PS), /proc/vmstat (BB_TEST_VMSTAT), the launch
 /// (BB_TEST_MVN: a bash script that holds until <name>.go exists), `docker inspect` (a script on PATH, answered from a file) and bb-netns-run
 /// (runs the launch directly) are fakes. An isolated ticket (BB_PORT_GROUP=1 with docker on PATH, so iso=1) counts its container's tree too.
 ///
-/// Probes: make mem_held skip the claim term -> [#threeWaiters_at20GbFloor8_thirdIsHeld] and [#twoWaitersInTheSameSecond_neverSpendTheSameHeadroom]
+/// Probes: make mem_held skip the claim term -> [#threeWaiters_at20GbFloor8_thirdIsGranted_theFourthIsHeld] and [#twoWaitersInTheSameSecond_neverSpendTheSameHeadroom]
 /// red; count a launch's claim as E whatever its tree holds -> [#aTreeAtItsExpectedSize_claimsNothingMore] red; let the claim rule apply with
 /// no live launch -> [#nothingRunning_anOutsideJobHoldingTheFloor_keepsTheStarvationOverride] still green but #53's rows red; let the memory
 /// override pass while a launch runs -> [#aClaimHeldTicket_isNeverOverridden_whileALaunchRuns] red; drop grant_record ->
@@ -113,26 +113,26 @@ class BbMemClaimIT {
     }
 
     @Test
-    void threeWaiters_at20GbFloor8_thirdIsHeld() throws Exception {
-        var a = enqueue("a");
-        var b = enqueue("b");
-        var c = enqueue("c");
+    void threeWaiters_at20GbFloor8_thirdIsGranted_theFourthIsHeld() throws Exception {
+        Files.writeString(dir.resolve("max-reactors"), "4\n");
+        enqueue("a");
+        enqueue("b");
+        enqueue("c");
+        var d = enqueue("d");
 
-        assertThat(within(40_000, () -> ups() == 2)).as("two start").isTrue();
+        assertThat(within(60_000, () -> ups() == 3)).as("a, b and the third start: 20 - 2 x 6 claims to come = 8 >= floor 8").isTrue();
         Thread.sleep(12_000);  // more than two 5 s poll rounds of every waiter
-        assertThat(ups()).as("the third is held: 20 - 2 x 6 claims to come - its own 6 = 2 GB < floor 8").isEqualTo(2);
-        var held = List.of(a, b, c).stream().filter(id -> in("waiting", id)).toList();
-
-        assertThat(held).hasSize(1);
+        assertThat(ups()).as("the fourth is held: 20 - 3 x 6 = 2 GB < floor 8").isEqualTo(3);
+        assertThat(in("waiting", d)).isTrue();
         assertThat(lib("mem_held").stdout())
-                .startsWith("held: MemAvailable 20.0 GB - queue claims to come 12.0 GB (")
-                .contains("- this grant 6.0 GB = 2.0 GB < floor 8 GB");
-        assertThat(bbQueue()).contains("MEMORY GATE").contains("held: MemAvailable 20.0 GB - queue claims to come 12.0 GB");
+                .startsWith("held: MemAvailable 20.0 GB - queue claims to come 18.0 GB (")
+                .contains(") = 2.0 GB < floor 8 GB");
+        assertThat(bbQueue()).contains("MEMORY GATE").contains("held: MemAvailable 20.0 GB - queue claims to come 18.0 GB");
     }
 
     @Test
     void aTreeAtItsExpectedSize_claimsNothingMore() throws Exception {
-        memAvailableKb(14 * GIB_KB + GIB_KB / 2);
+        memAvailableKb(13 * GIB_KB + GIB_KB / 2);
         var a = enqueue("a");
 
         assertThat(within(30_000, () -> up("a"))).as("a alone: the floor alone decides").isTrue();
@@ -143,18 +143,18 @@ class BbMemClaimIT {
         assertThat(lib("queue_claims").stdout().strip()).isEqualTo(a + " " + pid + " " + 7 * GIB_KB + " 0");
         var b = enqueue("b");
 
-        assertThat(within(40_000, () -> up("b"))).as("14.5 - 0 - own 6 = 8.5 >= 8; a double count (14.5 - 6 - 6) would hold it").isTrue();
+        assertThat(within(40_000, () -> up("b"))).as("13.5 - 0 = 13.5 >= 8; a double count of a's 7 GB (13.5 - 6 = 7.5) would hold it").isTrue();
         var c = enqueue("c");
 
         Thread.sleep(12_000);
-        assertThat(up("c")).as("b is new (tree 0): 14.5 - 6 - 6 = 2.5 < 8").isFalse();
+        assertThat(up("c")).as("b is new (tree 0): 13.5 - 6 = 7.5 < 8").isFalse();
         assertThat(in("waiting", c)).isTrue();
         assertThat(lib("mem_held").stdout()).contains("queue claims to come 6.0 GB (" + a + " 0.0 GB, " + b + " 6.0 GB)");
     }
 
     @Test
     void twoWaitersInTheSameSecond_neverSpendTheSameHeadroom() throws Exception {
-        memAvailableKb(14 * GIB_KB);
+        memAvailableKb(13 * GIB_KB);
         more.put("BB_TEST_LEDGER_DELAY", "8");  // ledger_add sleeps 8 s before writing: with the line written in the lock hold, the other waiters wait on the lock; written after it, they pick inside the window
         enqueue("a");
         enqueue("b");
@@ -163,7 +163,7 @@ class BbMemClaimIT {
         assertThat(within(40_000, () -> ups() >= 1)).isTrue();
         Thread.sleep(12_000);
         assertThat(ups()).as("grants serialise on the queue lock and the ledger line is written in the grant's lock hold: the second"
-                             + " waiter sees the first launch (6 GB claim + 6 GB own > 14 - 8)").isEqualTo(1);
+                             + " waiter sees the first launch (13 - 6 GB claim = 7 < 8); without it 13 >= 8 grants").isEqualTo(1);
         assertThat(Files.readAllLines(queue.resolve("launches"))).hasSize(1);
     }
 
@@ -181,7 +181,7 @@ class BbMemClaimIT {
 
     @Test
     void aClaimHeldTicket_isNeverOverridden_whileALaunchRuns() throws Exception {
-        memAvailableKb(14 * GIB_KB);
+        memAvailableKb(13 * GIB_KB);  // a's claim 6: 13 - 6 = 7 < 8
         more.put("BB_LOAD_STARVE_SECS", "2");
         enqueue("a");
         assertThat(within(30_000, () -> up("a"))).isTrue();
@@ -255,24 +255,24 @@ class BbMemClaimIT {
             memAvailableKb(25 * GIB_KB);
             Files.writeString(queue.resolve("running").resolve("job-" + BbFixtures.RUN), "started=1\n");
             BbFixtures.recordLaunch(queue, "job-" + BbFixtures.RUN, holder.pid());
-            // an off-queue JVM: -Xmx8g, RSS 1 GB -> 7 GB of headroom still to come
-            Files.writeString(dir.resolve("ps"), "999999 1 " + GIB_KB + " java -Xmx8g Tlc\n");
+            // an off-queue JVM: -Xmx14g, RSS 1 GB -> 13 GB of headroom still to come
+            Files.writeString(dir.resolve("ps"), "999999 1 " + GIB_KB + " java -Xmx14g Tlc\n");
             assertThat(lib("mem_held").stdout().strip())
-                    .isEqualTo("held: MemAvailable 25.0 GB - off-queue JVM headroom 7.0 GB - queue claims to come 6.0 GB (job-" + BbFixtures.RUN
-                               + " 6.0 GB) - this grant 6.0 GB = 6.0 GB < floor 8 GB");
+                    .isEqualTo("held: MemAvailable 25.0 GB - off-queue JVM headroom 13.0 GB - queue claims to come 6.0 GB (job-" + BbFixtures.RUN
+                               + " 6.0 GB) = 6.0 GB < floor 8 GB");
             Files.writeString(dir.resolve("ps"), "");
-            assertThat(lib("mem_held").stdout().strip()).as("without the off-queue JVM: 25 - 6 - 6 = 13 >= 8").isEmpty();
+            assertThat(lib("mem_held").stdout().strip()).as("without the off-queue JVM: 25 - 6 = 19 >= 8").isEmpty();
         } finally {
             holder.destroyForcibly();
         }
     }
 
     /// An isolated ticket (iso=1) runs maven in docker container bb-<id>, outside the ledger pid's tree: the container's init tree counts too.
-    /// Tree 0.5 GB + container 3 GB: claim 6 - 3.5 = 2.5 GB (counting the ledger tree only gives 5.5 GB). At 17 GB: 17 - 2.5 - own 6 = 8.5 >= 8, so b
-    /// starts; with the container ignored 17 - 5.5 - 6 = 5.5 < 8 and b is held.
+    /// Tree 0.5 GB + container 3 GB: claim 6 - 3.5 = 2.5 GB (counting the ledger tree only gives 5.5 GB). At 10.5 GB: 10.5 - 2.5 = 8 >= 8, so b
+    /// starts; with the container ignored 10.5 - 5.5 = 5 < 8 and b is held.
     @Test
     void anIsolatedLaunch_countsItsContainersMemory_notOnlyItsLedgerTree() throws Exception {
-        memAvailableKb(17 * GIB_KB);
+        memAvailableKb(10 * GIB_KB + GIB_KB / 2);
         more.put("PATH", tools + ":" + System.getenv("PATH"));  // the fake docker: iso=1 needs `command -v docker`, queue_claims calls it
         var a = enqueue("a", Map.of("BB_PORT_GROUP", "1"));
 
@@ -290,7 +290,7 @@ class BbMemClaimIT {
         assertThat(lib("queue_claims").stdout().strip()).isEqualTo(a + " " + pid + " " + (half + 3 * GIB_KB) + " " + (6 * GIB_KB - half - 3 * GIB_KB));
         var b = enqueue("b");
 
-        assertThat(within(40_000, () -> up("b"))).as("17 - 2.5 - own 6 = 8.5 >= 8").isTrue();
+        assertThat(within(40_000, () -> up("b"))).as("10.5 - 2.5 = 8 >= 8; with the container ignored (claim 5.5) 5 < 8").isTrue();
         assertThat(in("waiting", b)).isFalse();
     }
 
@@ -340,6 +340,64 @@ class BbMemClaimIT {
             assertThat(lib("queue_claims").stdout().strip()).endsWith(" 0 " + 123_456_789_012L * GIB_KB);
         } finally {
             holder.destroyForcibly();
+        }
+    }
+
+    /// CTO ruling 2026-11-27: a floor below E is refused. pick() grants nothing while it holds, not even through the starvation override
+    /// (MemAvailable 20 GB: only the refusal stops a); the MEMORY GATE line names both values; a fixed config is accepted without a restart.
+    @Test
+    void aFloorBelowE_grantsNothing_untilTheConfigIsFixed() throws Exception {
+        memAvailableKb(20 * GIB_KB);
+        more.put("BB_LOAD_STARVE_SECS", "2");
+        Files.writeString(dir.resolve("mem-floor-gb"), "4\n");  // E is the default 6
+        var a = enqueue("a");
+
+        Thread.sleep(15_000);  // past the starvation bound, three poll rounds
+        assertThat(in("waiting", a)).as("refused config: held").isTrue();
+        assertThat(up("a")).isFalse();
+        assertThat(lib("mem_held").stdout()).startsWith("refused: memory floor 4 GB (file ").contains("queue claim E 6 GB (file ");
+        assertThat(bbQueue()).contains("refused: memory floor 4 GB");
+        Files.writeString(dir.resolve("mem-floor-gb"), "6\n");
+        assertThat(within(40_000, () -> up("a"))).as("floor 6 = E 6: accepted").isTrue();
+    }
+
+    /// The refusal outranks #53's starvation override: MemAvailable 5 GB < floor 8 and no launch runs, the exact case in which the override grants
+    /// (see nothingRunning_anOutsideJobHoldingTheFloor_keepsTheStarvationOverride); with the floor file at 4 < E 6 nothing is granted, and once fixed the override grants.
+    @Test
+    void aFloorBelowE_isNotLiftedByTheStarvationOverride() throws Exception {
+        memAvailableKb(5 * GIB_KB);
+        more.put("BB_LOAD_STARVE_SECS", "2");
+        Files.writeString(dir.resolve("mem-floor-gb"), "4\n");  // E is the default 6
+        var a = enqueue("a");
+
+        Thread.sleep(15_000);  // past the starvation bound, three poll rounds
+        assertThat(in("waiting", a)).as("refused config: the override does not pass it").isTrue();
+        assertThat(Files.readString(queue.resolve("waiting").resolve(a))).doesNotContain("mem_override=");
+        Files.delete(dir.resolve("mem-floor-gb"));  // floor 8 >= E 6: accepted; 5 < 8, so the override is what grants
+        assertThat(within(40_000, () -> up("a"))).as("config fixed: the override grants as before").isTrue();
+        assertThat(Files.readString(queue.resolve("running").resolve(a))).contains("mem_override=");
+    }
+
+    /// mem_config_refusal: refused exactly when floor < E, both as resolved (floor default 8, E default 6; any size of E).
+    @Test
+    void theConfigRefusal_isFloorBelowE_andNothingElse() throws Exception {
+        var cases = new String[][]{
+                // floor file, claim file, refused
+                {"", "", "no"}, {"8\n", "6\n", "no"}, {"6\n", "6\n", "no"}, {"5\n", "6\n", "yes"}, {"8\n", "10\n", "yes"},
+                {"8\n", "1000\n", "yes"}, {"1000\n", "1000\n", "no"}, {"8\n", "123456789012\n", "yes"}, {"", "8\n", "no"}, {"", "9\n", "yes"},
+                {"abc\n", "7\n", "no"}   // an unreadable floor is the default 8
+        };
+
+        for (var c : cases) {
+            Files.writeString(dir.resolve("mem-floor-gb"), c[0]);
+            Files.writeString(dir.resolve("mem-claim-gb"), c[1]);
+            var out = lib("mem_config_refusal").stdout();
+
+            if (c[2].equals("yes")) {
+                assertThat(out).as("floor '%s' claim '%s'", c[0].strip(), c[1].strip()).startsWith("refused: memory floor ").contains("mem-floor-gb").contains("mem-claim-gb");
+            } else {
+                assertThat(out).as("floor '%s' claim '%s'", c[0].strip(), c[1].strip()).isEmpty();
+            }
         }
     }
 
