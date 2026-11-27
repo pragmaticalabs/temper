@@ -319,4 +319,54 @@ class BbKillLabelIT {
             assertThat(out.stdout()).contains("rc=1").doesNotContain("outcome");
         }
     }
+
+    // ---- rc 124 half of the printers, a job's own 124, a refused ticket (bb-mutate probes of #131) -------------------------
+    private String doneTicket(String id, String fields) throws Exception {
+        var co = dir.resolve("work/done-co-" + id);
+
+        Files.createDirectories(co);
+        Files.writeString(queue.resolve("done").resolve(id),
+                          "id=" + id + "\nowner=" + ME + "\nco=" + co + "\ncreated=1795733112000000000\nstarted=1795733113\nstate=finished\nended=1795733130\n" + fields);
+        return id;
+    }
+
+    private static final String WINDOW_MOVED = "oom_kill_start=5\noom_kill_end=6\nmem_avail_kb_start=10\nmem_avail_kb_end=9\n";
+
+    @Test
+    void bbWaitAndBbAwait_echoTheBoundLabel_ofARc124Ticket() throws Exception {
+        var id = doneTicket("1795733112000000011-1", "rc=124\nbound_hit=1795733125\nbound=2\n" + WINDOW_MOVED);
+
+        for (var printer : List.<List<String>>of(List.of("bb-wait", id), List.of("bb-await", "--ticket", id))) {
+            var out = tool(printer.get(0), printer.subList(1, printer.size()).toArray(String[]::new));
+
+            assertThat(out.rc()).as(out.stdout() + out.stderr()).isEqualTo(124);
+            assertThat(out.stdout()).contains("rc=124").contains("outcome: KILLED").contains("bound of 2s").doesNotContain("OOM-KILLED");
+        }
+    }
+
+    @Test
+    void aRc124WithoutBoundHit_isTheJobsOwnExit_noLabelInAnyPrinter_whateverTheCounterDid() throws Exception {
+        var id = doneTicket("1795733112000000012-1", "rc=124\n" + WINDOW_MOVED);
+
+        for (var printer : List.<List<String>>of(List.of("bb-wait", id), List.of("bb-await", "--ticket", id), List.of("bb-result", id),
+                                                 List.of("bb-result", id, "--outcome"), List.of("bb-result", id, "--json"))) {
+            var out = tool(printer.get(0), printer.subList(1, printer.size()).toArray(String[]::new));
+
+            assertThat(out.stdout()).as(printer.toString()).doesNotContain("outcome: ").doesNotContain("OOM-KILLED").doesNotContain("\"outcome\": \"");
+        }
+    }
+
+    @Test
+    void aRefusedTicket_hasNoLabel_whateverItsRcAndCounterSay() throws Exception {
+        var id = doneTicket("1795733112000000013-1", "rc=137\nrefused=resolved-junit\n" + WINDOW_MOVED);
+
+        for (var args : List.of(List.<String>of(), List.of("--outcome"), List.of("--json"))) {
+            var all = new ArrayList<String>(List.of(id));
+
+            all.addAll(args);
+            var out = tool("bb-result", all.toArray(String[]::new));
+
+            assertThat(out.stdout()).as(args.toString()).doesNotContain("outcome: ").doesNotContain("OOM-KILLED").doesNotContain("\"outcome\": \"");
+        }
+    }
 }

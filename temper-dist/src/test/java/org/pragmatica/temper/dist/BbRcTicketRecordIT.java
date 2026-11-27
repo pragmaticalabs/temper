@@ -859,4 +859,26 @@ class BbRcTicketRecordIT {
         assertThat(field("done", maven, "fields_rejected")).isEqualTo("not_launch");
         assertThat(field("done", maven, "rc")).isEqualTo("18");
     }
+
+    /// #131 mutation row: the rc 124 half of bb-temper's two calls (a bound-killed ticket), and no label for a job's own 124.
+    @Test
+    void waitAndReport_ofABoundKilledRc124Ticket_printTheKilledLine_andAJobsOwn124DoesNot() throws Exception {
+        temperSandbox();
+        var tools = Files.createDirectories(home.resolve("tools"));
+
+        BbFixtures.executable(tools.resolve("bb-result"), Files.readString(BbFixtures.OPS_BB.resolve("bb-result")));
+        tq("done", "1000000000000000006-1", "state=finished\nrc=124\nbound_hit=125\nbound=2\nended=130\noom_kill_start=5\noom_kill_end=6\nmem_avail_kb_start=10\nmem_avail_kb_end=9\n");
+        fileRc("124");
+        var wait = temper("wait");
+        var report = temper("report");
+
+        assertThat(wait.rc()).as(wait.err()).isEqualTo(124);
+        assertThat(wait.out()).contains("rc=124", "outcome: KILLED (stopped by bb-build's bound of 2s");
+        assertThat(report.out()).contains("rc=124", "outcome: KILLED (stopped by bb-build's bound of 2s");
+
+        Files.delete(dir.resolve("tq/done/1000000000000000006-1"));
+        tq("done", "1000000000000000007-1", "state=finished\nrc=124\nended=130\noom_kill_start=5\noom_kill_end=6\n");
+        assertThat(temper("wait").out()).contains("rc=124").doesNotContain("outcome");
+        assertThat(temper("report").out()).contains("rc=124").doesNotContain("outcome");
+    }
 }
