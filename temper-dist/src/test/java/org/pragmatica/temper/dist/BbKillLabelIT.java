@@ -112,7 +112,7 @@ class BbKillLabelIT {
     /// A waiting ticket for a fresh checkout and its waiter, running the stub maven `mvnBody`; returns the ticket id.
     private String start(String name, String mvnBody, String extraFields, Map<String, String> more) throws Exception {
         var co = checkout(ME + "-" + name);
-        var id = "1795733112" + String.format("%09d", ++seq) + "-" + (7000 + seq);
+        var id = "1795733112" + String.format("%09d", ++seq) + "-" + (RUN_PID * 100 + seq);
         var mvn = BbFixtures.executable(dir.resolve("stubmvn-" + name), "#!/bin/sh\n" + mvnBody + "\n");
 
         Files.writeString(queue.resolve("waiting").resolve(id),
@@ -173,6 +173,11 @@ class BbKillLabelIT {
         return BbFixtures.run(command, env(Map.of()), null, null);
     }
 
+    /// bb-queue-lib finds a ticket's waiter by `pgrep -u $USER -f "bb-build __run <id>"`, host-wide, and the bound runner's kill set (kill_set) TERMs and KILLs everything that matches. A fixed id
+    /// ("...001-7001") is therefore shared by every copy of this class running on one host at once (several builds on a CI host): a bound row of one copy killed the waiter of the same-id ticket of
+    /// another, whose ticket stayed in running/ and `finished` timed out after 60 s (cloudbb-10, 4 concurrent builds, one build of four failed in each of 3 loaded sets of runs, a different row each time; the dump showed running/<id> with
+    /// bound_hit= and no `bb-build __run <id>` process). The pid of this JVM, which is unique among the JVMs alive on the host, is the id's pid half, so no two concurrent copies share an id.
+    private static final long RUN_PID = ProcessHandle.current().pid();
     private static final String KILL_SELF = "kill -9 $$";
 
     private String bump(int to) {
