@@ -39,6 +39,7 @@ class BbKillLabelIT {
     private Path queue;
     private Path tools;
     private Path vmstat;
+    private Path ampleMeminfo;
     private final List<Process> started = new ArrayList<>();
     private int seq;
 
@@ -58,6 +59,9 @@ class BbKillLabelIT {
         Files.copy(BbFixtures.OPS_BB.resolve("bb-queue-lib.sh"), tools.resolve("bb-queue-lib.sh"));
         Files.writeString(dir.resolve("loadavg"), "0.00 0.00 0.00 1/1 1\n");
         vmstat = Files.writeString(dir.resolve("vmstat"), "nr_free_pages 1\noom_kill 5\npgfault 9\n");
+        // bb-queue-lib's memory floor (8 GiB of MemAvailable) holds a grant, and /proc/meminfo is the host's: a build on a 32 GB host sits near that floor while
+        // other Maven runs share it, so a row's ticket was never granted and `finished` timed out (60 s, once). A fixed ample file takes the host out of every row.
+        ampleMeminfo = Files.writeString(dir.resolve("meminfo-ample"), "MemTotal:       200000000 kB\nMemAvailable:   100000000 kB\n");
     }
 
     @AfterEach
@@ -81,6 +85,7 @@ class BbKillLabelIT {
         env.put("BB_TEST_REACTOR_PATTERN", "[n]o-such-maven-reactor");
         env.put("BB_TEST_LOADAVG", dir.resolve("loadavg").toString());
         env.put("BB_TEST_VMSTAT", vmstat.toString());
+        env.put("BB_TEST_MEMINFO", ampleMeminfo.toString());
         env.put("BB_PORT_GROUP", "0");
         env.put("BB_MAX_REACTORS", "5");
         env.putAll(more);
@@ -368,5 +373,26 @@ class BbKillLabelIT {
 
             assertThat(out.stdout()).as(args.toString()).doesNotContain("outcome: ").doesNotContain("OOM-KILLED").doesNotContain("\"outcome\": \"");
         }
+    }
+
+    @Test
+    void bbResultJsonAndOutcomeTogether_areAUsageError_inEitherOrder() throws Exception {
+        var id = doneTicket("1795733112000000014-1", "rc=137\n" + WINDOW_MOVED);
+
+        for (var args : List.of(List.of(id, "--json", "--outcome"), List.of(id, "--outcome", "--json"))) {
+            var out = tool("bb-result", args.toArray(String[]::new));
+
+            assertThat(out.rc()).as(args.toString()).isEqualTo(2);
+            assertThat(out.stdout()).as(args.toString()).isEmpty();
+        }
+    }
+
+    @Test
+    void bbResultJson_carriesTheOutcomeNote_ofBothLabels() throws Exception {
+        var oom = tool("bb-result", doneTicket("1795733112000000015-1", "rc=137\n" + WINDOW_MOVED), "--json").stdout();
+        var bound = tool("bb-result", doneTicket("1795733112000000016-1", "rc=124\nbound_hit=1795733125\nbound=2\n" + WINDOW_MOVED), "--json").stdout();
+
+        assertThat(oom).contains("\"outcome\": \"OOM-KILLED\"").contains("\"outcomeNote\": \"kernel oom_kill 5 -> 6, MemAvailable 10 -> 9 kB\"");
+        assertThat(bound).contains("\"outcome\": \"KILLED\"").contains("\"outcomeNote\": \"stopped by bb-build").contains("bound of 2s");
     }
 }
