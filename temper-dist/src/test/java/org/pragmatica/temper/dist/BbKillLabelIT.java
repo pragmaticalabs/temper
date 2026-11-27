@@ -443,25 +443,72 @@ class BbKillLabelIT {
         var served = dir.resolve("vmstat-served");
         var endRead = dir.resolve("vmstat-end-read");
         var runnerRc = dir.resolve("work").resolve(ME + "-late").resolve(".bb").resolve("rc");
-        var server = BbFixtures.executable(dir.resolve("vmstatd.sh"),
-                                           "#!/bin/bash\ntrap '' PIPE\nn=0\nwhile :; do\n"
-                                          + "  { n=$((n+1)); if [ -e " + runnerRc + " ]; then v=6; else v=5; fi\n"
-                                          + "    printf 'nr_free_pages 1\\noom_kill %s\\npgfault 9\\n' \"$v\"; echo \"$n:$v\" >> " + served + "\n"
-                                          + "    [ \"$n\" -lt 2 ] || : > " + endRead + "; } > " + fifo + "\ndone\n");
+        // The server pairs ONE payload with ONE reader and logs EVERY reader (#150). It writes, closes its write end at once (the reader sees EOF: mawk, bigboy's awk, reads again after its
+        // first read and, were the write end back open already, would take a SECOND payload from the same open: 5 lines for one read, no shim) and only then waits until no process holds
+        // the FIFO open any more (a plain reopen would succeed while a lingering reader, gawk exited from its loop but not yet gone under load, still holds it, and serve it again: 8 and
+        // 13 lines, all ":5", for 2 reads). The wait scans /proc/*/fd for the FIFO's inode and NEVER opens the FIFO itself: a probe open (non-blocking write-open until ENXIO) also ends the
+        // open of a NEW reader that blocks right behind the lingering one, an empty read with no served line, which hid an extra read (a mutant reading the end counter twice) behind
+        // "unavailable". A reader blocked in open holds no fd yet, so only the blocking open below serves it, and that logs. The wait is bounded at 30 s.
+        var server = BbFixtures.executable(dir.resolve("vmstatd.py"),
+                                           """
+                                           #!/usr/bin/env python3
+                                           import os, sys, time
+                                           fifo, served, rc, end_read = sys.argv[1:5]
+                                           me = os.getpid()
+                                           st = os.stat(fifo)
+                                           ident = (st.st_dev, st.st_ino)
+                                           def held():
+                                               for p in os.listdir("/proc"):
+                                                   if not p.isdigit() or int(p) == me:
+                                                       continue
+                                                   try:
+                                                       for fd in os.listdir("/proc/%s/fd" % p):
+                                                           s = os.stat("/proc/%s/fd/%s" % (p, fd))
+                                                           if (s.st_dev, s.st_ino) == ident:
+                                                               return True
+                                                   except OSError:
+                                                       pass
+                                               return False
+                                           n = 0
+                                           while True:
+                                               fd = os.open(fifo, os.O_WRONLY)
+                                               n += 1
+                                               v = 6 if os.path.exists(rc) else 5
+                                               try:
+                                                   os.write(fd, ("nr_free_pages 1\\noom_kill %d\\npgfault 9\\n" % v).encode())
+                                               except OSError:
+                                                   pass
+                                               with open(served, "a") as f:
+                                                   f.write("%d:%d\\n" % (n, v))
+                                               if n >= 2:
+                                                   open(end_read, "w").close()
+                                               os.close(fd)
+                                               deadline = time.time() + 30
+                                               while held() and time.time() < deadline:
+                                                   time.sleep(0.02)
+                                           """);
+        // The load seam of #150, always on: every awk that reads the counter lingers 0.5 s after its read (the fd stays open), as a descheduled or slow-exiting reader does under load.
+        var realAwk = BbFixtures.run(List.of("sh", "-c", "command -v awk"), Map.of(), null, null).stdout().strip();
+        var slowAwkDir = Files.createDirectories(dir.resolve("slow-awk"));
+
+        BbFixtures.executable(slowAwkDir.resolve("awk"),
+                              "#!/bin/bash\nfor last; do :; done\n"
+                             + "case \"$*\" in *oom_kill*) exec 3< \"$last\"; " + realAwk + " \"${@:1:$#-1}\" <&3; r=$?; sleep 0.5; exit $r;; esac\n"
+                             + "exec " + realAwk + " \"$@\"\n");
         var fakeJava = BbFixtures.executable(dir.resolve("fakejava.sh"),
                                              "#!/bin/bash\ntrap 'while [ ! -e " + endRead + " ]; do sleep 0.1; done; exit 0' TERM\nwhile :; do sleep 0.2; done\n");
 
         assertThat(BbFixtures.run(List.of("mkfifo", fifo.toString()), Map.of(), null, null).rc()).isZero();
-        started.add(BbFixtures.processClean(List.of("bash", server.toString()), Map.of("PATH", System.getenv("PATH")))
+        started.add(BbFixtures.processClean(List.of("python3", server.toString(), fifo.toString(), served.toString(), runnerRc.toString(), endRead.toString()), Map.of("PATH", System.getenv("PATH")))
                              .redirectErrorStream(true)
                              .redirectOutput(ProcessBuilder.Redirect.DISCARD)
                              .start());
-        var id = start("late", "bash -c 'exec -a java bash " + fakeJava + "' &\nsleep 60", "bound=2\n", Map.of("BB_TEST_VMSTAT", fifo.toString()));
+        var id = start("late", "bash -c 'exec -a java bash " + fakeJava + "' &\nsleep 60", "bound=2\n", Map.of("BB_TEST_VMSTAT", fifo.toString(), "PATH", slowAwkDir + ":" + System.getenv("PATH")));
 
         finished(id);
         assertThat(field(id, "bound_hit")).isNotEmpty();
-        assertThat(Files.readString(served).strip()).as("the counter was read twice, both while the runner was still stopping the ticket").isEqualTo("1:5\n2:5");
-        assertThat(BbFixtures.run(List.of("cat", fifo.toString()), Map.of(), null, null).stdout()).as("the row's premise: once the runner is done the counter reads 6").contains("oom_kill 6");
+        assertThat(Files.readString(served).strip().lines().count()).as("one served line per read by the waiter: the counter was read twice (served: " + Files.readString(served).strip().replace('\n', ' ') + ")").isEqualTo(2L);
+        assertThat(BbFixtures.run(List.of("timeout", "20", "head", "-n", "2", fifo.toString()), Map.of(), null, null).stdout()).as("the row's premise: once the runner is done the counter reads 6").contains("oom_kill 6");
         assertThat(field(id, "oom_kill_start")).isEqualTo("5");
         assertThat(field(id, "oom_kill_end")).as("a read after the job ended and the runner finished is not the job's window").isEqualTo("5");
     }
