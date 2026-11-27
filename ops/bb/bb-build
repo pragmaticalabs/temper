@@ -391,7 +391,7 @@ if [ "${1:-}" = __run ]; then
   ID=$2; shift 2
   # KERNEL WINDOW (#131): the host's OOM-kill counter (/proc/vmstat oom_kill) and MemAvailable (kB) at the grant and right after the job's wait, written into the
   # ticket as oom_kill_start= mem_avail_kb_start= (with started=) and oom_kill_end= mem_avail_kb_end= (with state=finished); `unavailable` when the file or the line cannot be read.
-  # Seams (inert unless set): BB_TEST_VMSTAT, BB_TEST_MEMINFO. The counter is host-wide: it says "some process was OOM-killed meanwhile", never whose; bb-result decides (header).
+  # Seams (inert unless set): BB_TEST_VMSTAT; BB_TEST_MEMINFO is bb-queue-lib's seam too (its memory floor reads it: a small MemAvailable there holds the grant). The counter is host-wide: it says "some process was OOM-killed meanwhile", never whose; bb-result decides (header).
   oom_now() { local v; v=$(awk '$1 == "oom_kill" { print $2; exit }' "${BB_TEST_VMSTAT:-/proc/vmstat}" 2> /dev/null); case $v in ''|*[!0-9]*) echo unavailable;; *) echo "$v";; esac; }
   mem_now() { local v; v=$(awk '$1 == "MemAvailable:" { print $2; exit }' "${BB_TEST_MEMINFO:-/proc/meminfo}" 2> /dev/null); case $v in ''|*[!0-9]*) echo unavailable;; *) echo "$v";; esac; }
   exec 8> "$Q/.lock"
