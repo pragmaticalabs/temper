@@ -1,14 +1,18 @@
 package org.pragmatica.temper.dist;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
+import java.util.regex.Pattern;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -60,10 +64,10 @@ class BbMemClaimIT {
         BbFixtures.executable(tools.resolve("bb-cp-record"), "#!/bin/sh\nexit 0\n");
         BbFixtures.executable(tools.resolve("launch"),
                               "#!/bin/bash\n: > \"$HOLD_DIR/$1.up\"\nwhile [ ! -e \"$HOLD_DIR/$1.go\" ]; do sleep 0.3; done\n");
-        // docker (hangs 25 s when $HOLD_DIR/docker-hangs exists): only `inspect -f '{{.Name}} {{.State.Pid}}' <name>...`, answered from $HOLD_DIR/container-pids ("<name> <pid>" lines); an unknown name
+        // docker (hangs 25 s when $HOLD_DIR/docker-hangs exists; hangs 25 s AND ignores TERM when $HOLD_DIR/docker-ignores-term exists): only `inspect -f '{{.Name}} {{.State.Pid}}' <name>...`, answered from $HOLD_DIR/container-pids ("<name> <pid>" lines); an unknown name
         // is an error on stderr and exit 1 while the known ones are still printed, as docker does. The format string is pinned: a changed one exits 2.
         BbFixtures.executable(tools.resolve("docker"),
-                              "#!/bin/bash\n[ -e \"$HOLD_DIR/docker-hangs\" ] && exec sleep 25\n[ \"$1\" = inspect ] && [ \"$2\" = -f ] && [ \"$3\" = '{{.Name}} {{.State.Pid}}' ] || exit 2\nshift 3\nrc=0\n"
+                              "#!/bin/bash\n[ -e \"$HOLD_DIR/docker-ignores-term\" ] && { trap '' TERM; exec sleep 25; }\n[ -e \"$HOLD_DIR/docker-hangs\" ] && exec sleep 25\n[ \"$1\" = inspect ] && [ \"$2\" = -f ] && [ \"$3\" = '{{.Name}} {{.State.Pid}}' ] || exit 2\nshift 3\nrc=0\n"
                               + "for n in \"$@\"; do l=$(grep -E \"^$n \" \"$HOLD_DIR/container-pids\" 2>/dev/null) && echo \"/$l\" || { echo \"Error: No such object: $n\" >&2; rc=1; }; done\nexit $rc\n");
         // bb-netns-run <id> <checkout> <mvn> args...: the real one runs maven in a container; this one runs the launch directly
         BbFixtures.executable(tools.resolve("bb-netns-run"), "#!/bin/bash\nshift 2\nexec \"$@\"\n");
@@ -517,10 +521,24 @@ class BbMemClaimIT {
         assertThat(log).as("no file").doesNotExist();
     }
 
-    /// N7: the `docker inspect` of queue_container_pids is bounded by `timeout 5`. A docker that hangs (the fake sleeps 25 s) must not stall the claim:
-    /// queue_claims still answers, as the over-claim E - tree (the container's 3 GB is unseen), in about 5 s, not 25.
+    /// N7: the `docker inspect` of queue_container_pids is bounded by `timeout -s KILL 5`. A docker that hangs (the fake sleeps 25 s) must not stall
+    /// the claim: queue_claims still answers, as the over-claim E - tree (the container's 3 GB is unseen), in 5 s, not 25.
+    /// The window is [4.9 s, 8 s): `timeout` cannot fire early, so 4.9 s also proves the fake really hung and was cut (not that it exited at once);
+    /// the 3 s above the bound is the work after the cut (one awk and the ps parse, measured 0.01-0.03 s at load 15 on cloudbb-10, v130d),
+    /// 100x the observed cost, so a loaded host does not reach it; a bound of 12 s (mutant d14) is 4 s past it.
     @Test
     void aHungDocker_isCutAtFiveSeconds_andTheClaimIsEMinusTheTree() throws Exception {
+        hungDockerClaimIsCutAtFiveSeconds("docker-hangs");
+    }
+
+    /// The 5 s is a bound only if it holds against a docker that ignores TERM (`trap '' TERM`; v130d: 25.01 s under a plain `timeout 5`): the
+    /// call is `timeout -s KILL 5`. Mutant: `timeout 5 docker inspect` (TERM) -> 25 s, red.
+    @Test
+    void aDockerIgnoringTerm_isStillCutAtFiveSeconds_inspect() throws Exception {
+        hungDockerClaimIsCutAtFiveSeconds("docker-ignores-term");
+    }
+
+    private void hungDockerClaimIsCutAtFiveSeconds(String hangMarker) throws Exception {
         more.put("PATH", tools + ":" + System.getenv("PATH"));
         var holder = BbFixtures.process("sleep", "600").start();
 
@@ -532,16 +550,107 @@ class BbMemClaimIT {
             Files.writeString(dir.resolve("ps"), holder.pid() + " 1 " + GIB_KB + " bash bb-build __run\n"
                                                   + "777000 700 " + 1000 + " docker-init\n" + "777001 777000 " + (3 * GIB_KB - 1000) + " java maven\n");
             Files.writeString(dir.resolve("container-pids"), "bb-" + job + " 777000\n");
-            Files.writeString(dir.resolve("docker-hangs"), "");
+            Files.writeString(dir.resolve(hangMarker), "");
 
             var t0 = System.nanoTime();
             var out = lib("queue_claims").stdout().strip();
             var seconds = (System.nanoTime() - t0) / 1_000_000_000.0;
 
             assertThat(out).as("the hung docker adds 0: E - tree").isEqualTo(job + " " + holder.pid() + " " + GIB_KB + " " + 5 * GIB_KB);
-            assertThat(seconds).as("cut at 5 s, well under the 25 s hang").isLessThan(15.0);
+            assertThat(seconds).as("cut at the 5 s bound, not before (it hung) and not at the 25 s hang").isBetween(4.9, 8.0);
         } finally {
             holder.destroyForcibly();
+        }
+    }
+
+    private static final Pattern LOG_LINE = Pattern.compile("^(\\S+) mem-claim-gb: file (.*): \"(.*)\" is not a positive integer: E falls back to 6 GB$");
+
+    /// Invariant (mem_claim_note, `tr -c '\040-\176\n' '?'`): a control or non-ASCII byte in the claim value never reaches the log (it is read by a
+    /// terminal and by tools): tab, ESC, SOH, DEL and a high byte become `?`. Mutant: the `tr` removed -> the raw bytes are in the line, red.
+    @Test
+    void aClaimValueWithControlCharacters_isLoggedWithThemReplaced() throws Exception {
+        var log = queue.resolve("mem-claim.log");
+
+        Files.write(dir.resolve("mem-claim-gb"), "\n\u0001ab\u001b[31m\tc\u007fd\u00e9\r\n".getBytes(StandardCharsets.ISO_8859_1));
+        assertThat(lib("mem_claim_note").rc()).isZero();
+
+        var text = new String(Files.readAllBytes(log), StandardCharsets.ISO_8859_1);
+
+        assertThat(text).contains(": \"?ab?[31m?c?d?\" is not a positive integer");
+        assertThat(text.lines().count()).as("one line").isEqualTo(1);
+        assertThat(text.chars().allMatch(c -> c == '\n' || (c >= 0x20 && c <= 0x7e))).as("only printable ASCII and the newline reach the log").isTrue();
+    }
+
+    /// Invariant (`cut -c1-60`): an over-long value is cut to 60 characters before it is logged (the file is a human-edited line, but nothing stops a
+    /// megabyte). Mutants: the `cut` removed -> 100 characters logged; `cut -c1-1` -> one character; both red.
+    @Test
+    void anOverLongClaimValue_isLoggedCutAtSixtyCharacters() throws Exception {
+        var log = queue.resolve("mem-claim.log");
+
+        Files.writeString(dir.resolve("mem-claim-gb"), "a".repeat(100) + "\n");
+        assertThat(lib("mem_claim_note").rc()).isZero();
+        assertThat(Files.readString(log)).contains(": \"" + "a".repeat(60) + "\" is not a positive integer").doesNotContain("a".repeat(61));
+    }
+
+    /// Invariant (`sed ... p; q`): only the FIRST non-blank line is the offending value; a second bad line is not read, so the log stays one line.
+    /// Mutant: the `q` removed -> the value holds both lines and the log line is broken across two, red.
+    @Test
+    void aFileWithTwoBadLines_logsOnlyTheFirst() throws Exception {
+        var log = queue.resolve("mem-claim.log");
+
+        Files.writeString(dir.resolve("mem-claim-gb"), "\n  abc  \n\n  def\n");
+        assertThat(lib("mem_claim_note").rc()).isZero();
+
+        var lines = Files.readAllLines(log);
+
+        assertThat(lines).as("one log line").hasSize(1);
+        assertThat(lines.get(0)).contains(": \"abc\" is not a positive integer").doesNotContain("def");
+    }
+
+    /// Invariant: the line carries its UTC time ("<ISO instant> mem-claim-gb: ..."), the only record of WHEN the config went bad. Mutant: the
+    /// timestamp dropped (empty) -> the line starts with a blank, red. The instant is also read back: within 5 minutes of now.
+    @Test
+    void theLogLine_carriesItsTimestamp() throws Exception {
+        var log = queue.resolve("mem-claim.log");
+        var before = Instant.now();
+
+        Files.writeString(dir.resolve("mem-claim-gb"), "abc\n");
+        assertThat(lib("mem_claim_note").rc()).isZero();
+
+        var m = LOG_LINE.matcher(Files.readAllLines(log).get(0));
+
+        assertThat(m.matches()).as("<time> mem-claim-gb: file <path>: \"<value>\" is not a positive integer: E falls back to 6 GB").isTrue();
+        assertThat(m.group(1)).matches("\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\dZ");
+        assertThat(Duration.between(Instant.parse(m.group(1)), before).abs()).isLessThan(Duration.ofMinutes(5));
+    }
+
+    /// The doc of mem_claim_note: the line repeats "after the file was valid or ABSENT in between" (an empty or blank-only file is the same state:
+    /// no value, the stamp is cleared). The code and the doc agree; this pins both. Control first: with nothing in between the same value logs once.
+    /// Mutant: absent/blank no longer clears the stamp -> the bad value after the gap is not logged again, red.
+    @Test
+    void anAbsentOrBlankClaimFileInBetween_rearmsTheLine() throws Exception {
+        var claim = dir.resolve("mem-claim-gb");
+        var log = queue.resolve("mem-claim.log");
+
+        for (var between : List.of("absent", "empty", "blank")) {
+            Files.deleteIfExists(log);
+            Files.deleteIfExists(queue.resolve(".mem-claim-noted"));
+            Files.writeString(claim, "abc\n");
+            assertThat(lib("mem_claim_note").rc()).isZero();
+            assertThat(lib("mem_claim_note").rc()).isZero();
+            assertThat(Files.readAllLines(log)).as("%s: the same value twice, nothing between: once", between).hasSize(1);
+
+            switch (between) {
+                case "absent" -> Files.delete(claim);
+                case "empty" -> Files.writeString(claim, "");
+                default -> Files.writeString(claim, "\n  \n");
+            }
+            assertThat(lib("mem_claim_note").rc()).isZero();
+            assertThat(Files.readAllLines(log)).as("%s: nothing logged for the gap itself", between).hasSize(1);
+
+            Files.writeString(claim, "abc\n");
+            assertThat(lib("mem_claim_note").rc()).isZero();
+            assertThat(Files.readAllLines(log)).as("the same bad value after a %s file: logged again", between).hasSize(2);
         }
     }
 
