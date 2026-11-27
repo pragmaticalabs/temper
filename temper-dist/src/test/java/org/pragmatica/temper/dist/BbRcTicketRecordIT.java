@@ -668,6 +668,12 @@ class BbRcTicketRecordIT {
         assertThat(report.out()).contains("rc=15", "refused: timeout: the stale-jar check did not finish within BB_CP_READ_TIMEOUT=3s; its process group was killed");
     }
 
+    /// bb-temper prints bb-result's ONE line (`--outcome`), not its summary (`ticket=... state=...`, `tests:`, `reports:`). Probes: drop `--outcome` in either verb -> red.
+    private static void onlyTheLabelLine(String out) {
+        assertThat(out.lines().filter(l -> l.startsWith("outcome: ")).count()).as(out).isEqualTo(1);
+        assertThat(out.lines().filter(l -> l.startsWith("ticket=") || l.startsWith("tests:") || l.startsWith("reports:"))).as(out).isEmpty();
+    }
+
     /// #131: bb-temper wait and report carry bb-result's `outcome:` line for a finished rc 137 / 124 ticket that has the kernel window, and only then.
     /// Probes: drop the echo in either verb -> that half red; label an rc 1 ticket (drop the rc case) -> the last assertions red; print for a ticket of before #131 -> the `old` half red.
     @Test
@@ -684,6 +690,8 @@ class BbRcTicketRecordIT {
         assertThat(wait.rc()).as(wait.err()).isEqualTo(137);
         assertThat(wait.out()).contains("rc=137", "outcome: OOM-KILLED (kernel oom_kill 5 -> 6");
         assertThat(report.out()).contains("rc=137", "outcome: OOM-KILLED (kernel oom_kill 5 -> 6");
+        onlyTheLabelLine(wait.out());
+        onlyTheLabelLine(report.out());
 
         Files.delete(dir.resolve("tq/done/1000000000000000003-1"));
         tq("done", "1000000000000000004-1", "state=finished\nrc=137\nended=130\n");
@@ -875,6 +883,8 @@ class BbRcTicketRecordIT {
         assertThat(wait.rc()).as(wait.err()).isEqualTo(124);
         assertThat(wait.out()).contains("rc=124", "outcome: KILLED (stopped by bb-build's bound of 2s");
         assertThat(report.out()).contains("rc=124", "outcome: KILLED (stopped by bb-build's bound of 2s");
+        onlyTheLabelLine(wait.out());
+        onlyTheLabelLine(report.out());
 
         Files.delete(dir.resolve("tq/done/1000000000000000006-1"));
         tq("done", "1000000000000000007-1", "state=finished\nrc=124\nended=130\noom_kill_start=5\noom_kill_end=6\n");

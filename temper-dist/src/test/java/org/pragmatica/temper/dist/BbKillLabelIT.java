@@ -140,6 +140,21 @@ class BbKillLabelIT {
         assertThat(queue.resolve("done").resolve(id)).as("ticket " + id + " finished").exists();
     }
 
+    /// The ticket was granted and carries the start of its window: running/<id> holds `oom_kill_start=`. A row that bumps the counter from another ticket starts that
+    /// ticket only after this, so the verdict of the row never depends on which waiter won the lock first.
+    private void granted(String id) throws Exception {
+        for (var i = 0; i < 600; i++) {
+            var running = queue.resolve("running").resolve(id);
+
+            if (Files.exists(running) && Files.readString(running).contains("\noom_kill_start=")) {
+                return;
+            }
+            Thread.sleep(100);
+        }
+
+        throw new AssertionError("ticket " + id + " was never granted (no oom_kill_start= in running/)");
+    }
+
     private String field(String id, String key) throws IOException {
         return Files.readAllLines(queue.resolve("done").resolve(id))
                     .stream()
@@ -237,6 +252,8 @@ class BbKillLabelIT {
                             "until [ -f " + flag + " ]; do sleep 0.1; done\nexit 1",
                             "",
                             Map.of());
+
+        granted(failing);   // the production order: the failing ticket's window opened (its start field is written) before the victim's stub bumps the counter
         var killed = start("victim", bump(6) + "touch " + flag + "\n" + KILL_SELF, "", Map.of());
 
         finished(killed);
@@ -315,6 +332,8 @@ class BbKillLabelIT {
 
             assertThat(out.rc()).as(out.stdout() + out.stderr()).isEqualTo(137);
             assertThat(out.stdout()).contains("rc=137").contains("outcome: OOM-KILLED");
+            assertThat(lines(out.stdout())).as("the printer's own line and bb-result's ONE label line, nothing of bb-result's summary: " + out.stdout()).hasSize(2);
+            assertThat(lines(out.stdout()).get(1)).startsWith("outcome: OOM-KILLED (kernel oom_kill 5 -> 6");
         }
 
         for (var printer : List.<List<String>>of(List.of("bb-wait", failed), List.of("bb-await", "--ticket", failed))) {
@@ -327,12 +346,20 @@ class BbKillLabelIT {
 
     // ---- rc 124 half of the printers, a job's own 124, a refused ticket (bb-mutate probes of #131) -------------------------
     private String doneTicket(String id, String fields) throws Exception {
+        return doneTicket(id, "finished", fields);
+    }
+
+    private String doneTicket(String id, String state, String fields) throws Exception {
         var co = dir.resolve("work/done-co-" + id);
 
         Files.createDirectories(co);
         Files.writeString(queue.resolve("done").resolve(id),
-                          "id=" + id + "\nowner=" + ME + "\nco=" + co + "\ncreated=1795733112000000000\nstarted=1795733113\nstate=finished\nended=1795733130\n" + fields);
+                          "id=" + id + "\nowner=" + ME + "\nco=" + co + "\ncreated=1795733112000000000\nstarted=1795733113\nstate=" + state + "\nended=1795733130\n" + fields);
         return id;
+    }
+
+    private static List<String> lines(String out) {
+        return out.strip().lines().toList();
     }
 
     private static final String WINDOW_MOVED = "oom_kill_start=5\noom_kill_end=6\nmem_avail_kb_start=10\nmem_avail_kb_end=9\n";
@@ -346,6 +373,8 @@ class BbKillLabelIT {
 
             assertThat(out.rc()).as(out.stdout() + out.stderr()).isEqualTo(124);
             assertThat(out.stdout()).contains("rc=124").contains("outcome: KILLED").contains("bound of 2s").doesNotContain("OOM-KILLED");
+            assertThat(lines(out.stdout())).as("the printer's own line and the ONE label line: " + out.stdout()).hasSize(2);
+            assertThat(lines(out.stdout()).get(1)).isEqualTo("outcome: KILLED (stopped by bb-build's bound of 2s)");
         }
     }
 
@@ -394,5 +423,93 @@ class BbKillLabelIT {
 
         assertThat(oom).contains("\"outcome\": \"OOM-KILLED\"").contains("\"outcomeNote\": \"kernel oom_kill 5 -> 6, MemAvailable 10 -> 9 kB\"");
         assertThat(bound).contains("\"outcome\": \"KILLED\"").contains("\"outcomeNote\": \"stopped by bb-build").contains("bound of 2s");
+    }
+
+    // ---- fix round 1 of #144: rows for the survivors of v144a/v144b ------------------------------------------------------
+    /// The window ends when the job ends (right after the waiter's wait), not after the bound runner has finished stopping the ticket's processes. A fake `java` (argv[0] java: the bound
+    /// runner's kill set) takes 2 s to die once TERMed and moves the counter as its last act: after the stub maven is gone, before the bound runner is. Probe (read oom_kill_end after
+    /// `wait "$W"`): end reads 6 -> red.
+    @Test
+    void theWindowEndsWhenTheJobEnds_notWhenTheBoundRunnerHasStoppedTheTicketsProcesses() throws Exception {
+        var fakeJava = BbFixtures.executable(dir.resolve("fakejava.sh"),
+                                             "#!/bin/bash\ntrap 'sleep 2; echo \"oom_kill 6\" > " + vmstat + "; exit 0' TERM\nwhile :; do sleep 0.2; done\n");
+        var id = start("late", "bash -c 'exec -a java bash " + fakeJava + "' &\nsleep 60", "bound=2\n", Map.of());
+
+        finished(id);
+        assertThat(field(id, "bound_hit")).isNotEmpty();
+        assertThat(Files.readString(vmstat)).as("the late bump happened (the row's premise)").contains("oom_kill 6");
+        assertThat(field(id, "oom_kill_start")).isEqualTo("5");
+        assertThat(field(id, "oom_kill_end")).as("a bump after the job ended is not in the job's window").isEqualTo("5");
+    }
+
+    @Test
+    void aTicketThatIsNotFinished_isNeverLabelled_whateverItsRcAndCounterSay() throws Exception {
+        var id = doneTicket("1795733112000000021-1", "cancelled", "rc=137\n" + WINDOW_MOVED);
+
+        for (var args : List.of(List.<String>of(), List.of("--outcome"), List.of("--json"))) {
+            var all = new ArrayList<String>(List.of(id));
+
+            all.addAll(args);
+            var out = tool("bb-result", all.toArray(String[]::new));
+
+            assertThat(out.stdout()).as(args.toString()).doesNotContain("outcome: ").doesNotContain("OOM-KILLED").doesNotContain("\"outcome\": \"");
+        }
+    }
+
+    @Test
+    void aBoundKillWhoseBoundIsMissingOrNotANumber_isLabelledWithoutANumber() throws Exception {
+        for (var bound : List.of("", "bound=abc\n")) {
+            var id = doneTicket("17957331120000000" + (bound.isEmpty() ? "31" : "32") + "-1", "rc=124\nbound_hit=1795733125\n" + bound + WINDOW_MOVED);
+
+            assertThat(tool("bb-result", id, "--outcome").stdout().strip()).as(bound).isEqualTo("outcome: KILLED (stopped by bb-build's bound)");
+            assertThat(tool("bb-result", id, "--json").stdout()).as(bound).contains("\"outcomeNote\": \"stopped by bb-build's bound\"");
+        }
+    }
+
+    @Test
+    void aSigkillWithExactlyOneCounterUnavailable_isKilled_neverOomKilled() throws Exception {
+        var noEnd = doneTicket("1795733112000000041-1", "rc=137\noom_kill_start=5\noom_kill_end=unavailable\nmem_avail_kb_start=10\nmem_avail_kb_end=9\n");
+        var noStart = doneTicket("1795733112000000042-1", "rc=137\noom_kill_start=unavailable\noom_kill_end=6\nmem_avail_kb_start=10\nmem_avail_kb_end=9\n");
+
+        assertThat(tool("bb-result", noEnd, "--outcome").stdout().strip()).isEqualTo("outcome: KILLED (kernel OOM counter unavailable, oom_kill 5 -> unavailable)");
+        assertThat(tool("bb-result", noStart, "--outcome").stdout().strip()).isEqualTo("outcome: KILLED (kernel OOM counter unavailable, oom_kill unavailable -> 6)");
+        assertThat(tool("bb-result", noEnd).stdout()).contains("rc=137").doesNotContain("OOM-KILLED");
+        assertThat(tool("bb-result", noStart, "--json").stdout()).contains("\"outcome\": \"KILLED\"");
+    }
+
+    /// bb-wait and bb-await ask bb-result for its ONE line (`<id> --outcome`), for a finished ticket of rc 124 or 137 only: a stub bb-result shows what they call it with.
+    /// Probes: drop `--outcome` (the printers would dump bb-result's whole summary), print for any state -> red.
+    @Test
+    void theWaitAndAwaitPrinters_askBbResultForItsOneLine_onlyForAFinishedRc124Or137() throws Exception {
+        var stub = Files.createDirectories(dir.resolve("stub-tools"));
+
+        for (var script : List.of("bb-wait", "bb-await", "bb-queue", "bb-queue-lib.sh")) {
+            BbFixtures.executable(stub.resolve(script), Files.readString(BbFixtures.OPS_BB.resolve(script)));
+        }
+
+        BbFixtures.executable(stub.resolve("bb-result"), "import sys\nprint('STUB-CALLED ' + ' '.join(sys.argv[1:]))\n");
+        var killed = doneTicket("1795733112000000051-1", "rc=137\n" + WINDOW_MOVED);
+        var bound = doneTicket("1795733112000000052-1", "rc=124\nbound_hit=1795733125\n" + WINDOW_MOVED);
+        var cancelled = doneTicket("1795733112000000053-1", "cancelled", "rc=137\n" + WINDOW_MOVED);
+        var plain = doneTicket("1795733112000000054-1", "rc=1\n" + WINDOW_MOVED);
+
+        for (var printer : List.of("bb-wait", "bb-await")) {
+            for (var id : List.of(killed, bound, cancelled, plain)) {
+                var command = new ArrayList<String>(List.of("bash", stub.resolve(printer).toString()));
+
+                if (printer.equals("bb-await")) {
+                    command.add("--ticket");
+                }
+
+                command.add(id);
+                var out = BbFixtures.run(command, env(Map.of()), null, null);
+
+                if (id.equals(killed) || id.equals(bound)) {
+                    assertThat(lines(out.stdout())).as(printer + " " + id + ": " + out.stdout() + out.stderr()).hasSize(2).last().isEqualTo("STUB-CALLED " + id + " --outcome");
+                } else {
+                    assertThat(out.stdout()).as(printer + " " + id).doesNotContain("STUB-CALLED");
+                }
+            }
+        }
     }
 }

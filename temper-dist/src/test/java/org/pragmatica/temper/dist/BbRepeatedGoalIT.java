@@ -172,6 +172,9 @@ class BbRepeatedGoalIT {
         refused("integration-test", "failsafe:integration-test");
         refused("verify", "failsafe:integration-test@it2");
         refused("org.apache.maven.plugins:maven-failsafe-plugin:3.5.4:integration-test", "failsafe:integration-test");
+        refused("org.apache.maven.plugins:maven-failsafe-plugin:integration-test", "org.apache.maven.plugins:maven-failsafe-plugin:integration-test");
+        refused("org.apache.maven.plugins:maven-failsafe-plugin:integration-test", "failsafe:integration-test");
+        refused("verify", "org.apache.maven.plugins:maven-failsafe-plugin:integration-test");
     }
 
     @Test
@@ -225,6 +228,22 @@ class BbRepeatedGoalIT {
     @Test
     void theFailsafeVerifyGoalTwice_runsNoTests_andQueues() throws Exception {
         queues("failsafe:verify", "failsafe:verify");
+    }
+
+    /// Probe (the check compares only the plugin prefix, `surefire:*`): `surefire:help` twice is refused -> red.
+    @Test
+    void theOtherGoalsOfTheTestPlugins_runNoTests_andQueue() throws Exception {
+        queues("surefire:help", "surefire:help");
+        queues("failsafe:help", "failsafe:help", "surefire:help");
+        queues("org.apache.maven.plugins:maven-surefire-plugin:help", "org.apache.maven.plugins:maven-surefire-plugin:3.5.4:help");
+        queues("org.apache.maven.plugins:maven-failsafe-plugin:help", "org.apache.maven.plugins:maven-failsafe-plugin:3.5.4:help", "surefire:test");
+    }
+
+    /// Probe (`-D`'s separate value counted as a task): `-D test` defines a property named test, it is no goal -> a refusal would be red.
+    @Test
+    void aSeparateDefineValueNamedLikeAPhase_isNotAGoal() throws Exception {
+        queues("-D", "test", "surefire:test");
+        queues("-D", "verify", "verify");
     }
 
     @Test
