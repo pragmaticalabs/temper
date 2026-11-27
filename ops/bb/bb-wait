@@ -12,6 +12,8 @@
 # the rc. Compared only while .bb/ticket still names THIS ticket (a later build in the same checkout owns the file then; two runs granted in one second share a start, so .bb/start cannot tell them apart, #80). A checkout with no .bb/ticket (a pre-#80 run) is not compared: the verdict is the ticket's rc either way, so only the tamper check is lost, and never for
 # orphaned/cancelled/expired/abandoned tickets (a ticket finalized by reap or a too-late cancel is orphaned: no rc, exit 70).
 # GUARANTEE: the verdict comes from mvn's exit status, never from the checkout; any later disagreement in the checkout is detected (RC-MISMATCH, exit 71); deliberate tampering with queue/done by the same uid stays possible.
+# OUTCOME (#131): a finished ticket with rc 124 or 137 gets one more line after the first, `outcome: OOM-KILLED|KILLED (<why>)`, when bb-result (next to this file) labels it from the kernel window bb-build wrote into the
+# ticket; the rules live in bb-result's header, this prints what `bb-result <id> --outcome` prints (nothing for any other ticket, for a ticket of before #131, or when bb-result is absent or fails). The exit code is unchanged.
 # The log path is the ticket's .bb/build.log: a later build in the same checkout overwrites it.
 set -uo pipefail
 SELF=$(readlink -f "$0")
@@ -35,6 +37,7 @@ while :; do
     log=$(field "$f" output); [ -n "$log" ] || log=$(field "$f" co)/.bb/build.log
     echo "ticket=$ID state=${st:-?} rc=${rc:--} wall=${wall}s wait=${wt}s run=${rn}s log=$log"
     ref=$(field "$f" refused); [ -z "$ref" ] || echo "refused: $ref"   # CTO ruling R3: the refusal replaces the verdict on every surface
+    case "$st:$rc" in finished:124|finished:137) [ ! -f "$(dirname "$SELF")/bb-result" ] || timeout 30 python3 "$(dirname "$SELF")/bb-result" "$ID" --outcome 2> /dev/null || true;; esac   # #131
     case "$st" in
       finished)
         co=$(field "$f" co)
