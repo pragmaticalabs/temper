@@ -102,7 +102,7 @@ auto_hosts() {  # auto_hosts: AUTO = the hosts with pick auto, in file order (th
 # it is a connect failure; the real command then runs ONCE on the chosen path and its exit status is final. ssh exit 255 from the
 # real command is ambiguous (the remote side may have acted), which is why a build is never retried on the other path.
 # A cache hit costs one `true` on the cached path (every verb, via confirm_path; the host pick alone trusts it), never a probe of the other path;
-# the cached path failing drops the cache and probes the other one. Each call prints `bb-temper: <host> via direct|jump(<jump>)`
+# the cached path failing drops the cache and probes the other one. Each call prints `bb-co: <host> via direct|jump(<jump>)`
 # on stderr. bb-submit gets BB_SSH_PROXY only on the jump path; BB_KNOWN_HOSTS on both.
 # CONTROL MASTERS: every ssh to a jumped host (probe, command, scp) runs with ControlMaster=auto ControlPersist=10m and a route-specific
 # ControlPath, ~/.ssh/cm/bbd-%C (direct) or bbj-%C (jump), so a live master of one route never answers the other, nor an alias's
@@ -163,7 +163,7 @@ cache_put() {
   local t=$PATH_DIR/$NAME.tmp.$$
   { mkdir -p "$PATH_DIR" && find "$PATH_DIR" -maxdepth 1 -name "$NAME.tmp.*" -mmin +5 -exec rm -f {} + \
       && printf '%s %s\n' "$1" "$(date +%s)" > "$t" && mv "$t" "$PATH_DIR/$NAME"; } 2> /dev/null \
-    || { rm -f "$t" 2> /dev/null; echo "bb-temper: warning: cannot write the path cache $PATH_DIR/$NAME; continuing uncached" >&2; }
+    || { rm -f "$t" 2> /dev/null; echo "bb-co: warning: cannot write the path cache $PATH_DIR/$NAME; continuing uncached" >&2; }
 }
 choose_path() {  # choose_path [<excluded path>]: set PATHSEL and the ssh options for the jumped host $NAME
   local c p failed=
@@ -176,7 +176,7 @@ choose_path() {  # choose_path [<excluded path>]: set PATHSEL and the ssh option
   for p in direct jump; do
     [ "$p" != "${1:-}" ] || { failed="$failed $p"; continue; }
     if probe_path "$p"; then
-      [ -z "$failed" ] || echo "bb-temper: $NAME connect failed via$failed; using $(path_label "$p")" >&2
+      [ -z "$failed" ] || echo "bb-co: $NAME connect failed via$failed; using $(path_label "$p")" >&2
       cache_put "$p"; apply_path "$p"; PATHSRC=probe; return 0
     fi
     failed="$failed $p"
@@ -187,10 +187,10 @@ confirm_path() {  # a cached path is trusted by setup_host; checkout/build/... c
   [ "$PATHSRC" = cache ] || return 0
   probe_path "$PATHSEL" && return 0
   rm -f "$PATH_DIR/$NAME"
-  echo "bb-temper: $NAME cached path $(path_label "$PATHSEL") failed to connect; probing again" >&2
+  echo "bb-co: $NAME cached path $(path_label "$PATHSEL") failed to connect; probing again" >&2
   choose_path "$PATHSEL"
 }
-announce_path() { [ -z "$JUMP" ] || echo "bb-temper: $NAME via $(path_label "$PATHSEL")" >&2; }
+announce_path() { [ -z "$JUMP" ] || echo "bb-co: $NAME via $(path_label "$PATHSEL")" >&2; }
 # setup_host <key>: HOST and the ssh options for one host key (a configured name, or user@host: direct, ssh's own known_hosts).
 setup_host() {
   local i=
