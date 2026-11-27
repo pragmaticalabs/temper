@@ -257,6 +257,10 @@ class BbInstallIT {
         assertThat(pin("BB_BUILD_PRE116")).isEqualTo(BbFixtures.md5(prev("bb-build.pre116")));
         assertThat(pin("BB_MUTATE_PRE116")).isEqualTo(BbFixtures.md5(prev("bb-mutate.pre116")));
         assertThat(pin("BB_BUILD_PRE133")).isEqualTo(BbFixtures.md5(prev("bb-build.pre133")));
+        assertThat(pin("BB_BUILD_PRE131")).isEqualTo(BbFixtures.md5(prev("bb-build.pre131")));
+        assertThat(pin("BB_RESULT_PRE131")).isEqualTo(BbFixtures.md5(prev("bb-result.pre131")));
+        assertThat(pin("BB_WAIT_PRE131")).isEqualTo(BbFixtures.md5(prev("bb-wait.pre131")));
+        assertThat(pin("BB_AWAIT_PRE131")).isEqualTo(BbFixtures.md5(prev("bb-await.pre131")));
     }
 
     /// The bb-test lane helpers go in before bb-build (which calls bb-cp-record); a host holding a stranger's bb-test is refused, naming the one pin and
@@ -832,15 +836,23 @@ class BbInstallIT {
         installOntoTheLiveSet("live-md5s.since79");
     }
 
+    /// #131 changed four files (bb-build, bb-result, bb-wait, bb-await): a host holding main's copies of all four (their BB_*_PRE131 pins) is accepted and upgraded, each backed up.
+    /// Mutation: drop BB_BUILD_PRE131, BB_RESULT_PRE131, BB_WAIT_PRE131 or BB_AWAIT_PRE131 from accepted_of -> refused <file>, exit 65, red.
+    @Test
+    void aHostAtTheVersionsBefore131_isAcceptedForEveryFile_andUpgraded() throws Exception {
+        installOntoTheLiveSet("live-md5s.pre131");
+    }
+
     private void installOntoTheLiveSet(String resource) throws Exception {
         var live = new java.util.LinkedHashMap<String, String>();
 
         try (var in = BbInstallIT.class.getResourceAsStream("/bb/" + resource)) {
             assertThat(in).as("test resource bb/" + resource).isNotNull();
-            new String(in.readAllBytes()).lines()
-                                         .filter(l -> !l.isBlank() && !l.startsWith("#"))
-                                         .map(l -> l.split(" "))
-                                         .forEach(f -> live.put(f[0], f[1]));
+            for (var line : new String(in.readAllBytes()).lines().filter(l -> !l.isBlank() && !l.startsWith("#")).toList()) {
+                var f = line.split(" ");
+
+                live.put(f[0], f[1].equals("repo") ? BbFixtures.md5(OPS_BB.resolve(f[0])) : f[1]);
+            }
         }
 
         var files = Pattern.compile("(?m)^FILES=\\(([^)]*)\\)").matcher(Files.readString(INSTALL));
@@ -1360,6 +1372,7 @@ class BbInstallIT {
                                                                  + "|" + pin("BB_BUILD_PRE112")
                                                                  + "|" + pin("BB_BUILD_PRE116")
                                                                  + "|" + pin("BB_BUILD_PRE133")
+                                                                 + "|" + pin("BB_BUILD_PRE131")
                                                                  + "|" + pin("BB_BUILD_NEW"));
         assertThat(listing(good)).isEqualTo(goodBefore);
         assertThat(listing(diverged)).isEqualTo(divergedBefore);

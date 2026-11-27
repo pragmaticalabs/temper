@@ -35,8 +35,8 @@
 #                                       Any other BB_* in the environment that this tool does not read or forward (read:
 #                                       BB_OWNER BB_HOST BB_HOSTS_CMD BB_TEMPER_HOSTS BB_SUBMIT BB_PATH BB_PATH_TTL BB_SSH_*; BB_KNOWN_HOSTS) gets
 #                                       one stderr line naming it; never a refusal.
-#   bb-temper wait <name>               block until .bb/rc exists, then print rc and the BUILD/Tests summary lines
-#   bb-temper report <name>             rc, wall time and per-module testcase/failure/skip counts from the XML reports
+#   bb-temper wait <name>               block until .bb/rc exists, then print rc and the BUILD/Tests summary lines (rc 124 or 137 of a finished ticket: and bb-result's `outcome: OOM-KILLED|KILLED (<why>)` line, #131)
+#   bb-temper report <name>             rc, wall time and per-module testcase/failure/skip counts from the XML reports (the same outcome line for rc 124 or 137)
 #   bb-temper fetch <name> <local-dir>  copy build.log and all surefire/failsafe XML reports to <local-dir>
 #   bb-temper rm [--kill] <name>        remove your checkout (only "$BB_OWNER-" names). First, under the host's queue lock
 #                                       (`bb-queue release`), every WAITING ticket of the checkout is cancelled; a RUNNING one
@@ -436,6 +436,8 @@ case $cmd in
       case $rc in ''|*[!0-9]*) echo "rc=unknown"; echo "bb-temper: ticket $(pv tk_id) is $(pv tk_state) with no numeric rc" >&2; exit 70;; esac
       echo "rc=$rc"
       [ -z "$(pv tk_refused)" ] || echo "refused: $(pv tk_refused)"   # CTO ruling R3
+      case "$(pv tk_state):$rc:$(pv tk_id)" in finished:124:[0-9]*-[0-9]*|finished:137:[0-9]*-[0-9]*)   # #131: the label bb-result decides on the host (nothing when the ticket is not labelled, bb-result is absent or fails)
+        [[ $(pv tk_id) =~ ^[0-9]+-[0-9]+$ ]] && { rsh_ro "[ ! -x ~/tools/bb-result ] || ~/tools/bb-result $(pv tk_id) --outcome 2> /dev/null || true" || true; };; esac
       [ "$(pv tk_state)" != finished ] || [ "$(pv file_rc)" = "$rc" ] || { echo "RC-MISMATCH ticket=$rc file=$(pv file_rc): the ticket record is the verdict; re-run the build in a fresh checkout; never edit or restore .bb/rc" >&2; exit 71; }
     else
       echo "source=file"; rc=$(pv file_rc); echo "rc=$rc"
@@ -449,6 +451,7 @@ else rcv=$file_rc; [ "$rcv" != absent ] || rcv=running; src="source=file"; fi
 echo rc=$rcv wall=$(( $(cat .bb/end 2>/dev/null || date +%s) - $(cat .bb/start 2>/dev/null || date +%s) ))s
 echo "$src"
 [ -z "$tk_refused" ] || echo "refused: $tk_refused"
+if [ -n "$tk_id" ] && [ "$fin" = 1 ] && [ "$tk_state" = finished ]; then case $tk_rc in 124|137) [ ! -x ~/tools/bb-result ] || ~/tools/bb-result "$tk_id" --outcome 2> /dev/null || true;; esac; fi   # #131
 for m in */; do for d in surefire failsafe; do f=$(find ${m}target/$d-reports -maxdepth 1 -name 'TEST-*.xml' -newer .bb/run.marker 2>/dev/null); [ -n "$f" ] || continue
   echo "${m%/} $d $(cat $f | grep -o '<testcase ' | wc -l) testcases, failures $(cat $f | grep -c '<failure') errors $(cat $f | grep -c '<error') skipped $(cat $f | grep -c '<skipped')"; done; done
 echo 'known on Linux: temper-worker 1 skip = JobGcTest#aDeleteFailingMidway (macOS uchg; ops/dev/known-skips)'
