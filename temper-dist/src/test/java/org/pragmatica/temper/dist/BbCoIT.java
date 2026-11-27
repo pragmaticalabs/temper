@@ -536,6 +536,7 @@ class BbCoIT {
     void aProbeThatNeverAnswers_leavesNoProcessAliveWhenBbCoExits() throws Exception {
         host("bigboy").waiting(0).hangs();
         host("cloudbb-9").waiting(3);
+        host("cloudbb-10").waiting(5);
 
         var run = co(env("BB_CO_PROBE_WALL", "2"), "t3-x", "main");
 
