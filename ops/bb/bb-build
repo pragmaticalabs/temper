@@ -156,7 +156,7 @@
 # build.log: `bb-build: selected testcases: [run<i>:]<token>=<n> ... [surefire(all)=n] [failsafe(all)=n]`, then on refusal
 # `[ERROR] bb-build: refused rc <job rc> -> 19: <cell's reason>`; 19 lands in .bb/rc and the ticket's rc= (no bb-cp-record).
 # KILL LABEL (#131): the ticket carries the host kernel's window of its run: oom_kill_start= mem_avail_kb_start= (written with started=, under the grant's lock hold) and
-# oom_kill_end= mem_avail_kb_end= (read right after the job's wait, written with state=finished); oom_kill is /proc/vmstat's host-wide counter, MemAvailable is in kB, a
+# oom_kill_end= mem_avail_kb_end= (read right after the job's wait, written just before the launch fields and state=finished, so the launch fields stay the last lines before the rc); oom_kill is /proc/vmstat's host-wide counter, MemAvailable is in kB, a
 # value is `unavailable` when it cannot be read. bb-result (and bb-wait, bb-await through it) turn them into the outcome, never from the number 137 alone:
 #   OOM-KILLED  rc 137 AND oom_kill_end > oom_kill_start AND no bound_hit=       the ticket's own process was SIGKILLed while the kernel killed something (some process: a
 #                                                                                host-wide counter; a hand-made kill -9 in the same window reads as OOM, see LIMITS)
@@ -500,7 +500,7 @@ if [ "${1:-}" = __run ]; then
   [ -f "$T" ] || exit 0   # cancel or reap already finalized this ticket (first writer wins): do not recreate running/<id> or overwrite done/<id>
   # CTO 2026-11-21: under the lock, just before the append, the run ticket must still be ours; a launch whose marker changed since the read copies nothing (a process the job left behind can still rewrite its OWN fields in that window, within the grammar: accepted)
   if [ -n "${BB_LAUNCH:-}" ] && [ "$HT" = "$ID" ] && [ "$(run_ticket "$CO" 2> /dev/null | head -c 128 | head -n 1)" != "$ID" ]; then LF="fields_rejected=ticket_changed"$'\n'"verdict_source=missing"; [ "$BRC" != 0 ] || WRC=18; fi
-  { [ -z "$LF" ] || printf '%s\n' "$LF"; printf 'oom_kill_end=%s\nmem_avail_kb_end=%s\nstate=finished\nrc=%s\nended=%s\n' "$OOM_END" "$MEM_END" "$WRC" "$(cat "$B/end" 2>/dev/null || date +%s)"; } >> "$T"
+  { printf 'oom_kill_end=%s\nmem_avail_kb_end=%s\n' "$OOM_END" "$MEM_END"; [ -z "$LF" ] || printf '%s\n' "$LF"; printf 'state=finished\nrc=%s\nended=%s\n' "$WRC" "$(cat "$B/end" 2>/dev/null || date +%s)"; } >> "$T"
   to_done "$T"
   exit 0
 fi
