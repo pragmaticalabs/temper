@@ -64,6 +64,8 @@ class BbMemFloorIT {
         env.put("BB_TEST_MEMINFO", meminfo.toString());
         env.put("BB_TEST_MEM_FLOOR_FILE",
                 dir.resolve("mem-floor-gb").toString());
+        env.put("BB_TEST_MEM_CLAIM_FILE",
+                dir.resolve("mem-claim-gb").toString());
         env.put("BB_TEST_PS",
                 Files.writeString(dir.resolve("ps"), "").toString());
         env.put("BB_LOAD_STARVE_SECS", "1200");
@@ -223,6 +225,7 @@ class BbMemFloorIT {
         var id = ticket("fresh", 0);
         var floorFile = dir.resolve("mem-floor-gb");
 
+        Files.writeString(dir.resolve("mem-claim-gb"), "4\n");  // E 4: no floor of this row is below it (a floor below E is refused, #130)
         memAvailableKb(5 * GIB_KB);
         Files.writeString(floorFile, "4\n");
         assertThat(pick()).as("file 4 < 5 GB available").isEqualTo(id);

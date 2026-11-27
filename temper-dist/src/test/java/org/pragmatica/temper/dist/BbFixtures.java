@@ -59,7 +59,9 @@ final class BbFixtures {
                               "BB_TEST_MAX_REACTORS_FILE",
                               cap.toString(),
                               "BB_TEST_MEM_FLOOR_FILE",
-                              root.resolve("no-mem-floor-file").toString());
+                              root.resolve("no-mem-floor-file").toString(),
+                              "BB_TEST_MEM_CLAIM_FILE",
+                              root.resolve("no-mem-claim-file").toString());
             } catch (IOException e) {
                 throw new IllegalStateException(e);
             }

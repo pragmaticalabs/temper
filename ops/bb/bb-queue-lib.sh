@@ -31,6 +31,27 @@ MEMINFO=${BB_TEST_MEMINFO:-/proc/meminfo}   # TEST ONLY: a file in /proc/meminfo
 # ps pass per call. A java without -Xmx is skipped (its default max heap is not on the command line). RSS also counts non-heap memory,
 # so the headroom is an underestimate, never an overestimate: only words before the main class or -jar are read as JVM options, so an application argument such as `-Xmx50g` after them never counts.
 PSLIST=${BB_TEST_PS:-}   # TEST ONLY: a file of "pid ppid rss_kb args..." lines, read instead of ps
+# QUEUE CLAIMS TO COME (issue #130, 2026-11-26): MemAvailable and the off-queue headroom still miss the growth of the QUEUE'S OWN launches:
+# three grants in a row at "enough" MemAvailable each later grow by ~5 GB (maven JVM + surefire/failsafe fork) and the kernel kills a fork.
+# INVARIANT: no grant leaves MemAvailable, minus the off-queue headroom, minus what the queue's live launches are still expected to claim,
+# below the floor (CTO ruling 2026-11-27: no extra term for the grant itself; the floor is already sized for one grant, so the floor must be
+# at least E, see mem_config_refusal). A launch's claim = max(0, E - RSS of its process tree), E = mem_claim_gb (a measured
+# per-host constant, default 6 GB = the 2.4 + 3.6 GB the floor was sized on; file $MEMCLAIM, read at every pick; no production
+# environment fallback, since pick runs with the enqueuer's environment and a submitter would lift the bound: the only environment input is
+# BB_TEST_MEM_CLAIM_FILE, a test seam of the class of BB_TEST_MEMINFO and BB_TEST_PS, which nothing gates outside tests). The tree's RSS so far
+# is read from the ps list; a tree at E claims nothing more, so memory it already holds is never counted twice (MemAvailable has it). WHERE
+# THE BUILD RUNS: a launch's tree is its ledger pid's descendants PLUS, for an isolated ticket (iso=1: maven runs in docker container bb-<id>,
+# whose processes hang off containerd-shim, not off the ledger pid), the descendants of that container's init pid (one `docker inspect`, 5 s
+# bound, for all the isolated launches); a container that is gone, a docker that does not answer in time or a pid that is not a positive
+# integer adds 0, so the claim is then E - tree (an over-claim, never an under-claim). A bb-hold
+# ticket claims nothing (its containers are in MemAvailable). With no claiming launch alive the claims are 0 and #53's floor test alone
+# decides; its starvation override stays as it was. A config with floor < E is REFUSED at pick only (mem_config_refusal): pick() grants nothing (no starvation override either) while it holds;
+# a ticket submitted under it is queued and held, not refused at submit (bb-build is untouched). FAILURE MODES: a launch that outgrows E claims
+# 0 while still growing (under-claim); containers a build starts itself (Testcontainers, siblings of bb-<id> on the host docker, not
+# attributable to a ticket) sit outside both trees, are already in MemAvailable and still claim E - tree RSS (over-claim); RSS counts shared file pages (under-claim). Grants are serialised by the queue lock and the ledger line
+# written in the grant's own lock hold (see LAUNCH LEDGER), so two waiters never spend the same headroom.
+MEMCLAIM=${BB_TEST_MEM_CLAIM_FILE:-$HOME/work/mem-claim-gb}
+VMSTAT=${BB_TEST_VMSTAT:-/proc/vmstat}   # TEST ONLY: a file in /proc/vmstat format, read instead
 # HOST REACTOR CAP (issue #56, CTO request 2026-11-18): a ticket is granted only while live queue launches (LEDGER) < min(its own cap, host_cap).
 # host_cap is the first line of 1..999 of the per-host file $MAXREACT (read at every pick), else 3 (the CTO's value for the 30G
 # hosts). There is no environment fallback on purpose: pick runs with the ENQUEUER's environment, so an env value would let a submitter
@@ -117,7 +138,8 @@ ledger_write() {
   { ledger_live; [ $# -eq 0 ] || echo "$1"; } > "$t" && mv -f "$t" "$LEDGER"
 }
 # ledger_add <ticket> <pid>: (under lock, right after the spawn) record the launch.
-ledger_add() { local s; s=$(pstart "$2"); [ -n "$s" ] || return 0; ledger_write "$1 $2 $s 1"; }   # a launch already gone has nothing to count
+# BB_TEST_LEDGER_DELAY (TEST ONLY, seconds): sleep before the line is written, to hold open the window between grant and ledger line (BbMemClaimIT).
+ledger_add() { local s; s=$(pstart "$2"); [ -n "$s" ] || return 0; [ -z "${BB_TEST_LEDGER_DELAY:-}" ] || sleep "$BB_TEST_LEDGER_DELAY"; ledger_write "$1 $2 $s 1"; }   # a launch already gone has nothing to count
 # still_ours <pid:start:kind> <co>: the collected process is the same process (start time unchanged) and still qualifies: kind c (found by
 # its cwd) needs the cwd still at or below <co>; kind w (waiter tree) and d (below a cwd process) are the same tree member as collected.
 still_ours() {
@@ -359,6 +381,7 @@ reap() {
 pick() {
   local r=${1-} me=${2-${ID-}} id f c hc bs now lh mh cand="" oldest="" ocr=0 cr; now=$(date +%s)   # r: live queue launches (LEDGER), as reap counted them in this lock hold (#88)
   case "$r" in ''|*[!0-9]*) echo "pick: refused: no reap count from this lock hold (got '$r'), nothing granted (#90)" >&2; return 0;; esac
+  [ -z "$(mem_config_refusal)" ] || return 0   # a refused memory config grants nothing, whatever has waited (mem_config_refusal)
   hc=$(host_cap)
   for id in $(grantable); do
     f=$Q/waiting/$id; c=$(field "$f" cap); case "$c" in ''|*[!0-9]*) c=3;; esac; [ "$c" -le "$hc" ] || c=$hc
@@ -370,7 +393,7 @@ pick() {
   done
   [ -n "$cand" ] || return 0
   lh=$(load_held); mh=$(mem_held)
-  [ -z "$lh" ] && [ -z "$mh" ] && { echo "$cand"; return 0; }
+  [ -z "$lh" ] && [ -z "$mh" ] && { [ "$me" != "$cand" ] || grant_record "$Q/waiting/$cand"; echo "$cand"; return 0; }
   # A GATE is held. Starvation bound: the OLDEST grantable ticket goes once it has waited > LOAD_STARVE s and its own cap allows a
   # start, provided every held gate may be overridden: the LOAD GATE while fewer than LOAD_STARVE_REACTORS launches run, the MEMORY
   # FLOOR only while NO ticket of any kind runs (no reactor, and nothing in running/: a bb-hold's containers hold memory without a
@@ -385,6 +408,7 @@ pick() {
   if [ "$me" = "$oldest" ]; then   # record once: only the oldest's own waiter writes it, not every waiter that polls
     [ -z "$lh" ] || echo "load_override=$now waited=$((now - ocr))s launches=$r $lh" >> "$f"
     [ -z "$mh" ] || echo "mem_override=$now waited=$((now - ocr))s launches=$r $(mem_available_gb) $mh" >> "$f"
+    grant_record "$f"
   fi
   echo "$oldest"
   return 0
@@ -477,11 +501,78 @@ mem_available_gb() {
 }
 # mem_held: nothing when MemAvailable minus the off-queue JVM headroom is >= the floor, else the reason ("held: MemAvailable 5.1 GB < floor
 # 8 GB", or with headroom "held: MemAvailable 20.0 GB - off-queue JVM headroom 18.0 GB = 2.0 GB < floor 8 GB"). An unreadable or
-# malformed meminfo (no MemAvailable line, a non-numeric value, a unit other than kB) never holds the queue.
+# malformed meminfo (no MemAvailable line, a non-numeric value, a unit other than kB) never holds the queue. When that test passes and the
+# queue has a live claiming launch (QUEUE CLAIMS TO COME), the same minus the launches' claims is tested; its reason names them:
+# "held: MemAvailable 20.0 GB - queue claims to come 14.0 GB (t1 6.0 GB, t2 6.0 GB, t3 2.0 GB) = 6.0 GB < floor 8 GB". A config the queue refuses
+# (mem_config_refusal) holds everything, first.
 mem_held() {
-  awk -v fl="$(mem_floor_gb)" -v hr="$(offqueue_headroom_kb)" '$1 == "MemAvailable:" { if ($2 ~ /^[0-9]+$/ && $3 == "kB" && ($2 - hr) / 1048576 < fl + 0) {
+  local fl hr old k cl detail
+  old=$(mem_config_refusal); [ -z "$old" ] || { echo "$old"; return 0; }
+  fl=$(mem_floor_gb); hr=$(offqueue_headroom_kb)
+  old=$(awk -v fl="$fl" -v hr="$hr" '$1 == "MemAvailable:" { if ($2 ~ /^[0-9]+$/ && $3 == "kB" && ($2 - hr) / 1048576 < fl + 0) {
       if (hr > 0) printf "held: MemAvailable %.1f GB - off-queue JVM headroom %.1f GB = %.1f GB < floor %d GB\n", $2 / 1048576, hr / 1048576, ($2 - hr) / 1048576, fl
-      else printf "held: MemAvailable %.1f GB < floor %d GB\n", $2 / 1048576, fl }; exit }' "$MEMINFO" 2>/dev/null || true
+      else printf "held: MemAvailable %.1f GB < floor %d GB\n", $2 / 1048576, fl }; exit }' "$MEMINFO" 2>/dev/null || true)
+  [ -z "$old" ] || { echo "$old"; return 0; }
+  read -r k cl detail <<< "$(queue_claims | awk '{ k++; cl += $4; d = d (k > 1 ? ", " : "") $1 " " sprintf("%.1f", $4 / 1048576) " GB" } END { printf "%d %.0f %s\n", k, cl, d }')"
+  [ "${k:-0}" -gt 0 ] || return 0
+  awk -v fl="$fl" -v hr="$hr" -v cl="$cl" -v d="$detail" '$1 == "MemAvailable:" {
+    if ($2 ~ /^[0-9]+$/ && $3 == "kB" && ($2 - hr - cl) / 1048576 < fl + 0) {
+      printf "held: MemAvailable %.1f GB", $2 / 1048576
+      if (hr > 0) printf " - off-queue JVM headroom %.1f GB", hr / 1048576
+      printf " - queue claims to come %.1f GB (%s) = %.1f GB < floor %d GB\n", cl / 1048576, d, ($2 - hr - cl) / 1048576, fl }; exit }' "$MEMINFO" 2>/dev/null || true
+}
+# mem_config_refusal: nothing, or the reason when the floor is below E (mem_floor_gb < mem_claim_gb, both as resolved): the floor is sized for
+# ONE launch's growth, so a floor under E lets a grant through with no room for what the launch will claim (CTO ruling 2026-11-27). a ticket
+# submitted under it is queued and held (no submit-time refusal); pick() grants nothing while it holds. Names both values and where each comes from.
+mem_config_refusal() {
+  local fl e; fl=$(mem_floor_gb); e=$(mem_claim_gb)
+  awk -v fl="$fl" -v e="$e" -v ff="$MEMFLOOR" -v ef="$MEMCLAIM" 'BEGIN { if (fl + 0 < e + 0)
+    printf "refused: memory floor %s GB (file %s, else BB_MEM_FLOOR_GB, else 8) < queue claim E %s GB (file %s, else 6): raise the floor or lower E\n", fl, ff, e, ef }'
+}
+# mem_claim_gb: E in GiB: the first line of $MEMCLAIM holding a positive integer of any size (surrounding blanks and leading zeros allowed),
+# else 6; a line that is anything else (0, -3, abc, 5x, empty) is skipped, and a missing file or no such line gives 6. No environment fallback.
+mem_claim_gb() {
+  local n; n=$(sed -n 's/^[[:space:]]*0*\([1-9][0-9]*\)[[:space:]]*$/\1/p' "$MEMCLAIM" 2>/dev/null | head -1)
+  echo "${n:-6}"
+}
+# queue_container_pids <ticket id>...: "bb-<id>:<pid>" per isolated launch whose container bb-<id> is running (pid = the container's init
+# as the host sees it); one `docker inspect` for all of them, 5 s bound. Gone, not running (pid 0), no docker, no answer in time: no line.
+queue_container_pids() {
+  [ $# -gt 0 ] || return 0
+  timeout 5 docker inspect -f '{{.Name}} {{.State.Pid}}' "$@" 2>/dev/null | awk '$1 ~ /^\/bb-/ && $2 ~ /^[1-9][0-9]*$/ { sub(/^\//, "", $1); printf "%s:%s ", $1, $2 }' || true
+}
+# queue_claims: one line "ticket pid tree_rss_kb claim_kb" per live ledger launch that claims (a bb-hold ticket, kind=bb-hold in running/<id>, claims
+# nothing). tree_rss_kb = RSS of the launch pid and all its descendants in the ps list, plus for an isolated ticket (iso=1) the descendants of its
+# container's init pid (queue_container_pids); claim_kb = max(0, E - tree_rss_kb).
+queue_claims() {
+  local id p s w led="" names="" cps=""
+  while read -r id p s w; do
+    [ -n "$id" ] || continue
+    [ "$(field "$Q/running/$id" kind)" = bb-hold ] && continue
+    led="$led$id:$p "
+    [ "$(field "$Q/running/$id" iso)" != 1 ] || names="$names bb-$id"
+  done <<< "$(ledger_live)"
+  [ -n "$led" ] || return 0
+  cps=$(queue_container_pids $names)
+  ps_list | awk -v eg="$(mem_claim_gb)" -v led="$led" -v cps="$cps" '
+    $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ { par[$1] = $2; rss[$1] = $3 + 0 }
+    function tree(root,   p, q, g, s) { s = 0
+      for (p in par) { q = p; g = 0; while (q != root && (q in par) && g < 64) { q = par[q]; g++ }
+        if (q == root) s += rss[p] }
+      return s }
+    END { e = eg * 1048576; n = split(led, l, " "); m = split(cps, k, " "); for (j = 1; j <= m; j++) { split(k[j], u, ":"); cpid[u[1]] = u[2] }
+          for (i = 1; i <= n; i++) { split(l[i], t, ":"); root = t[2]; sum = tree(root)
+            if (("bb-" t[1]) in cpid) sum += tree(cpid[("bb-" t[1])])
+            c = e - sum; if (c < 0) c = 0; printf "%s %s %.0f %.0f\n", t[1], root, sum, c } }'
+}
+# grant_record <ticket file>: record what the host looked like at the grant, for #131's OOM verdict: mem_avail_kb_grant=<MemAvailable kB>
+# and oom_kill_grant=<oom_kill from $VMSTAT>; a source that cannot be read writes no line. Called by pick, for the ticket it grants to its own caller.
+grant_record() {
+  local a o
+  a=$(awk '$1 == "MemAvailable:" && $2 ~ /^[0-9]+$/ { print $2; exit }' "$MEMINFO" 2>/dev/null || true)
+  o=$(awk '$1 == "oom_kill" && $2 ~ /^[0-9]+$/ { print $2; exit }' "$VMSTAT" 2>/dev/null || true)
+  [ -z "$a" ] || echo "mem_avail_kb_grant=$a" >> "$1"
+  [ -z "$o" ] || echo "oom_kill_grant=$o" >> "$1"
 }
 
 # to_done <ticket file>: log a ticket that has just got its terminal state lines, then move it to done/. Caller holds the queue lock.
