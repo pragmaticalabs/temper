@@ -491,6 +491,8 @@ class BbMemClaimIT {
             assertThat(Files.readString(log)).contains("mem-claim-gb: file " + claim + ": \"" + bad + "\" is not a positive integer: E falls back to 6 GB");
         }
 
+        Files.deleteIfExists(log);
+        Files.deleteIfExists(queue.resolve(".mem-claim-noted"));
         Files.writeString(claim, "abc\n");
         lib("pick 0");
         Files.writeString(claim, "x7\n");
