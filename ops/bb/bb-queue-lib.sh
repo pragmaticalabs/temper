@@ -35,13 +35,18 @@ PSLIST=${BB_TEST_PS:-}   # TEST ONLY: a file of "pid ppid rss_kb args..." lines,
 # three grants in a row at "enough" MemAvailable each later grow by ~5 GB (maven JVM + surefire/failsafe fork) and the kernel kills a fork.
 # INVARIANT: no grant leaves MemAvailable, minus the off-queue headroom, minus what the queue's live launches are still expected to claim,
 # minus this grant's own expectation, below the floor. A launch's claim = max(0, E - RSS of its process tree), E = mem_claim_gb (a measured
-# per-host constant, default 6 GB = the 2.4 + 3.6 GB the floor was sized on; file $MEMCLAIM, one positive integer, read at every pick; no
-# environment fallback, since pick runs with the enqueuer's environment and a submitter would lift the bound). The tree's RSS so far is read
-# from the ps list; a tree at E claims nothing more, so memory it already holds is never counted twice (MemAvailable has it). A bb-hold
+# per-host constant, default 6 GB = the 2.4 + 3.6 GB the floor was sized on; file $MEMCLAIM, read at every pick; no production
+# environment fallback, since pick runs with the enqueuer's environment and a submitter would lift the bound: the only environment input is
+# BB_TEST_MEM_CLAIM_FILE, a test seam of the class of BB_TEST_MEMINFO and BB_TEST_PS, which nothing gates outside tests). The tree's RSS so far
+# is read from the ps list; a tree at E claims nothing more, so memory it already holds is never counted twice (MemAvailable has it). WHERE
+# THE BUILD RUNS: a launch's tree is its ledger pid's descendants PLUS, for an isolated ticket (iso=1: maven runs in docker container bb-<id>,
+# whose processes hang off containerd-shim, not off the ledger pid), the descendants of that container's init pid (one `docker inspect`, 5 s
+# bound, for all the isolated launches); a container that is gone, a docker that does not answer in time or a pid that is not a positive
+# integer adds 0, so the claim is then E - tree (an over-claim, never an under-claim). A bb-hold
 # ticket claims nothing (its containers are in MemAvailable). The rule applies only while at least one claiming launch lives: with none, #53's
 # floor alone decides (it is sized for one grant), and its starvation override stays as it was. FAILURE MODES: a launch that outgrows E claims
-# 0 while still growing (under-claim); container memory (Testcontainers) sits outside the tree, so it is already in MemAvailable and still
-# claims E - tree RSS (over-claim); RSS counts shared file pages (under-claim). Grants are serialised by the queue lock and the ledger line
+# 0 while still growing (under-claim); containers a build starts itself (Testcontainers, siblings of bb-<id> on the host docker, not
+# attributable to a ticket) sit outside both trees, are already in MemAvailable and still claim E - tree RSS (over-claim); RSS counts shared file pages (under-claim). Grants are serialised by the queue lock and the ledger line
 # written in the grant's own lock hold (see LAUNCH LEDGER), so two waiters never spend the same headroom.
 MEMCLAIM=${BB_TEST_MEM_CLAIM_FILE:-$HOME/work/mem-claim-gb}
 VMSTAT=${BB_TEST_VMSTAT:-/proc/vmstat}   # TEST ONLY: a file in /proc/vmstat format, read instead
@@ -131,7 +136,8 @@ ledger_write() {
   { ledger_live; [ $# -eq 0 ] || echo "$1"; } > "$t" && mv -f "$t" "$LEDGER"
 }
 # ledger_add <ticket> <pid>: (under lock, right after the spawn) record the launch.
-ledger_add() { local s; s=$(pstart "$2"); [ -n "$s" ] || return 0; ledger_write "$1 $2 $s 1"; }   # a launch already gone has nothing to count
+# BB_TEST_LEDGER_DELAY (TEST ONLY, seconds): sleep before the line is written, to hold open the window between grant and ledger line (BbMemClaimIT).
+ledger_add() { local s; s=$(pstart "$2"); [ -n "$s" ] || return 0; [ -z "${BB_TEST_LEDGER_DELAY:-}" ] || sleep "$BB_TEST_LEDGER_DELAY"; ledger_write "$1 $2 $s 1"; }   # a launch already gone has nothing to count
 # still_ours <pid:start:kind> <co>: the collected process is the same process (start time unchanged) and still qualifies: kind c (found by
 # its cwd) needs the cwd still at or below <co>; kind w (waiter tree) and d (below a cwd process) are the same tree member as collected.
 still_ours() {
@@ -504,31 +510,46 @@ mem_held() {
   [ -z "$old" ] || { echo "$old"; return 0; }
   read -r k cl detail <<< "$(queue_claims | awk '{ k++; cl += $4; d = d (k > 1 ? ", " : "") $1 " " sprintf("%.1f", $4 / 1048576) " GB" } END { printf "%d %.0f %s\n", k, cl, d }')"
   [ "${k:-0}" -gt 0 ] || return 0
-  awk -v fl="$fl" -v hr="$hr" -v cl="$cl" -v e="$(( $(mem_claim_gb) * 1048576 ))" -v d="$detail" '$1 == "MemAvailable:" {
+  awk -v fl="$fl" -v hr="$hr" -v cl="$cl" -v eg="$(mem_claim_gb)" -v d="$detail" '$1 == "MemAvailable:" { e = eg * 1048576   # GiB -> kB in awk: any positive integer, no shell arithmetic to overflow
     if ($2 ~ /^[0-9]+$/ && $3 == "kB" && ($2 - hr - cl - e) / 1048576 < fl + 0) {
       printf "held: MemAvailable %.1f GB", $2 / 1048576
       if (hr > 0) printf " - off-queue JVM headroom %.1f GB", hr / 1048576
       printf " - queue claims to come %.1f GB (%s) - this grant %.1f GB = %.1f GB < floor %d GB\n", cl / 1048576, d, e / 1048576, ($2 - hr - cl - e) / 1048576, fl }; exit }' "$MEMINFO" 2>/dev/null || true
 }
-# mem_claim_gb: E in GiB: the first line of $MEMCLAIM that is a positive integer, else 6. No environment fallback (see QUEUE CLAIMS TO COME).
+# mem_claim_gb: E in GiB: the first line of $MEMCLAIM holding a positive integer of any size (surrounding blanks and leading zeros allowed),
+# else 6; a line that is anything else (0, -3, abc, 5x, empty) is skipped, and a missing file or no such line gives 6. No environment fallback.
 mem_claim_gb() {
-  local n; n=$(sed -n 's/^[[:space:]]*\([1-9][0-9]\{0,2\}\)[[:space:]]*$/\1/p' "$MEMCLAIM" 2>/dev/null | head -1)
+  local n; n=$(sed -n 's/^[[:space:]]*0*\([1-9][0-9]*\)[[:space:]]*$/\1/p' "$MEMCLAIM" 2>/dev/null | head -1)
   echo "${n:-6}"
 }
+# queue_container_pids <ticket id>...: "bb-<id>:<pid>" per isolated launch whose container bb-<id> is running (pid = the container's init
+# as the host sees it); one `docker inspect` for all of them, 5 s bound. Gone, not running (pid 0), no docker, no answer in time: no line.
+queue_container_pids() {
+  [ $# -gt 0 ] || return 0
+  timeout 5 docker inspect -f '{{.Name}} {{.State.Pid}}' "$@" 2>/dev/null | awk '$1 ~ /^\/bb-/ && $2 ~ /^[1-9][0-9]*$/ { sub(/^\//, "", $1); printf "%s:%s ", $1, $2 }' || true
+}
 # queue_claims: one line "ticket pid tree_rss_kb claim_kb" per live ledger launch that claims (a bb-hold ticket, kind=bb-hold in running/<id>, claims
-# nothing). tree_rss_kb = RSS of the launch pid and all its descendants in the ps list; claim_kb = max(0, E - tree_rss_kb).
+# nothing). tree_rss_kb = RSS of the launch pid and all its descendants in the ps list, plus for an isolated ticket (iso=1) the descendants of its
+# container's init pid (queue_container_pids); claim_kb = max(0, E - tree_rss_kb).
 queue_claims() {
-  local id p s w led=""
+  local id p s w led="" names="" cps=""
   while read -r id p s w; do
     [ -n "$id" ] || continue
-    [ "$(field "$Q/running/$id" kind)" = bb-hold ] || led="$led$id:$p "
+    [ "$(field "$Q/running/$id" kind)" = bb-hold ] && continue
+    led="$led$id:$p "
+    [ "$(field "$Q/running/$id" iso)" != 1 ] || names="$names bb-$id"
   done <<< "$(ledger_live)"
   [ -n "$led" ] || return 0
-  ps_list | awk -v e="$(( $(mem_claim_gb) * 1048576 ))" -v led="$led" '
+  cps=$(queue_container_pids $names)
+  ps_list | awk -v eg="$(mem_claim_gb)" -v led="$led" -v cps="$cps" '
     $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ { par[$1] = $2; rss[$1] = $3 + 0 }
-    END { n = split(led, l, " "); for (i = 1; i <= n; i++) { split(l[i], t, ":"); root = t[2]; sum = 0
-            for (p in par) { q = p; g = 0; while (q != root && (q in par) && g < 64) { q = par[q]; g++ }
-              if (q == root) sum += rss[p] }
+    function tree(root,   p, q, g, s) { s = 0
+      for (p in par) { q = p; g = 0; while (q != root && (q in par) && g < 64) { q = par[q]; g++ }
+        if (q == root) s += rss[p] }
+      return s }
+    END { e = eg * 1048576; n = split(led, l, " "); m = split(cps, k, " "); for (j = 1; j <= m; j++) { split(k[j], u, ":"); cpid[u[1]] = u[2] }
+          for (i = 1; i <= n; i++) { split(l[i], t, ":"); root = t[2]; sum = tree(root)
+            if (("bb-" t[1]) in cpid) sum += tree(cpid[("bb-" t[1])])
             c = e - sum; if (c < 0) c = 0; printf "%s %s %.0f %.0f\n", t[1], root, sum, c } }'
 }
 # grant_record <ticket file>: record what the host looked like at the grant, for #131's OOM verdict: mem_avail_kb_grant=<MemAvailable kB>
