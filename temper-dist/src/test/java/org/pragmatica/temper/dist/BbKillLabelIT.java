@@ -163,14 +163,14 @@ class BbKillLabelIT {
     // ---- bb-build writes the kernel's evidence into the ticket ------------------------------------------------------
     @Test
     void theTicketCarriesTheCountersOfItsOwnWindow() throws Exception {
-        var meminfo = Files.writeString(dir.resolve("meminfo-1"), "MemTotal: 99 kB\nMemAvailable:   1234 kB\n");
+        var meminfo = Files.writeString(dir.resolve("meminfo-1"), "MemTotal: 99 kB\nMemAvailable:   100000000 kB\n");
         var id = start("window", bump(6) + "exit 1", "", Map.of("BB_TEST_MEMINFO", meminfo.toString()));
 
         finished(id);
         assertThat(field(id, "oom_kill_start")).isEqualTo("5");
         assertThat(field(id, "oom_kill_end")).isEqualTo("6");
-        assertThat(field(id, "mem_avail_kb_start")).isEqualTo("1234");
-        assertThat(field(id, "mem_avail_kb_end")).isEqualTo("1234");
+        assertThat(field(id, "mem_avail_kb_start")).isEqualTo("100000000");
+        assertThat(field(id, "mem_avail_kb_end")).isEqualTo("100000000");
         assertThat(field(id, "rc")).isEqualTo("1");
     }
 
