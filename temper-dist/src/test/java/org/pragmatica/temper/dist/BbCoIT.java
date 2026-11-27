@@ -580,16 +580,18 @@ class BbCoIT {
         }
     }
 
-    /// INVARIANT: a TERM or HUP during the pick ends bb-co promptly (exit 1) and leaves no process of the probes alive. The probe never ends by
+    /// INVARIANT: a TERM, HUP or INT during the pick ends bb-co promptly (exit 1) and leaves no process of the probes alive. The probe never ends by
     /// itself within the row (sleep 300) and the wall is 60 s: a trap without the probe kill waits for the wall (about 60 s, over the 20 s bound) and
     /// leaves the group alive; HUP out of the trap is the shell's default, exit 129 with the probes alive. The group is checked by pgid, so the
-    /// watchdog's sleep and the stub's subshell count, not only the one pid the stub recorded. Limits: INT has no row, a test cannot deliver it (a
-    /// child of a non-interactive parent may start with SIGINT ignored, and an ignored signal cannot be trapped); it is the same trap line as TERM
-    /// and HUP. Removing the trap's `wait` leaves the same observable end: the group kill is delivered before bb-co exits and the probe subshell
+    /// watchdog's sleep and the stub's subshell count, not only the one pid the stub recorded. Limits: removing the trap's `wait` leaves the same observable end: the group kill is delivered before bb-co exits and the probe subshell
     /// dies at once on TERM (no trap of its own), so only a microsecond race tells the two apart (25 local runs, no difference).
     private void assertSignalEndsThePick(String signal) throws Exception {
         host("bigboy").waiting(0).hangs(300);
-        var command = new ArrayList<>(List.of("bash", Path.of("..", "ops", "bb", "bb-co").toAbsolutePath().normalize().toString(), "t3-x", "main"));
+        // A shell cannot trap a signal that was ignored when it started, and a nohup'd or backgrounded test JVM hands HUP and INT on as ignored:
+        // the launcher resets them to the default first (python3 is bb-co's own dependency).
+        var command = new ArrayList<>(List.of("python3", "-I", "-c",
+                                              "import os,signal,sys; [signal.signal(s, signal.SIG_DFL) for s in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM)]; os.execvp(sys.argv[1], sys.argv[1:])",
+                                              "bash", Path.of("..", "ops", "bb", "bb-co").toAbsolutePath().normalize().toString(), "t3-x", "main"));
         var proc = MacScripts.background(command, env("BB_CO_PROBE_WALL", "60"), dir);
         long[] probe = null;
 
@@ -629,6 +631,11 @@ class BbCoIT {
     @Test
     void aHupDuringThePick_killsEveryProbe_andExitsOne() throws Exception {
         assertSignalEndsThePick("HUP");
+    }
+
+    @Test
+    void anIntDuringThePick_killsEveryProbe_andExitsOne() throws Exception {
+        assertSignalEndsThePick("INT");
     }
 
     /// INVARIANT: job control is on only around the probe launch (`set -m` ... `set +m`), so the bb-checkout ssh runs in bb-co's own process group
