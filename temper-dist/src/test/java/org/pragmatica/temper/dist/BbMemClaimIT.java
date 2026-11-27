@@ -303,7 +303,8 @@ class BbMemClaimIT {
         assertThat(within(30_000, () -> up("a"))).isTrue();
         var pid = launchPid(a);
 
-        Files.writeString(dir.resolve("ps"), pid + " 1 " + GIB_KB + " bash bb-build __run\n" + "778001 1 " + 4 * GIB_KB + " java orphaned-container-java\n");
+        Files.writeString(dir.resolve("ps"), pid + " 1 " + GIB_KB + " bash bb-build __run\n" + "778001 1 " + 4 * GIB_KB + " java orphaned-container-java\n"
+                                              + "778002 0 " + 4 * GIB_KB + " kernel-thread-like\n");  // ppid 0: a pid 0 "container init" would walk to it and add its 4 GB
         for (var answer : List.of("", "bb-" + a + " 0\n", "bb-other-1 778001\n")) {
             Files.writeString(dir.resolve("container-pids"), answer);
             assertThat(lib("queue_claims").stdout().strip()).as("answer '%s'", answer.strip()).isEqualTo(a + " " + pid + " " + GIB_KB + " " + 5 * GIB_KB);
@@ -376,6 +377,75 @@ class BbMemClaimIT {
         Files.delete(dir.resolve("mem-floor-gb"));  // floor 8 >= E 6: accepted; 5 < 8, so the override is what grants
         assertThat(within(40_000, () -> up("a"))).as("config fixed: the override grants as before").isTrue();
         assertThat(Files.readString(queue.resolve("running").resolve(a))).contains("mem_override=");
+    }
+
+    /// Survivors of the independent mutation round (v130b g03 g07 g08 g10 g11 g13 g14), one row each.
+    /// g03: in the starvation-override branch only the OLDEST ticket's own waiter records the grant, once.
+    @Test
+    void theOverrideGrant_isRecordedOnlyByTheOldestsOwnWaiter() throws Exception {
+        memAvailableKb(5 * GIB_KB);  // below the floor, nothing running: the override is the way through
+        var first = waitingTicket("first", 2000);
+        var second = waitingTicket("second", 1000);
+
+        assertThat(lib("pick 0 " + second).stdout().strip()).as("the oldest is granted to every caller").isEqualTo(first);
+        assertThat(Files.readString(queue.resolve("waiting").resolve(first))).doesNotContain("mem_avail_kb_grant").doesNotContain("mem_override=");
+        assertThat(lib("pick 0 " + first).stdout().strip()).isEqualTo(first);
+        var lines = Files.readAllLines(queue.resolve("waiting").resolve(first));
+
+        assertThat(lines.stream().filter(l -> l.startsWith("mem_avail_kb_grant=" + 5 * GIB_KB)).count()).isEqualTo(1);
+        assertThat(lines.stream().filter(l -> l.startsWith("mem_override=")).count()).isEqualTo(1);
+    }
+
+    /// g11: MemAvailable unreadable: the grant stands and no empty mem_avail_kb_grant= line is written.
+    @Test
+    void anUnreadableMeminfo_writesNoAvailLine_butTheGrantStands() throws Exception {
+        Files.delete(dir.resolve("meminfo"));
+        var first = waitingTicket("first", 20);
+
+        assertThat(lib("pick 0 " + first).stdout().strip()).isEqualTo(first);
+        assertThat(Files.readString(queue.resolve("waiting").resolve(first))).doesNotContain("mem_avail_kb_grant");
+    }
+
+    /// g08: a launch's tree is every descendant, not only its children (root -> child -> grandchild -> great-grandchild, 1 GB each).
+    @Test
+    void aDeepProcessTree_isCountedWhole() throws Exception {
+        var holder = BbFixtures.process("sleep", "600").start();
+
+        try {
+            Files.writeString(queue.resolve("running").resolve("job-" + BbFixtures.RUN), "started=1\n");
+            BbFixtures.recordLaunch(queue, "job-" + BbFixtures.RUN, holder.pid());
+            Files.writeString(dir.resolve("ps"), holder.pid() + " 1 " + GIB_KB + " bash launch\n" + "2000001 " + holder.pid() + " " + GIB_KB + " mvn\n"
+                                                  + "2000002 2000001 " + GIB_KB + " java\n" + "2000003 2000002 " + GIB_KB + " fork\n");
+            assertThat(lib("queue_claims").stdout().strip()).isEqualTo("job-" + BbFixtures.RUN + " " + holder.pid() + " " + 4 * GIB_KB + " " + 2 * GIB_KB);
+        } finally {
+            holder.destroyForcibly();
+        }
+    }
+
+    /// g10: the claim stage reads MemAvailable in kB only, as the floor stage does: another unit never holds the queue, whatever the claims.
+    @Test
+    void aMeminfoInAnotherUnit_neverHolds_evenWithALiveClaim() throws Exception {
+        var holder = BbFixtures.process("sleep", "600").start();
+
+        try {
+            Files.writeString(queue.resolve("running").resolve("job-" + BbFixtures.RUN), "started=1\n");
+            BbFixtures.recordLaunch(queue, "job-" + BbFixtures.RUN, holder.pid());
+            Files.writeString(dir.resolve("meminfo"), "MemAvailable:   5 MB\n");
+            assertThat(lib("mem_held").stdout().strip()).as("claim 6 GB live, value 5 in an unknown unit: unreadable, never holds").isEmpty();
+        } finally {
+            holder.destroyForcibly();
+        }
+    }
+
+    /// g07 g13 g14: E is the FIRST valid line; leading and trailing blanks and leading zeros are allowed.
+    @Test
+    void theClaimFile_firstValidLineWins_andBlanksAreTolerated() throws Exception {
+        var cases = new String[][]{{"7\n9\n", "7"}, {"abc\n5\n8\n", "5"}, {"  8\n", "8"}, {"8  \n", "8"}, {"\t012\t\n", "12"}};
+
+        for (var c : cases) {
+            Files.writeString(dir.resolve("mem-claim-gb"), c[0]);
+            assertThat(lib("mem_claim_gb").stdout().strip()).as("claim file %s", c[0].replace("\n", "|").replace("\t", "<tab>")).isEqualTo(c[1]);
+        }
     }
 
     /// mem_config_refusal: refused exactly when floor < E, both as resolved (floor default 8, E default 6; any size of E).
