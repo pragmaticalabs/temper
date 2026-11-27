@@ -60,7 +60,8 @@ class BbCoIT {
                               [ ! -e "$STUBS/down.$h" ] || exit 255
                               [ "${@: -1}" = true ] && { echo "$h" >> "$STUBS/path-probe.log"; exit 0; }
                               printf '%s: %s\\n' "$h" "${@: -1}" >> "$STUBS/ssh.log"
-                              [ ! -e "$STUBS/hang.$h" ] || { echo $$ >> "$STUBS/hang-pids"; exec sleep 30; }
+                              case ${@: -1} in *"tools/bb-checkout t3-"*) echo "$(ps -o pgid= -p $$ | tr -d ' ') $(ps -o pgid= -p $PPID | tr -d ' ')" >> "$STUBS/checkout-pgids" ;; esac
+                              [ ! -e "$STUBS/hang.$h" ] || { echo "$$ $(ps -o pgid= -p $$ | tr -d ' ')" >> "$STUBS/hang-pids"; exec sleep "$(cat "$STUBS/hang.$h")"; }
                               case ${@: -1} in *probe=ok*) [ ! -e "$STUBS/reply.$h" ] || { cat "$STUBS/reply.$h"; exit "$(cat "$STUBS/reply-rc.$h" 2> /dev/null || echo 0)"; } ;; esac
                               HOME=$STUBS/hosts/$h BB_TEST_LOADAVG=$STUBS/hosts/$h/loadavg BB_TEST_NPROC=$(cat "$STUBS/hosts/$h/cores") exec bash -c "${@: -1}"
                               """);
@@ -128,7 +129,12 @@ class BbCoIT {
         }
 
         Host hangs() throws IOException {
-            Files.writeString(dir.resolve("hang." + name), "");
+            return hangs(30);
+        }
+
+        /// The stub's ssh to this host never answers by itself for `seconds`.
+        Host hangs(int seconds) throws IOException {
+            Files.writeString(dir.resolve("hang." + name), seconds + "\n");
             return this;
         }
 
@@ -187,17 +193,43 @@ class BbCoIT {
         return "waiting=%d\nrunning=0\ncap=%d\nload5=0.10\ncores=%d\nexists=0\nprobe=%s\n".formatted(waiting, cap, cores, probe);
     }
 
-    /// The pids of the stub's hung ssh calls (the stub execs sleep, so its pid is the hung process).
-    private List<Long> hungPids() throws IOException {
+    /// The "pid pgid" lines of the stub's hung ssh calls (the stub execs sleep, so its pid is the hung process, and the group is the probe's).
+    private List<long[]> hung() throws IOException {
         var f = dir.resolve("hang-pids");
 
-        return Files.exists(f) ? Files.readAllLines(f).stream().map(String::strip).filter(l -> !l.isEmpty()).map(Long::parseLong).toList() : List.of();
+        return Files.exists(f)
+               ? Files.readAllLines(f).stream().map(String::strip).filter(l -> !l.isEmpty()).map(l -> l.split(" ")).map(a -> new long[]{Long.parseLong(a[0]), Long.parseLong(a[1])}).toList()
+               : List.of();
+    }
+
+    private List<Long> hungPids() throws IOException {
+        return hung().stream().map(a -> a[0]).toList();
+    }
+
+    /// The pids of every live process in process group `pgid` (ps, because the JDK does not expose groups).
+    private static List<Long> membersOf(long pgid) throws Exception {
+        var ps = new ProcessBuilder("ps", "-axo", "pid=,pgid=").redirectErrorStream(true).start();
+        var out = new String(ps.getInputStream().readAllBytes());
+
+        ps.waitFor();
+        return out.lines().map(String::strip).filter(l -> !l.isEmpty()).map(l -> l.split("\\s+")).filter(a -> Long.parseLong(a[1]) == pgid).map(a -> Long.parseLong(a[0])).toList();
     }
 
     /// Polls up to 10 s: the kill is delivered before bb-co exits, reaping an orphan is the init's.
     private static boolean gone(long pid) throws InterruptedException {
         for (var i = 0; i < 100; i++) {
             if (!ProcessHandle.of(pid).map(ProcessHandle::isAlive).orElse(false)) {
+                return true;
+            }
+            Thread.sleep(100);
+        }
+        return false;
+    }
+
+    /// Polls up to 10 s for the process group to be empty.
+    private static boolean groupGone(long pgid) throws Exception {
+        for (var i = 0; i < 100; i++) {
+            if (membersOf(pgid).isEmpty()) {
                 return true;
             }
             Thread.sleep(100);
@@ -548,27 +580,70 @@ class BbCoIT {
         }
     }
 
-    @Test
-    void aTermDuringThePick_killsEveryProbe_andExitsOne() throws Exception {
-        host("bigboy").waiting(0).hangs();
+    /// INVARIANT: a TERM or HUP during the pick ends bb-co promptly (exit 1) and leaves no process of the probes alive. The probe never ends by
+    /// itself within the row (sleep 300) and the wall is 60 s: a trap without the probe kill waits for the wall (about 60 s, over the 20 s bound) and
+    /// leaves the group alive; HUP out of the trap is the shell's default, exit 129 with the probes alive. The group is checked by pgid, so the
+    /// watchdog's sleep and the stub's subshell count, not only the one pid the stub recorded. Limits: INT has no row, a test cannot deliver it (a
+    /// child of a non-interactive parent may start with SIGINT ignored, and an ignored signal cannot be trapped); it is the same trap line as TERM
+    /// and HUP. Removing the trap's `wait` leaves the same observable end: the group kill is delivered before bb-co exits and the probe subshell
+    /// dies at once on TERM (no trap of its own), so only a microsecond race tells the two apart (25 local runs, no difference).
+    private void assertSignalEndsThePick(String signal) throws Exception {
+        host("bigboy").waiting(0).hangs(300);
         var command = new ArrayList<>(List.of("bash", Path.of("..", "ops", "bb", "bb-co").toAbsolutePath().normalize().toString(), "t3-x", "main"));
         var proc = MacScripts.background(command, env("BB_CO_PROBE_WALL", "60"), dir);
+        long[] probe = null;
 
         try {
             var deadline = System.nanoTime() + 30_000_000_000L;
 
-            while (hungPids().isEmpty() && System.nanoTime() < deadline) {
+            while (hung().isEmpty() && System.nanoTime() < deadline) {
                 Thread.sleep(50);
             }
-            assertThat(hungPids()).as("the probe of bigboy is hanging").hasSize(1);
-            proc.destroy();
+            assertThat(hung()).as("the probe of bigboy is hanging").hasSize(1);
+            probe = hung().getFirst();
+            assertThat(membersOf(probe[1])).as("the probe group is alive before the signal").contains(probe[0]);
+            var t0 = System.nanoTime();
+
+            assertThat(new ProcessBuilder("sh", "-c", "kill -s " + signal + " " + proc.pid()).inheritIO().start().waitFor()).isZero();
             assertThat(proc.waitFor(30, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+            assertThat((System.nanoTime() - t0) / 1_000_000_000L).as("seconds from " + signal + " to exit: well below the 60 s wall").isLessThan(20);
             assertThat(proc.exitValue()).isEqualTo(1);
-            assertThat(gone(hungPids().getFirst())).as("the hung ssh died with bb-co, not after the 60 s wall").isTrue();
+            assertThat(gone(probe[0])).as("the hung ssh " + probe[0] + " died with bb-co").isTrue();
+            assertThat(groupGone(probe[1])).as("no process of the probe group " + probe[1] + " is alive: " + membersOf(probe[1])).isTrue();
             assertThat(checkoutCalls()).isEmpty();
         } finally {
             proc.destroyForcibly();
+            if (probe != null) {
+                for (var q : membersOf(probe[1])) {
+                    new ProcessBuilder("sh", "-c", "kill -9 " + q).start().waitFor();
+                }
+            }
         }
+    }
+
+    @Test
+    void aTermDuringThePick_killsEveryProbe_andExitsOne() throws Exception {
+        assertSignalEndsThePick("TERM");
+    }
+
+    @Test
+    void aHupDuringThePick_killsEveryProbe_andExitsOne() throws Exception {
+        assertSignalEndsThePick("HUP");
+    }
+
+    /// INVARIANT: job control is on only around the probe launch (`set -m` ... `set +m`), so the bb-checkout ssh runs in bb-co's own process group
+    /// like every ordinary foreground command. With job control left on it gets a group of its own: a kill of bb-co's group (or a terminal's ^C)
+    /// would no longer reach it. The stub records the ssh's group and its parent's (bb-co's).
+    @Test
+    void theCheckoutSsh_runsInBbCosOwnProcessGroup_notInOneOfItsOwn() throws Exception {
+        var run = co("t3-x", "main");
+        var lines = Files.readAllLines(dir.resolve("checkout-pgids"));
+
+        assertThat(run.rc()).as(run.err()).isZero();
+        assertThat(lines).as("exactly one bb-checkout ssh").hasSize(1);
+        var groups = lines.getFirst().strip().split(" ");
+
+        assertThat(groups[0]).as("the checkout ssh's group is bb-co's").isEqualTo(groups[1]);
     }
 
     @Test
