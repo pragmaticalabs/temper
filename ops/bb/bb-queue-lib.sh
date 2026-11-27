@@ -36,7 +36,7 @@ PSLIST=${BB_TEST_PS:-}   # TEST ONLY: a file of "pid ppid rss_kb args..." lines,
 # INVARIANT: no grant leaves MemAvailable, minus the off-queue headroom, minus what the queue's live launches are still expected to claim,
 # below the floor (CTO ruling 2026-11-27: no extra term for the grant itself; the floor is already sized for one grant, so the floor must be
 # at least E, see mem_config_refusal). A launch's claim = max(0, E - RSS of its process tree), E = mem_claim_gb (a measured
-# per-host constant, default 6 GB = the 2.4 + 3.6 GB the floor was sized on; file $MEMCLAIM, read at every pick; no production
+# per-host constant, default 6 GB = the 2.4 + 3.6 GB the floor was sized on; file $MEMCLAIM, read at every pick; a file with no accepted line is logged once per value, see mem_claim_note; no production
 # environment fallback, since pick runs with the enqueuer's environment and a submitter would lift the bound: the only environment input is
 # BB_TEST_MEM_CLAIM_FILE, a test seam of the class of BB_TEST_MEMINFO and BB_TEST_PS, which nothing gates outside tests). The tree's RSS so far
 # is read from the ps list; a tree at E claims nothing more, so memory it already holds is never counted twice (MemAvailable has it). WHERE
@@ -381,6 +381,7 @@ reap() {
 pick() {
   local r=${1-} me=${2-${ID-}} id f c hc bs now lh mh cand="" oldest="" ocr=0 cr; now=$(date +%s)   # r: live queue launches (LEDGER), as reap counted them in this lock hold (#88)
   case "$r" in ''|*[!0-9]*) echo "pick: refused: no reap count from this lock hold (got '$r'), nothing granted (#90)" >&2; return 0;; esac
+  mem_claim_note   # a claim file that is unusable is logged once per value (mem_claim_note); E is 6 meanwhile
   [ -z "$(mem_config_refusal)" ] || return 0   # a refused memory config grants nothing, whatever has waited (mem_config_refusal)
   hc=$(host_cap)
   for id in $(grantable); do
@@ -529,11 +530,27 @@ mem_config_refusal() {
   awk -v fl="$fl" -v e="$e" -v ff="$MEMFLOOR" -v ef="$MEMCLAIM" 'BEGIN { if (fl + 0 < e + 0)
     printf "refused: memory floor %s GB (file %s, else BB_MEM_FLOOR_GB, else 8) < queue claim E %s GB (file %s, else 6): raise the floor or lower E\n", fl, ff, e, ef }'
 }
-# mem_claim_gb: E in GiB: the first line of $MEMCLAIM holding a positive integer of any size (surrounding blanks and leading zeros allowed),
-# else 6; a line that is anything else (0, -3, abc, 5x, empty) is skipped, and a missing file or no such line gives 6. No environment fallback.
+# mem_claim_valid: the first line of $MEMCLAIM that is a positive integer of any size (surrounding blanks and leading zeros allowed), as digits.
+mem_claim_valid() { sed -n 's/^[[:space:]]*0*\([1-9][0-9]*\)[[:space:]]*$/\1/p' "$MEMCLAIM" 2>/dev/null | head -1; }
+# mem_claim_gb: E in GiB: mem_claim_valid, else 6; any other line (0, -3, 1.5, +4, abc, 5x) is skipped, and a missing file or no such line gives 6.
+# No environment fallback. Silent by itself (it runs several times per pick); the fallback is made loud once by mem_claim_note.
 mem_claim_gb() {
-  local n; n=$(sed -n 's/^[[:space:]]*0*\([1-9][0-9]*\)[[:space:]]*$/\1/p' "$MEMCLAIM" 2>/dev/null | head -1)
+  local n; n=$(mem_claim_valid)
   echo "${n:-6}"
+}
+# mem_claim_note: when $MEMCLAIM has a non-blank line but none that mem_claim_valid accepts, E silently becoming 6 would hide a typo, so one line goes
+# to $Q/mem-claim.log naming the file and the first non-blank line: "<UTC time> mem-claim-gb: file <path>: "<value>" is not a positive integer: E falls
+# back to 6 GB". WHERE: that file, because the waiters run with stdout and stderr on /dev/null (bb-build:645), so nothing printed there is ever seen, and
+# a held reason would not exist when nothing is held. BOUND: called once per pick, under the queue lock; the stamp $Q/.mem-claim-noted holds the value
+# last logged, so the line repeats only when the offending value changes, or after the file was valid or absent in between (the stamp is cleared then).
+# A missing, empty or blank-only file is the default, not a typo: no line.
+mem_claim_note() {
+  local bad stamp=$Q/.mem-claim-noted
+  bad=$(sed -n '/[^[:space:]]/{ s/^[[:space:]]*//; s/[[:space:]]*$//; p; q; }' "$MEMCLAIM" 2>/dev/null | tr -c '\040-\176' '?' | cut -c1-60)
+  if [ -z "$bad" ] || [ -n "$(mem_claim_valid)" ]; then rm -f "$stamp"; return 0; fi
+  [ "$(cat "$stamp" 2>/dev/null)" != "$bad" ] || return 0
+  printf '%s\n' "$bad" > "$stamp"
+  printf '%s mem-claim-gb: file %s: "%s" is not a positive integer: E falls back to 6 GB\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$MEMCLAIM" "$bad" >> "$Q/mem-claim.log"
 }
 # queue_container_pids <ticket id>...: "bb-<id>:<pid>" per isolated launch whose container bb-<id> is running (pid = the container's init
 # as the host sees it); one `docker inspect` for all of them, 5 s bound. Gone, not running (pid 0), no docker, no answer in time: no line.

@@ -32,7 +32,9 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 /// [#theGrantRecordsMemAvailableAndOomKill] red; ignore the container tree in queue_claims ->
 /// [#anIsolatedLaunch_countsItsContainersMemory_notOnlyItsLedgerTree] red; write the ledger line after the lock release (ledger_add after
 /// `exec 8>&-` in bb-build) -> [#twoWaitersInTheSameSecond_neverSpendTheSameHeadroom] red (the ledger line is delayed 8 s by
-/// BB_TEST_LEDGER_DELAY, so the window is open for every waiter).
+/// BB_TEST_LEDGER_DELAY, so the window is open for every waiter).; drop `timeout 5` from the `docker inspect` in queue_container_pids ->
+/// [#aHungDocker_isCutAtFiveSeconds_andTheClaimIsEMinusTheTree] red; drop the mem_claim_note call from pick, its dedupe stamp, or its valid-file check ->
+/// [#anUnusableClaimFile_fallsBackTo6_andIsLoggedOncePerValue] red.
 class BbMemClaimIT {
     private static final String ME = "mc";
     private static final long GIB_KB = 1024L * 1024L;
@@ -58,10 +60,10 @@ class BbMemClaimIT {
         BbFixtures.executable(tools.resolve("bb-cp-record"), "#!/bin/sh\nexit 0\n");
         BbFixtures.executable(tools.resolve("launch"),
                               "#!/bin/bash\n: > \"$HOLD_DIR/$1.up\"\nwhile [ ! -e \"$HOLD_DIR/$1.go\" ]; do sleep 0.3; done\n");
-        // docker: only `inspect -f '{{.Name}} {{.State.Pid}}' <name>...`, answered from $HOLD_DIR/container-pids ("<name> <pid>" lines); an unknown name
+        // docker (hangs 25 s when $HOLD_DIR/docker-hangs exists): only `inspect -f '{{.Name}} {{.State.Pid}}' <name>...`, answered from $HOLD_DIR/container-pids ("<name> <pid>" lines); an unknown name
         // is an error on stderr and exit 1 while the known ones are still printed, as docker does. The format string is pinned: a changed one exits 2.
         BbFixtures.executable(tools.resolve("docker"),
-                              "#!/bin/bash\n[ \"$1\" = inspect ] && [ \"$2\" = -f ] && [ \"$3\" = '{{.Name}} {{.State.Pid}}' ] || exit 2\nshift 3\nrc=0\n"
+                              "#!/bin/bash\n[ -e \"$HOLD_DIR/docker-hangs\" ] && exec sleep 25\n[ \"$1\" = inspect ] && [ \"$2\" = -f ] && [ \"$3\" = '{{.Name}} {{.State.Pid}}' ] || exit 2\nshift 3\nrc=0\n"
                               + "for n in \"$@\"; do l=$(grep -E \"^$n \" \"$HOLD_DIR/container-pids\" 2>/dev/null) && echo \"/$l\" || { echo \"Error: No such object: $n\" >&2; rc=1; }; done\nexit $rc\n");
         // bb-netns-run <id> <checkout> <mvn> args...: the real one runs maven in a container; this one runs the launch directly
         BbFixtures.executable(tools.resolve("bb-netns-run"), "#!/bin/bash\nshift 2\nexec \"$@\"\n");
@@ -468,6 +470,76 @@ class BbMemClaimIT {
             } else {
                 assertThat(out).as("floor '%s' claim '%s'", c[0].strip(), c[1].strip()).isEmpty();
             }
+        }
+    }
+
+    /// B2/N3: a claim file with a non-blank line but no accepted one (abc, 0, 1.5, +4) must not silently become 6: E is 6 AND one line naming the file and
+    /// the value goes to $Q/mem-claim.log (the waiters' stderr is /dev/null, so a log file is the only channel). pick writes it, once per value:
+    /// a repeat pick adds nothing, a changed value adds one, a valid file adds none and re-arms the line for the next bad value.
+    @Test
+    void anUnusableClaimFile_fallsBackTo6_andIsLoggedOncePerValue() throws Exception {
+        var claim = dir.resolve("mem-claim-gb");
+        var log = queue.resolve("mem-claim.log");
+
+        for (var bad : List.of("abc", "0", "1.5", "+4")) {
+            Files.deleteIfExists(log);
+            Files.deleteIfExists(queue.resolve(".mem-claim-noted"));
+            Files.writeString(claim, "\n  " + bad + "  \n");
+            assertThat(lib("mem_claim_gb").stdout().strip()).as("value '%s'", bad).isEqualTo("6");
+            assertThat(lib("pick 0; pick 0; pick 0").rc()).isZero();
+            assertThat(Files.readAllLines(log)).as("value '%s': one line however many picks", bad).hasSize(1);
+            assertThat(Files.readString(log)).contains("mem-claim-gb: file " + claim + ": \"" + bad + "\" is not a positive integer: E falls back to 6 GB");
+        }
+
+        Files.writeString(claim, "abc\n");
+        lib("pick 0");
+        Files.writeString(claim, "x7\n");
+        lib("pick 0");
+        assertThat(Files.readAllLines(log)).as("a changed value is a new line").hasSize(2).last().asString().contains("\"x7\"");
+        Files.writeString(claim, "9\n");
+        lib("pick 0");
+        assertThat(Files.readAllLines(log)).as("a valid value logs nothing").hasSize(2);
+        Files.writeString(claim, "x7\n");
+        lib("pick 0");
+        assertThat(Files.readAllLines(log)).as("bad again after a valid file: logged again").hasSize(3);
+
+        Files.deleteIfExists(log);
+        for (var quiet : List.of("", "\n\n", "5\n", "abc\n7\n")) {
+            Files.writeString(claim, quiet);
+            lib("pick 0");
+            assertThat(log).as("file '%s': default or accepted value, nothing to say", quiet.replace("\n", "|")).doesNotExist();
+        }
+
+        Files.delete(claim);
+        lib("pick 0");
+        assertThat(log).as("no file").doesNotExist();
+    }
+
+    /// N7: the `docker inspect` of queue_container_pids is bounded by `timeout 5`. A docker that hangs (the fake sleeps 25 s) must not stall the claim:
+    /// queue_claims still answers, as the over-claim E - tree (the container's 3 GB is unseen), in about 5 s, not 25.
+    @Test
+    void aHungDocker_isCutAtFiveSeconds_andTheClaimIsEMinusTheTree() throws Exception {
+        more.put("PATH", tools + ":" + System.getenv("PATH"));
+        var holder = BbFixtures.process("sleep", "600").start();
+
+        try {
+            var job = "job-" + BbFixtures.RUN;
+
+            Files.writeString(queue.resolve("running").resolve(job), "started=1\niso=1\n");
+            BbFixtures.recordLaunch(queue, job, holder.pid());
+            Files.writeString(dir.resolve("ps"), holder.pid() + " 1 " + GIB_KB + " bash bb-build __run\n"
+                                                  + "777000 700 " + 1000 + " docker-init\n" + "777001 777000 " + (3 * GIB_KB - 1000) + " java maven\n");
+            Files.writeString(dir.resolve("container-pids"), "bb-" + job + " 777000\n");
+            Files.writeString(dir.resolve("docker-hangs"), "");
+
+            var t0 = System.nanoTime();
+            var out = lib("queue_claims").stdout().strip();
+            var seconds = (System.nanoTime() - t0) / 1_000_000_000.0;
+
+            assertThat(out).as("the hung docker adds 0: E - tree").isEqualTo(job + " " + holder.pid() + " " + GIB_KB + " " + 5 * GIB_KB);
+            assertThat(seconds).as("cut at 5 s, well under the 25 s hang").isLessThan(15.0);
+        } finally {
+            holder.destroyForcibly();
         }
     }
 
