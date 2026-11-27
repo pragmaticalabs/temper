@@ -668,6 +668,38 @@ class BbRcTicketRecordIT {
         assertThat(report.out()).contains("rc=15", "refused: timeout: the stale-jar check did not finish within BB_CP_READ_TIMEOUT=3s; its process group was killed");
     }
 
+    /// #131: bb-temper wait and report carry bb-result's `outcome:` line for a finished rc 137 / 124 ticket that has the kernel window, and only then.
+    /// Probes: drop the echo in either verb -> that half red; label an rc 1 ticket (drop the rc case) -> the last assertions red; print for a ticket of before #131 -> the `old` half red.
+    @Test
+    void waitAndReport_ofAKilledTicket_printTheOutcomeLine_andNoOtherTicketDoes() throws Exception {
+        temperSandbox();
+        var tools = Files.createDirectories(home.resolve("tools"));
+
+        BbFixtures.executable(tools.resolve("bb-result"), Files.readString(BbFixtures.OPS_BB.resolve("bb-result")));
+        tq("done", "1000000000000000003-1", "state=finished\nrc=137\nended=130\noom_kill_start=5\noom_kill_end=6\nmem_avail_kb_start=10\nmem_avail_kb_end=9\n");
+        fileRc("137");
+        var wait = temper("wait");
+        var report = temper("report");
+
+        assertThat(wait.rc()).as(wait.err()).isEqualTo(137);
+        assertThat(wait.out()).contains("rc=137", "outcome: OOM-KILLED (kernel oom_kill 5 -> 6");
+        assertThat(report.out()).contains("rc=137", "outcome: OOM-KILLED (kernel oom_kill 5 -> 6");
+
+        Files.delete(dir.resolve("tq/done/1000000000000000003-1"));
+        tq("done", "1000000000000000004-1", "state=finished\nrc=137\nended=130\n");
+        var old = temper("wait");
+
+        assertThat(old.rc()).as(old.err()).isEqualTo(137);
+        assertThat(old.out()).contains("rc=137").doesNotContain("outcome");
+        assertThat(temper("report").out()).contains("rc=137").doesNotContain("outcome");
+
+        Files.delete(dir.resolve("tq/done/1000000000000000004-1"));
+        tq("done", "1000000000000000005-1", "state=finished\nrc=1\nended=130\noom_kill_start=5\noom_kill_end=6\n");
+        fileRc("1");
+        assertThat(temper("wait").out()).contains("rc=1").doesNotContain("outcome");
+        assertThat(temper("report").out()).contains("rc=1").doesNotContain("outcome");
+    }
+
     @Test
     void wait_ofACheckoutWithNoTicket_usesTheFile_andSaysSourceFile() throws Exception {
         temperSandbox();

@@ -9,6 +9,8 @@
 #                   instead of waited on forever), print bb-wait's line `ticket=<id> state=<state> rc=<rc> wall=.. wait=.. run=.. log=..`
 #                   (a REFUSED ticket, bb-test rc 15, adds `refused: <reason>` after it) and exit with the ticket's rc: the maven exit status when state=finished. Other states: 9 cancelled/abandoned,
 #                   5 expired, 70 orphaned or finished without a numeric rc, 4 the ticket is in none of waiting/running/done.
+#                   A finished ticket with rc 124 or 137 gets one more line, `outcome: OOM-KILLED|KILLED (<why>)`, when bb-result (next to this file) labels it from the kernel window bb-build wrote
+#                   into the ticket (#131; the rules are in bb-result's header; nothing for any other ticket, a ticket of before #131, or an absent bb-result).
 #                   A maven rc equal to one of those codes is told apart by the printed state=. The checkout's .bb/rc is not read
 #                   (the ticket record is the verdict); bb-wait remains the tool that reports RC-MISMATCH (71).
 #   --file <path>   wait until the path exists (any file type); prints `awaited file=<path> present`, exit 0.
@@ -89,6 +91,7 @@ ticket_check() {
   log=$(field "$f" output); [ -n "$log" ] || log=$(field "$f" co)/.bb/build.log
   echo "ticket=$ARG state=${st:-?} rc=${rc:--} wall=${wall}s wait=${wt}s run=${rn}s log=$log"
   ref=$(field "$f" refused); [ -z "$ref" ] || echo "refused: $ref"   # CTO ruling R3: the refusal replaces the verdict on every surface
+  case "$st:$rc" in finished:124|finished:137) [ ! -f "$(dirname "$SELF")/bb-result" ] || timeout 30 python3 "$(dirname "$SELF")/bb-result" "$ARG" --outcome 2> /dev/null || true;; esac   # #131
   case "$st" in
     finished) num "$rc" && exit "$rc"; exit 70;;
     cancelled|abandoned) exit 9;;
