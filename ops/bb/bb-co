@@ -6,7 +6,7 @@
 #
 # INVARIANT (#135): without a named host (or with --host auto) the checkout is created on the host with pick "auto" that has the fewest WAITING
 # tickets; ties break by running/cap (lower wins), then load5 per core (lower wins), then config order. --host <name> (a configured host, pick
-# auto or explicit) uses exactly that host and makes no queue probe.
+# auto or explicit) uses exactly that host and makes no queue probe, and needs no host with pick auto in the config.
 # ENFORCER: the pick inside this script, at checkout time. Host affinity is not enforced anywhere else, it FOLLOWS from the checkout existing on
 # one host only: every later bb-submit / bb-temper / bb-mutate / fetch names the checkout path on the host that holds it. bb-mutate runs ON that
 # host against the checkout directory it is given and queues its control and mutant tickets through that host's ~/tools/bb-build, so a run cannot
@@ -37,8 +37,15 @@
 #   - --host <name> cannot see another host: a <name> that exists elsewhere is created again here (bb-checkout's own refusal only covers its host).
 #   - An explicit-pick host is never auto-picked and not probed for an existing <name>.
 #   - ssh exit 255 from bb-checkout is ambiguous (the host may have acted); it is passed on with a line saying so.
-# Exit: 0 ok | 2 usage, a malformed value, an unknown --host | 3 <name> exists on a probed host (also bb-checkout's own 3) | 69 no host answered, or the named host is
-# unreachable | 78 host config missing or malformed | else bb-checkout's exit code (4 owner guard, 5 ref not found, 6 mirror lock, 7 fetch bound, ...).
+#   - The bb-checkout step has no bound of its own beyond ssh's ConnectTimeout 15 (the same as bb-temper's verbs): a session that hangs after it connected
+#     holds bb-co until bb-checkout's own fetch/lock bounds end it.
+#   - "When bb-co exits no process it started is alive" holds for every probe ssh, probe watchdog and the ssh of a probe's path choice (process groups, see
+#     the pick). It does not cover (1) a ControlPersist master of a jumped host (detached on purpose, 10 minutes, shared with bb-temper) and (2) the idle
+#     `sleep` of probe_path's watchdog in the path-choice block for the CHOSEN host (up to 17 s, no connection; the block is a verbatim copy of bb-temper's).
+#   - A TERM/HUP/INT of bb-co during the pick is handled (probes killed, exit 1); during the bb-checkout step ssh is left to ssh's own signal handling.
+# Exit: 0 ok | 2 usage, a malformed value, an unknown --host | 3 <name> exists on a probed host (also bb-checkout's own 3) | 69 no host answered the pick, or
+# a named host that has a jump is unreachable by both paths | 78 host config missing or malformed | else bb-checkout's exit code (4 owner guard, 5 ref not found,
+# 6 mirror lock, 7 fetch bound, ...). A named host WITHOUT a jump that is down fails inside the checkout step: ssh's own 255, with the ambiguity line.
 # bash 3.2 and BSD tools (macOS), also GNU; python3 for the ranking.
 set -euo pipefail
 PROG=bb-co
@@ -225,8 +232,9 @@ WALL=${BB_CO_PROBE_WALL:-30}
 [[ $WALL =~ ^[0-9]{1,3}$ ]] && [ "$WALL" -ge 1 ] || die 2 "BB_CO_PROBE_WALL must be 1 to 3 digits, at least 1 (seconds)"
 
 load_hosts
-auto_hosts
-if [ "$want" != auto ]; then host_index "$want" > /dev/null || die 2 "--host must be auto or a host of $HOSTS_FILE (${H_NAME[*]})"; fi
+# a named host decides before auto_hosts: --host <name> needs no host with pick auto in the config
+if [ "$want" = auto ]; then auto_hosts
+else host_index "$want" > /dev/null || die 2 "--host must be auto or a host of $HOSTS_FILE (${H_NAME[*]})"; fi
 
 # The remote probe (POSIX sh on the host): key=value lines, ending with probe=ok so a truncated reply is never read as a short queue.
 read -r -d '' PROBE <<'EOF_PROBE' || true
@@ -296,13 +304,19 @@ EOF_PY
 if [ "$want" != auto ]; then chosen=$want
 else
   tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
-  trap 'exit 1' INT TERM HUP
   pids=(); args=()
+  # INVARIANT: when bb-co exits, no process its probes started is alive. Each probe runs in a process group of its own (set -m only around the
+  # launch), so one `kill -- -<pid>` reaches the ssh a watchdog did not kill (the watchdog kills the subshell that runs ssh, not ssh itself), the
+  # watchdog's sleep, and the ssh of a path probe; it runs after every probe was waited for and on INT/TERM/HUP. A ControlPersist master (jumped
+  # hosts) detaches with setsid, so it is not in the group: it stays 10 minutes by design, shared with bb-temper.
+  kill_probes() { local q; for q in ${pids[@]+"${pids[@]}"}; do kill -s TERM -- "-$q" 2> /dev/null || true; done; }
+  trap 'kill_probes; for q in ${pids[@]+"${pids[@]}"}; do wait "$q" 2> /dev/null || true; done; exit 1' INT TERM HUP
   for h in "${AUTO[@]}"; do
-    ( probe_one "$h" "$tmp/$h" ) & pids+=($!)
+    set -m; ( probe_one "$h" "$tmp/$h" ) & pids+=($!); set +m
     args+=("$h=$tmp/$h")
   done
   for p in "${pids[@]}"; do wait "$p" || true; done
+  kill_probes
   for h in "${AUTO[@]}"; do [ -e "$tmp/$h" ] || : > "$tmp/$h"; [ -s "$tmp/$h" ] || [ -e "$tmp/$h.err" ] || echo "unreachable (no path to it answered)" > "$tmp/$h.err"; done
   out=$(python3 -I -c "$PICK_PY" "${args[@]}") || die 1 "the pick failed to rank the probe replies"
   printf '%s\n' "$out" | sed -n -E 's/^(SKIP|ROW) /bb-co: \1 /p' >&2

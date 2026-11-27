@@ -801,6 +801,68 @@ class BbMutateIT {
         assertAborted(raw("{\"build\":{},\"mutations\":[]}", "--timeout", "soon"), 2, "ABORTED: --timeout takes a number of minutes");
     }
 
+    /// Every exit site of spec_load() and of the argument loop that writes ABORTED, one row each (v135b: reachable, were unpinned).
+    /// Mutation: `except OSError` branch of spec_load removed -> an uncaught IsADirectoryError (first line `ABORTED: uncaught`), red.
+    @Test
+    void aSpecThatCannotBeRead_leavesAbortedResults() throws Exception {
+        Files.createDirectories(dir.resolve(RAW_SPEC));
+
+        assertAborted(raw(null), 2, "ABORTED: spec unreadable: " + dir.resolve(RAW_SPEC));
+    }
+
+    /// Mutation: drop the `isinstance(spec, dict)` check -> `[1]` fails in `key not in spec` as a TypeError-free `"build" missing`, wrong first line, red.
+    @Test
+    void aSpecThatIsNotAJsonObject_leavesAbortedResults() throws Exception {
+        assertAborted(raw("[1]"), 2, "ABORTED: spec is not a JSON object: " + dir.resolve(RAW_SPEC));
+    }
+
+    /// Mutation: drop the kind check of the loop, or swap its two kinds -> the wrong or no line, red.
+    @Test
+    void aSpecKeyOfTheWrongType_leavesAbortedResults_namingTheTypeItNeeds() throws Exception {
+        assertAborted(raw("{\"build\":[],\"mutations\":[]}"), 2, "ABORTED: spec \"build\" is not a JSON object: " + dir.resolve(RAW_SPEC));
+        assertAborted(raw("{\"build\":{},\"mutations\":{}}"), 2, "ABORTED: spec \"mutations\" is not a JSON array: " + dir.resolve(RAW_SPEC));
+    }
+
+    /// `--timeout` as the last argument raises IndexError in the argument loop, not ValueError.
+    /// Mutation: `except (IndexError, ValueError)` back to `except ValueError` -> an uncaught IndexError (rc 1, `ABORTED: uncaught`), red.
+    @Test
+    void aTimeoutFlagWithoutAValue_leavesAbortedResults() throws Exception {
+        assertAborted(raw("{\"build\":{},\"mutations\":[]}", "--timeout"), 2, "ABORTED: --timeout takes a number of minutes");
+    }
+
+    /// The usage exit comes before the out dir exists (OUT is None): exit 2 and the usage text, no traceback, nothing created. A bare
+    /// `sys.exit(2)` reaches the top-level handler, whose `not OUT` guard must let it pass.
+    /// Mutation: drop `not OUT` from abort_results -> a TypeError from os.path.join(None, ...) out of the handler (rc 1, Traceback), red.
+    @Test
+    void aWrongNumberOfArguments_isUsageExitTwo_withNoOutDirAndNoTraceback() throws Exception {
+        var out = dir.resolve("out-raw");
+        var run = BbFixtures.run(List.of("python3", TOOL.toString(), co.toString(), dir.resolve(RAW_SPEC).toString()),
+                                 Map.of("PATH", System.getenv("PATH"), "HOME", home.toString(), "BB_OWNER", "t"),
+                                 null,
+                                 null);
+
+        assertThat(run.rc()).as(run.stderr()).isEqualTo(2);
+        assertThat(run.stderr()).contains("bb-mutate <checkout-dir> <spec.json> <out-dir>").doesNotContain("Traceback");
+        assertThat(out).doesNotExist();
+    }
+
+    /// A reason with a newline keeps its first line in the `ABORTED:` line and the rest in a fenced block (a spec path may hold a newline).
+    /// Mutation: abort_results writes the whole reason on the first line, or drops the fence -> red.
+    @Test
+    void aReasonOfSeveralLines_putsTheRestInAFencedBlock() throws Exception {
+        var specPath = dir.resolve("spec\nraw.json");
+        var out = dir.resolve("out-raw");
+        var run = BbFixtures.run(List.of("python3", TOOL.toString(), co.toString(), specPath.toString(), out.toString()),
+                                 Map.of("PATH", System.getenv("PATH"), "HOME", home.toString(), "BB_OWNER", "t"),
+                                 null,
+                                 null);
+        var md = read(out.resolve("results.md"));
+
+        assertThat(run.rc()).as(run.stderr()).isEqualTo(2);
+        assertThat(md.lines().findFirst().orElse("")).isEqualTo("ABORTED: spec not found: " + dir.resolve("spec"));
+        assertThat(md).contains("\n```\nraw.json\n```\n");
+    }
+
     /// The preflight die(), the real incident's other face (a checkout whose maven.config is not its own): results.md names it, and a results.md that an
     /// earlier run left in the same out dir is replaced, never left to read as this run's.
     /// Mutation: drop `abort_results` from die() -> the stale file stays, red.

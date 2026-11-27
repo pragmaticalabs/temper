@@ -60,7 +60,8 @@ class BbCoIT {
                               [ ! -e "$STUBS/down.$h" ] || exit 255
                               [ "${@: -1}" = true ] && { echo "$h" >> "$STUBS/path-probe.log"; exit 0; }
                               printf '%s: %s\\n' "$h" "${@: -1}" >> "$STUBS/ssh.log"
-                              [ ! -e "$STUBS/hang.$h" ] || exec sleep 30
+                              [ ! -e "$STUBS/hang.$h" ] || { echo $$ >> "$STUBS/hang-pids"; exec sleep 30; }
+                              case ${@: -1} in *probe=ok*) [ ! -e "$STUBS/reply.$h" ] || { cat "$STUBS/reply.$h"; exit "$(cat "$STUBS/reply-rc.$h" 2> /dev/null || echo 0)"; } ;; esac
                               HOME=$STUBS/hosts/$h BB_TEST_LOADAVG=$STUBS/hosts/$h/loadavg BB_TEST_NPROC=$(cat "$STUBS/hosts/$h/cores") exec bash -c "${@: -1}"
                               """);
         for (var n : NAMES) {
@@ -176,6 +177,34 @@ class BbCoIT {
         return sshCalls().stream().filter(l -> l.contains("tools/bb-checkout t3-")).toList();
     }
 
+    /// A host whose probe answers with this exact text (and ssh exit `rc`) instead of reading its fake queue.
+    private void reply(String host, int rc, String text) throws IOException {
+        Files.writeString(dir.resolve("reply." + host), text);
+        Files.writeString(dir.resolve("reply-rc." + host), rc + "\n");
+    }
+
+    private static String replyOf(int waiting, int cap, int cores, String probe) {
+        return "waiting=%d\nrunning=0\ncap=%d\nload5=0.10\ncores=%d\nexists=0\nprobe=%s\n".formatted(waiting, cap, cores, probe);
+    }
+
+    /// The pids of the stub's hung ssh calls (the stub execs sleep, so its pid is the hung process).
+    private List<Long> hungPids() throws IOException {
+        var f = dir.resolve("hang-pids");
+
+        return Files.exists(f) ? Files.readAllLines(f).stream().map(String::strip).filter(l -> !l.isEmpty()).map(Long::parseLong).toList() : List.of();
+    }
+
+    /// Polls up to 10 s: the kill is delivered before bb-co exits, reaping an orphan is the init's.
+    private static boolean gone(long pid) throws InterruptedException {
+        for (var i = 0; i < 100; i++) {
+            if (!ProcessHandle.of(pid).map(ProcessHandle::isAlive).orElse(false)) {
+                return true;
+            }
+            Thread.sleep(100);
+        }
+        return false;
+    }
+
     private boolean anySsh() {
         return Files.exists(dir.resolve("ssh.log")) || Files.exists(dir.resolve("path-probe.log"));
     }
@@ -228,6 +257,32 @@ class BbCoIT {
         host("bigboy").waiting(1).running(1).load(7.2).cores(8);
         host("cloudbb-9").waiting(1).running(1).load(3.0).cores(4);
         host("cloudbb-10").waiting(1).running(1).load(4.0).cores(8);
+
+        var run = co("t3-x", "main");
+
+        assertThat(run.rc()).as(run.err()).isZero();
+        assertThat(run.out()).isEqualTo("HOST=cloudbb-10\n");
+    }
+
+    @Test
+    void equalWaiting_runningOverCapOutranksLoad_whereTheTwoDisagree() throws Exception {
+        // cloudbb-9 has the lowest running/cap (1/3) but the highest load (8 on 8 cores); bigboy and cloudbb-10 are idle-cold but 2/3. Load before running/cap picks bigboy.
+        host("bigboy").waiting(2).running(2).load(0.0).cores(8);
+        host("cloudbb-9").waiting(2).running(1).load(8.0).cores(8);
+        host("cloudbb-10").waiting(2).running(2).load(0.5).cores(8);
+
+        var run = co("t3-x", "main");
+
+        assertThat(run.rc()).as(run.err()).isZero();
+        assertThat(run.out()).isEqualTo("HOST=cloudbb-9\n");
+    }
+
+    @Test
+    void equalWaitingAndRunningOverCap_loadOutranksConfigOrder_whereTheTwoDisagree() throws Exception {
+        // bigboy is first in the config but the hottest; cloudbb-10 is last and coolest. Config order before load picks bigboy.
+        host("bigboy").waiting(1).running(1).load(6.0).cores(8);
+        host("cloudbb-9").waiting(1).running(1).load(4.0).cores(8);
+        host("cloudbb-10").waiting(1).running(1).load(1.0).cores(8);
 
         var run = co("t3-x", "main");
 
@@ -397,6 +452,9 @@ class BbCoIT {
                           List.of("t3-x", "a b"),
                           List.of("t3-x", "$(id)"),
                           List.of("t3-x", "--upload-pack=x"),
+                          List.of("t3-x", "-x"),
+                          List.of("t3-x", "--x"),
+                          List.of("t3-x", "-"),
                           List.of("t3-x", "m'ain"),
                           List.of("t3-x", "main\nid"),
                           List.of("-t3-x", "main"),
@@ -462,6 +520,155 @@ class BbCoIT {
 
         assertThat(run.out()).isEqualTo("HOST=bigboy\n");
         assertThat(run.err()).contains("bigboy waiting=0");
+    }
+
+    @Test
+    void aProbesRef_withSlashes_isAcceptedAndForwarded() throws Exception {
+        var run = co("t3-x", "probes/t3/x");
+
+        assertThat(run.rc()).as(run.err()).isZero();
+        assertThat(checkoutCalls()).hasSize(1).first().asString().isEqualTo("bigboy: BB_OWNER=t3 ~/tools/bb-checkout t3-x probes/t3/x");
+    }
+
+    /// INVARIANT: when bb-co exits, no process it started is alive. Probe: a watchdog that kills only the subshell around ssh (the code before
+    /// the process-group kill) leaves the hung stub alive for its 30 s.
+    @Test
+    void aProbeThatNeverAnswers_leavesNoProcessAliveWhenBbCoExits() throws Exception {
+        host("bigboy").waiting(0).hangs();
+        host("cloudbb-9").waiting(3);
+
+        var run = co(env("BB_CO_PROBE_WALL", "2"), "t3-x", "main");
+
+        assertThat(run.rc()).as(run.err()).isZero();
+        assertThat(run.out()).isEqualTo("HOST=cloudbb-9\n");
+        assertThat(hungPids()).as("the probe of bigboy did hang").hasSize(1);
+        for (var pid : hungPids()) {
+            assertThat(gone(pid)).as("hung ssh " + pid + " is dead after bb-co returned").isTrue();
+        }
+    }
+
+    @Test
+    void aTermDuringThePick_killsEveryProbe_andExitsOne() throws Exception {
+        host("bigboy").waiting(0).hangs();
+        var command = new ArrayList<>(List.of("bash", Path.of("..", "ops", "bb", "bb-co").toAbsolutePath().normalize().toString(), "t3-x", "main"));
+        var proc = MacScripts.background(command, env("BB_CO_PROBE_WALL", "60"), dir);
+
+        try {
+            var deadline = System.nanoTime() + 30_000_000_000L;
+
+            while (hungPids().isEmpty() && System.nanoTime() < deadline) {
+                Thread.sleep(50);
+            }
+            assertThat(hungPids()).as("the probe of bigboy is hanging").hasSize(1);
+            proc.destroy();
+            assertThat(proc.waitFor(30, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+            assertThat(proc.exitValue()).isEqualTo(1);
+            assertThat(gone(hungPids().getFirst())).as("the hung ssh died with bb-co, not after the 60 s wall").isTrue();
+            assertThat(checkoutCalls()).isEmpty();
+        } finally {
+            proc.destroyForcibly();
+        }
+    }
+
+    @Test
+    void aNamedHost_needsNoAutoHostInTheConfig() throws Exception {
+        Files.writeString(home.resolve(".config/bb-temper/hosts"),
+                          "key ~/.ssh/id_test\nhost cloudbb-d1 %s - - explicit\n".formatted(D1_ADDR));
+
+        var named = co("--host", "cloudbb-d1", "t3-x", "main");
+
+        assertThat(named.rc()).as(named.err()).isZero();
+        assertThat(named.out()).isEqualTo("HOST=cloudbb-d1\n");
+        var auto = co("t3-y", "main");
+
+        assertThat(auto.rc()).as("an auto pick still needs an auto host").isEqualTo(78);
+        assertThat(auto.err()).contains("no host with pick auto");
+    }
+
+    @Test
+    void aNamedHostWithoutAJump_thatIsDown_isSshsOwn255_withTheAmbiguityLine_andNoHostLine() throws Exception {
+        host("bigboy").down();
+
+        var run = co("--host", "bigboy", "t3-x", "main");
+
+        assertThat(run.rc()).as(run.err()).isEqualTo(255);
+        assertThat(run.out()).isEmpty();
+        assertThat(run.err()).contains("may or may not have created t3-x");
+    }
+
+    @Test
+    void aNamedHostWithAJump_thatIsDownByBothPaths_isExit69_andNothingIsRun() throws Exception {
+        host("cloudbb-9").down();
+
+        var run = co("--host", "cloudbb-9", "t3-x", "main");
+
+        assertThat(run.rc()).as(run.err()).isEqualTo(69);
+        assertThat(run.out()).isEmpty();
+        assertThat(run.err()).contains("cloudbb-9 unreachable");
+        assertThat(checkoutCalls()).isEmpty();
+    }
+
+    @Test
+    void aBbCheckoutFailureOf255_adds_theAmbiguityLine() throws Exception {
+        Files.writeString(dir.resolve("co.rc"), "255\n");
+
+        var run = co("t3-x", "main");
+
+        assertThat(run.rc()).isEqualTo(255);
+        assertThat(run.out()).isEmpty();
+        assertThat(run.err()).contains("ssh exit 255: the host may or may not have created t3-x");
+    }
+
+    @Test
+    void theCapFileCounts_itsFirstValidLine_notTheLast() throws Exception {
+        host("bigboy").waiting(1).running(1);
+        Files.writeString(dir.resolve("hosts/bigboy/work/max-reactors"), "2\n9\n");
+        host("cloudbb-9").waiting(1).running(1);
+        host("cloudbb-10").waiting(1).running(1);
+
+        var run = co("t3-x", "main");
+
+        assertThat(run.rc()).as(run.err()).isZero();
+        assertThat(run.err()).contains("bigboy waiting=1 running=1/2");
+    }
+
+    @Test
+    void aReplyWhoseProbeMarkerIsNotOk_isSkipped() throws Exception {
+        reply("bigboy", 0, replyOf(0, 3, 8, "no"));
+        host("cloudbb-9").waiting(1);
+        host("cloudbb-10").waiting(2);
+
+        var run = co("t3-x", "main");
+
+        assertThat(run.rc()).as(run.err()).isZero();
+        assertThat(run.out()).isEqualTo("HOST=cloudbb-9\n");
+        assertThat(run.err()).contains("SKIP bigboy skip: malformed probe reply");
+    }
+
+    @Test
+    void aCompleteReply_ofAFailedSsh_isNeverUsed() throws Exception {
+        reply("bigboy", 1, replyOf(0, 3, 8, "ok"));
+        host("cloudbb-9").waiting(1);
+        host("cloudbb-10").waiting(2);
+
+        var run = co("t3-x", "main");
+
+        assertThat(run.rc()).as(run.err()).isZero();
+        assertThat(run.out()).isEqualTo("HOST=cloudbb-9\n");
+        assertThat(run.err()).contains("SKIP bigboy skip: ssh rc 1");
+    }
+
+    @Test
+    void aHostReportingZeroCores_orZeroCap_isSkipped_notAnArithmeticCrash() throws Exception {
+        host("bigboy").waiting(0).cores(0);
+        reply("cloudbb-9", 0, replyOf(0, 0, 8, "ok"));
+        host("cloudbb-10").waiting(5);
+
+        var run = co("t3-x", "main");
+
+        assertThat(run.rc()).as(run.err()).isZero();
+        assertThat(run.out()).isEqualTo("HOST=cloudbb-10\n");
+        assertThat(run.err()).contains("SKIP bigboy skip: malformed probe reply", "SKIP cloudbb-9 skip: malformed probe reply");
     }
 
     @Test
