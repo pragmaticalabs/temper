@@ -11,7 +11,6 @@ import java.util.Map;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
-import org.pragmatica.temper.testsupport.HermeticProcess;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -209,7 +208,7 @@ class BbCoIT {
 
     /// The pids of every live process in process group `pgid` (ps, because the JDK does not expose groups).
     private static List<Long> membersOf(long pgid) throws Exception {
-        var ps = HermeticProcess.builder("ps", "-axo", "pid=,pgid=").redirectErrorStream(true).start();
+        var ps = BbFixtures.process("ps", "-axo", "pid=,pgid=").redirectErrorStream(true).start();
         var out = new String(ps.getInputStream().readAllBytes());
 
         ps.waitFor();
@@ -607,7 +606,7 @@ class BbCoIT {
             assertThat(membersOf(probe[1])).as("the probe group is alive before the signal").contains(probe[0]);
             var t0 = System.nanoTime();
 
-            assertThat(HermeticProcess.builder("sh", "-c", "kill -s " + signal + " " + proc.pid()).inheritIO().start().waitFor()).isZero();
+            assertThat(BbFixtures.process("sh", "-c", "kill -s " + signal + " " + proc.pid()).inheritIO().start().waitFor()).isZero();
             assertThat(proc.waitFor(30, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
             assertThat((System.nanoTime() - t0) / 1_000_000_000L).as("seconds from " + signal + " to exit: well below the 60 s wall").isLessThan(20);
             assertThat(proc.exitValue()).isEqualTo(1);
@@ -618,7 +617,7 @@ class BbCoIT {
             proc.destroyForcibly();
             if (probe != null) {
                 for (var q : membersOf(probe[1])) {
-                    HermeticProcess.builder("sh", "-c", "kill -9 " + q).start().waitFor();
+                    BbFixtures.process("sh", "-c", "kill -9 " + q).start().waitFor();
                 }
             }
         }
