@@ -171,6 +171,24 @@ class BbCoGcIT {
         Files.writeString(log, row, java.nio.file.StandardOpenOption.APPEND);
     }
 
+    /// A `df` that reports `percent` use for `--output=pcent <dir>`, in df's own two lines (header, value). Outside `home`.
+    private Path fakeDf(int percent) throws IOException {
+        return BbFixtures.executable(procRoot.resolve("df-" + percent), "#!/bin/sh\nprintf 'Use%%\\n %s%%\\n' " + percent + "\n");
+    }
+
+    /// A `df` that records that it was called, then reports 10%.
+    private Path recordingDf(Path marker) throws IOException {
+        return BbFixtures.executable(procRoot.resolve("df-recording"), "#!/bin/sh\n: > '" + marker + "'\nprintf 'Use%%\\n  10%%\\n'\n");
+    }
+
+    private Map<String, String> atUse(int percent) throws IOException {
+        return Map.of("BB_CO_GC_DF", fakeDf(percent).toString());
+    }
+
+    private Path payload(Path checkout) {
+        return checkout.resolve("module/target/payload.bin");
+    }
+
     private BbFixtures.Outcome gc(String... args) throws Exception {
         return gcWith(Map.of(), args);
     }
@@ -181,6 +199,7 @@ class BbCoGcIT {
 
         env.putIfAbsent("PATH", System.getenv("PATH"));
         env.putIfAbsent("BB_CO_GC_PROC", fakeProc().toString());
+        env.putIfAbsent("BB_CO_GC_DF", fakeDf(10).toString());   // the build host's real disk must not decide: 10% is below the floor
         env.put("HOME", home.toString());
         env.put("USER", System.getProperty("user.name"));
         var command = new java.util.ArrayList<String>();
@@ -836,6 +855,210 @@ class BbCoGcIT {
     }
 
     // ---- command stubs: state that changes at an exact step of the run (#113 test round)
+    // ---- #154: --hours, and the pressure floor that waives the deferral
+    /// At 81% a running port-group ticket does NOT defer the pass: the idle checkout is removed (old code: `deferred: builds running`, nothing removed),
+    /// and with 5 tickets running at cap 5 (more than half) it runs too. The age stays the given --days 3: a checkout of 2 days is kept.
+    @Test
+    void atOrAboveTheFloor_aRunningGroupTicketOrMoreThanHalfTheCap_doesNotDeferThePass() throws Exception {
+        skeleton();
+        var idle = checkout("idle", 10);
+        var young = checkout("young", 2);
+
+        ticket("running", "r1", "busy", "group=1");
+        var grouped = gcWith(atUse(81), "--live", "--days", "3", "--pace", "0");
+
+        assertThat(grouped.rc()).as(grouped.stdout() + grouped.stderr()).isZero();
+        assertThat(idle).as(grouped.stdout()).doesNotExist();
+        assertThat(payload(young)).exists();
+        assertThat(grouped.stdout()).contains("pressure: use=81% floor=80% pressure=yes deferral=waived (running=1 group=1 cap=3)")
+                  .doesNotContain("deferred: builds running");
+        assertThat(logLines()).anyMatch(l -> l.contains(" PRESSURE deferral waived use=81 floor=80 running=1 group=1 cap=3"));
+        Files.delete(home.resolve("work/queue/running/r1"));
+        var idle2 = checkout("idle2", 10);
+
+        Files.writeString(home.resolve("work/max-reactors"), "5\n");
+        for (var i = 1; i <= 5; i++) {
+            ticket("running", "f" + i, "busy" + i);
+        }
+
+        var five = gcWith(atUse(81), "--live", "--days", "3", "--pace", "0");
+
+        assertThat(five.rc()).as(five.stdout() + five.stderr()).isZero();
+        assertThat(idle2).as(five.stdout()).doesNotExist();
+        assertThat(five.stdout()).contains("deferral=waived (running=5 group=0 cap=5)");
+    }
+
+    /// The floor is 80, inclusive: at 79 the group ticket defers the pass as before (nothing removed, the old DEFERRED line), at exactly 80 it does not.
+    /// Mutation: `-ge` to `-gt` on the floor -> the 80 half stays deferred, red; drop the floor test -> the 79 half runs, red.
+    @Test
+    void belowTheFloorTheDeferralStands_atTheFloorItIsWaived() throws Exception {
+        skeleton();
+        var idle = checkout("idle", 10);
+
+        ticket("running", "r1", "busy", "group=1");
+        var below = gcWith(atUse(79), "--live", "--days", "3", "--pace", "0");
+
+        assertThat(below.rc()).as(below.stdout() + below.stderr()).isZero();
+        assertThat(below.stdout()).contains("pressure: use=79% floor=80% pressure=no deferral=applies (running=1 group=1 cap=3)",
+                                            "deferred: builds running (running=1 group=1 cap=3); nothing removed");
+        assertThat(payload(idle)).exists();
+        assertThat(Files.readString(home.resolve("work/co-gc.log"))).contains("DEFERRED builds running running=1 group=1 cap=3")
+                  .doesNotContain("RUN live").doesNotContain("PRESSURE");
+        var at = gcWith(atUse(80), "--live", "--days", "3", "--pace", "0");
+
+        assertThat(at.rc()).as(at.stdout() + at.stderr()).isZero();
+        assertThat(idle).as(at.stdout()).doesNotExist();
+    }
+
+    /// A df that cannot be read is `unknown`, not pressure: the deferral stands, and the line says so.
+    @Test
+    void anUnreadableDf_isNoPressure_theDeferralStands() throws Exception {
+        skeleton();
+        var idle = checkout("idle", 10);
+        var broken = BbFixtures.executable(procRoot.resolve("df-broken"), "#!/bin/sh\necho 'df: cannot read' >&2\nexit 1\n");
+
+        ticket("running", "r1", "busy", "group=1");
+        var run = gcWith(Map.of("BB_CO_GC_DF", broken.toString()), "--live", "--days", "3", "--pace", "0");
+
+        assertThat(run.stdout()).contains("pressure: use=unknown% floor=80% pressure=unknown deferral=applies", "deferred: builds running");
+        assertThat(payload(idle)).exists();
+    }
+
+    /// --hours is the window in hours, by last use, in both spellings: a checkout idle 5 h is kept as recent, one idle 7 h is removed, and --hours 8
+    /// keeps the 7 h one (old code: `--hours` is a usage error, rc 2).
+    @Test
+    void hours_setsTheWindow_aCheckoutIdleFiveHoursIsKept_sevenIsRemoved() throws Exception {
+        skeleton();
+        var five = checkout("idle5h", 5.0 / 24);
+        var seven = checkout("idle7h", 7.0 / 24);
+        var wide = gc("--live", "--hours=8", "--pace", "0");
+
+        assertThat(wide.rc()).as(wide.stdout() + wide.stderr()).isZero();
+        assertThat(payload(five)).exists();
+        assertThat(payload(seven)).as(wide.stdout()).exists();
+        var dry = gc("--hours", "6");
+
+        assertThat(dry.rc()).as(dry.stdout() + dry.stderr()).isZero();
+        assertThat(dry.stdout()).contains("keep idle5h reasons=recent ", "candidate idle7h ", "age_hours=7 ", "hours=6;");
+        var run = gc("--live", "--hours", "6", "--pace", "0");
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        assertThat(payload(five)).as(run.stdout()).exists();
+        assertThat(seven).as(run.stdout()).doesNotExist();
+        assertThat(run.stdout()).contains("hours=6,");
+        assertLogHas("RUN live hours=6 pace=0");
+        assertThat(logLines()).anyMatch(l -> l.contains(" REMOVED path=") && l.endsWith(" hours=6"));
+    }
+
+    /// Pressure waives the deferral, not the age: at 81% with --hours 6 the 5 h checkout is still kept as recent and the 7 h one is removed, while a
+    /// group ticket runs. Mutation: age 0 under pressure -> the 5 h one goes, red.
+    @Test
+    void underPressure_theAgeStillHolds() throws Exception {
+        skeleton();
+        var five = checkout("idle5h", 5.0 / 24);
+        var seven = checkout("idle7h", 7.0 / 24);
+
+        ticket("running", "r1", "busy", "group=1");
+        var run = gcWith(atUse(81), "--live", "--hours", "6", "--pace", "0");
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        assertThat(payload(five)).as(run.stdout()).exists();
+        assertThat(run.stdout()).contains("keep idle5h reasons=recent ");
+        assertThat(seven).as(run.stdout()).doesNotExist();
+    }
+
+    /// Pressure never waives a reference guard: at 81%, while a group ticket runs, a checkout with a live ticket, an in-flight marker, a keep file or
+    /// a process with its cwd inside is kept (each with exactly its reason), next to a control that is removed.
+    /// Mutation: skip a guard when the pressure is on -> that victim goes, red.
+    @Test
+    void underPressure_everyReferenceGuardStillHolds() throws Exception {
+        skeleton();
+        var ticketed = checkout("victim-ticket", 10);
+        var queued = checkout("victim-queued", 10);
+        var started = checkout("victim-started", 10);
+        var kept = checkout("victim-keep", 10);
+        var worked = checkout("victim-process", 10);
+        var control = checkout("control", 10);
+
+        ticket("running", "r0", "busy", "group=1");
+        ticket("waiting", "w1", "victim-ticket");
+        Files.writeString(queued.resolve(".bb/queued"), "1");
+        Files.delete(started.resolve(".bb/rc"));
+        Files.writeString(kept.resolve(".bb/keep"), "");
+        var sleeper = BbFixtures.process("sleep", "120").directory(worked.resolve("module").toFile()).start();
+
+        try {
+            var proc = fakeProcWithCwd(Map.of(sleeper.pid(), worked.resolve("module")));
+            var env = new HashMap<>(atUse(81));
+
+            env.put("BB_CO_GC_PROC", proc.toString());
+            var run = gcWith(env, "--live", "--hours", "6", "--pace", "0");
+
+            assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+            assertThat(control).as(run.stdout()).doesNotExist();
+            for (var v : List.of(ticketed, queued, started, kept, worked)) {
+                assertThat(payload(v)).as(v + "\n" + run.stdout()).exists();
+            }
+
+            assertThat(run.stdout()).contains("keep victim-ticket reasons=ticket ",
+                                              "keep victim-queued reasons=in-flight ",
+                                              "keep victim-started reasons=in-flight ",
+                                              "keep victim-keep reasons=keep-file ",
+                                              "keep victim-process reasons=process ");
+        } finally {
+            stop(sleeper);
+        }
+    }
+
+    /// Bad arguments are usage (rc 2) before anything is read: --hours 0, --hours garbage, an overlarge --hours, and --hours with --days in either
+    /// order and spelling. The recording df is never called, nothing is logged, the checkout stays.
+    @Test
+    void badHoursArguments_areUsage_andNothingIsRead() throws Exception {
+        skeleton();
+        var idle = checkout("idle", 10);
+        var marker = procRoot.resolve("df-called");
+        var env = Map.of("BB_CO_GC_DF", recordingDf(marker).toString());
+
+        for (var bad : List.of(List.of("--hours", "0"),
+                               List.of("--hours", "garbage"),
+                               List.of("--hours", "87601"),
+                               List.of("--hours"),
+                               List.of("--hours", "6", "--days", "3"),
+                               List.of("--days=3", "--hours=6"))) {
+            var args = new ArrayList<String>(List.of("--live", "--pace", "0"));
+
+            args.addAll(bad);
+            var run = gcWith(env, args.toArray(String[]::new));
+
+            assertThat(run.rc()).as(bad + "\n" + run.stdout() + run.stderr()).isEqualTo(2);
+            assertThat(run.stderr()).contains("usage: bb-co-gc");
+            assertThat(payload(idle)).as(bad.toString()).exists();
+            assertThat(marker).as(bad.toString()).doesNotExist();
+        }
+
+        assertThat(home.resolve("work/co-gc.log")).doesNotExist();
+        assertThat(gcWith(env, "--hours", "87600").rc()).isZero();
+    }
+
+    /// DRY says the pressure decision and the floor, and what the deferral would do, and still changes nothing.
+    @Test
+    void dry_namesThePressureDecisionAndTheFloor() throws Exception {
+        skeleton();
+        var idle = checkout("idle", 10);
+
+        ticket("running", "r1", "busy", "group=1");
+        var before = snapshot(home);
+        var high = gcWith(atUse(95), "--hours", "6");
+        var low = gcWith(atUse(40), "--hours", "6");
+        var clear = gc("--hours", "6");
+
+        assertThat(high.stdout()).contains("pressure: use=95% floor=80% pressure=yes deferral=waived (running=1 group=1 cap=3)", "candidate idle ");
+        assertThat(low.stdout()).contains("pressure: use=40% floor=80% pressure=no deferral=applies (running=1 group=1 cap=3)");
+        assertThat(clear.stdout()).contains("pressure: use=10% floor=80% pressure=no deferral=applies");
+        assertThat(snapshot(home)).isEqualTo(before);
+        assertThat(payload(idle)).exists();
+    }
+
     /// Writes `command` into a stub directory outside `home`; the stub removes its own directory from PATH, so a plain `mv`/`flock`/`du`/`rm`
     /// inside `body` is the real command. `@PROC@`, `@CO@` (the resolved ~/work/co) and `@Q@` (the queue) are filled in.
     private void stub(String command, String body) throws IOException {
