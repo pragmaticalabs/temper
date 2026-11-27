@@ -1,0 +1,19 @@
+# bb/live-md5s.pre131: a host holding main (8ccfb7211) copies of the four files #131 changes (bb-build, bb-result, bb-wait, bb-await: their BB_*_PRE131 pins, vendored as bb/<file>.pre131.prev);
+# `repo` = whatever the repo copy of that file is when the test runs (so another lane changing bb-queue-lib.sh does not turn this row red). <file> <md5|absent|repo>; one line per install-bb-fields.sh FILES entry.
+bb-cp-record repo
+bb-test repo
+bb-testcount repo
+bb-tickets repo
+bb-hold repo
+bb-wait 8f7903a0bd8ef3a2de4f10fdb38d0950
+bb-await be58983d6f54fe48b144d06ae6108c5b
+bb-netns-run repo
+bb-portgroup.py repo
+bb-modules.py repo
+bb-jbct-bootstrap repo
+bb-result 72f89894ab1a7ddb3cf9b78a4bd2d4b8
+bb-co-gc repo
+bb-queue-lib.sh repo
+bb-queue repo
+bb-build b3afd3d43fe1ad156640bb9b534ac19e
+bb-mutate repo
