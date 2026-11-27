@@ -256,6 +256,7 @@ class BbInstallIT {
         assertThat(pin("BB_LIB_PRE116")).isEqualTo(BbFixtures.md5(prev("bb-queue-lib.sh.pre116")));
         assertThat(pin("BB_BUILD_PRE116")).isEqualTo(BbFixtures.md5(prev("bb-build.pre116")));
         assertThat(pin("BB_MUTATE_PRE116")).isEqualTo(BbFixtures.md5(prev("bb-mutate.pre116")));
+        assertThat(pin("BB_MUTATE_PRE135")).isEqualTo(BbFixtures.md5(prev("bb-mutate.pre135")));
         assertThat(pin("BB_BUILD_PRE133")).isEqualTo(BbFixtures.md5(prev("bb-build.pre133")));
         assertThat(pin("BB_BUILD_PRE131")).isEqualTo(BbFixtures.md5(prev("bb-build.pre131")));
         assertThat(pin("BB_RESULT_PRE131")).isEqualTo(BbFixtures.md5(prev("bb-result.pre131")));
@@ -1036,10 +1037,26 @@ class BbInstallIT {
         assertThat(tools.resolve("bb-mutate.bak-" + pin("BB_MUTATE_PRE100"))).hasBinaryContent(prev("bb-mutate.pre100"));
     }
 
-    /// A stranger's bb-mutate is refused with the six accepted pins named oldest first (OLD, PREVIA, PRE97, PRE100, PRE116, NEW), the order accepted_of
+    /// The bb-mutate of main before #135 (BB_MUTATE_PRE135: no ABORTED results.md for an exit before the first flush) is an accepted source and is
+    /// replaced, backed up under its md5. Mutation: drop BB_MUTATE_PRE135 from accepted_of -> the host is refused, exit 65, red.
+    @Test
+    void aHostRunningTheBbMutateBefore135_isUpdated() throws Exception {
+        var tools = host("h1");
+
+        Files.write(tools.resolve("bb-mutate"), prev("bb-mutate.pre135"));
+        var run = install("builder@h1");
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        assertThat(run.stdout()).contains("installed builder@h1 bb-mutate before=" + pin("BB_MUTATE_PRE135")
+                                         + " after=" + pin("BB_MUTATE_NEW"));
+        assertThat(tools.resolve("bb-mutate")).hasBinaryContent(Files.readAllBytes(OPS_BB.resolve("bb-mutate")));
+        assertThat(tools.resolve("bb-mutate.bak-" + pin("BB_MUTATE_PRE135"))).hasBinaryContent(prev("bb-mutate.pre135"));
+    }
+
+    /// A stranger's bb-mutate is refused with the seven accepted pins named oldest first (OLD, PREVIA, PRE97, PRE100, PRE116, PRE135, NEW), the order accepted_of
     /// defines, and nothing is written.
     @Test
-    void aStrangersBbMutate_isRefused_namingTheSixPinsOldestFirst_andNothingIsWritten() throws Exception {
+    void aStrangersBbMutate_isRefused_namingTheSevenPinsOldestFirst_andNothingIsWritten() throws Exception {
         var tools = host("h1");
 
         Files.writeString(tools.resolve("bb-mutate"), "someone else's mutation harness\n");
@@ -1053,6 +1070,7 @@ class BbInstallIT {
                                                                  + "|" + pin("BB_MUTATE_PRE97")
                                                                  + "|" + pin("BB_MUTATE_PRE100")
                                                                  + "|" + pin("BB_MUTATE_PRE116")
+                                                                 + "|" + pin("BB_MUTATE_PRE135")
                                                                  + "|" + pin("BB_MUTATE_NEW"));
         assertThat(listing(tools)).isEqualTo(before);
     }

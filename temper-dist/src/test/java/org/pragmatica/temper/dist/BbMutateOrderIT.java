@@ -344,6 +344,17 @@ class BbMutateOrderIT {
         });
     }
 
+    /// `id` once its ticket is whole. bb-build creates `waiting/<id>` as one redirected group of printfs (bb-build, "T=$Q/waiting/$ID"), so a ticket
+    /// listed by [#ids] can still lack the fields written after the first (bound=, order_at=, driver_pid=); `args=` is the last line written. A
+    /// test that reads a field of an id it took from a listing waits through this; an id taken from the submit's own output is whole already.
+    private String whole(String state, String id) throws InterruptedException {
+        assertThat(within(10,
+                          () -> unchecked(() -> Files.readAllLines(queue.resolve(state).resolve(id))).stream()
+                                                                                                    .anyMatch(line -> line.startsWith("args="))))
+                  .as("the ticket " + id + " is written whole").isTrue();
+        return id;
+    }
+
     private String field(String state, String id, String name) {
         return unchecked(() -> Files.readAllLines(queue.resolve(state).resolve(id))).stream()
                         .filter(line -> line.startsWith(name + "="))
@@ -783,7 +794,7 @@ class BbMutateOrderIT {
         ticket(queue, "running", "1-planted", "mo", true, 1, "cap=3\n");
         Files.delete(dir.resolve("hold"));
         assertThat(within(120, () -> ids("waiting").size() == 1)).as(mutateLog("mo-a")).isTrue();
-        var mutant = ids("waiting").getFirst();
+        var mutant = whole("waiting", ids("waiting").getFirst());
 
         assertThat(field("waiting", mutant, "bound")).isEqualTo("20");
         assertThat(within(60,
@@ -922,7 +933,7 @@ class BbMutateOrderIT {
               env("mo"),
               dir.resolve("mo-1.driver.log"));
         assertThat(within(60, () -> Files.exists(call))).isTrue();
-        var id = ids("waiting").getFirst();
+        var id = whole("waiting", ids("waiting").getFirst());
         var pid = field("waiting", id, "driver_pid");
 
         sigkill(Long.parseLong(pid));

@@ -43,6 +43,14 @@ bounds only queue wait (and the whole control build); a mutant that never starts
 over 999999 s, which bb-build refuses) is refused at the start, exit 2, naming --timeout; so is a mutantTimeoutSecs over 999999.
 results.tsv / results.md are rewritten (atomically) after every mutant.
 
+NO SILENT DEATH (#135): every exit that happens before results.md has been written by this run leaves results.md with the first line
+`ABORTED: <reason>` and a non-zero exit (a missing spec is `ABORTED: spec not found: <path>`). ENFORCER: die() writes it, the module's
+top-level handler writes it for an exception no die() foresaw and for a bare sys.exit, and a SIGTERM handler writes it and then dies of
+SIGTERM as before; write_results() marks the first flush, after which none of this fires and behaviour is as it was. The spec is checked
+by spec_load(): unreadable, not JSON, not an object, "build" or "mutations" missing or of the wrong type, a mutation that is not an
+object. NAMED LIMITS: an exit before the out dir is known (wrong argument count) has no results.md to write; SIGKILL cannot be caught;
+a stale results.md of an earlier run in the same out dir is replaced by the ABORTED one, never left to read as this run's.
+
 QUEUE TURN (#116; the rules are MUTANT TICKETS in bb-build's header): every build of a run (control, singles, batches, re-runs) is a
 mutant ticket, queued at once. All carry one order_at, this run's submit time taken once before the control build, which places them
 against other owners' tickets; each is still gated at its own grant. Per host at most one mutant ticket of an owner RUNS, and the owner's
@@ -61,6 +69,9 @@ BB_BUILD = os.path.join(HOME, "tools", "bb-build")
 POLL = 5
 LIFECYCLE = {"clean", "validate", "compile", "test", "package", "verify", "install", "deploy", "integration-test"}
 LOG = None
+OUT = None       # the out dir, set as soon as it exists; None: nowhere to write an ABORTED results.md
+FLUSHED = False  # write_results() has completed once: results.md is this run's
+ABORTED = False  # an ABORTED results.md has been written
 
 
 def log(msg):
@@ -69,10 +80,52 @@ def log(msg):
         LOG.write(line + "\n"); LOG.flush()
 
 
+def abort_results(reason, code):
+    """#135: leave results.md with the first line `ABORTED: <reason>` unless this run has already flushed one (or written this)."""
+    global ABORTED
+    if FLUSHED or ABORTED or not OUT:
+        return
+    first, _, rest = reason.partition("\n")
+    tmp = os.path.join(OUT, "results.md.tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(f"ABORTED: {first}\n\nbb-mutate exited {code} before its first results flush; no mutant was run or none was recorded.\n")
+            if rest:
+                f.write("\n```\n" + rest + "\n```\n")
+        os.replace(tmp, os.path.join(OUT, "results.md"))
+        ABORTED = True
+    except OSError as e:
+        print(f"bb-mutate: could not write the ABORTED results.md: {e}", file=sys.stderr)
+
+
 def die(code, msg):
     print("bb-mutate: " + msg, file=sys.stderr)
     log("FATAL " + msg)
+    abort_results(msg, code)
     sys.exit(code)
+
+
+def spec_load(spec_p):
+    """#135: the spec as (build, mutations), or die() naming what is wrong with it."""
+    try:
+        with open(spec_p, encoding="utf-8") as f:
+            spec = json.load(f)
+    except FileNotFoundError:
+        die(2, f"spec not found: {spec_p}")
+    except ValueError as e:  # json.JSONDecodeError and UnicodeDecodeError
+        die(2, f"spec is not valid JSON: {spec_p}: {e}")
+    except OSError as e:
+        die(2, f"spec unreadable: {spec_p}: {e}")
+    if not isinstance(spec, dict):
+        die(2, f"spec is not a JSON object: {spec_p}")
+    for key, kind in (("build", dict), ("mutations", list)):
+        if key not in spec:
+            die(2, f'spec has no "{key}": {spec_p}')
+        if not isinstance(spec[key], kind):
+            die(2, f'spec "{key}" is not a JSON {"object" if kind is dict else "array"}: {spec_p}')
+    if not all(isinstance(m, dict) for m in spec["mutations"]):
+        die(2, f'spec "mutations" holds an entry that is not a JSON object: {spec_p}')
+    return spec["build"], spec["mutations"]
 
 
 def git(co, *a):
@@ -450,28 +503,35 @@ def classify(res, m):
 
 # ---------------------------------------------------------------- main
 def main():
-    global LOG, SPEC_BASE, ORDER_AT
+    global LOG, OUT, SPEC_BASE, ORDER_AT
     ORDER_AT = time.time_ns()
     argv = sys.argv[1:]
     mode, timeout_min = "single", 75
+    argerr = None
     pos = []
     i = 0
     while i < len(argv):
         a = argv[i]
         if a == "--single": mode = "single"
         elif a == "--batch": mode = "batch"
-        elif a == "--timeout": i += 1; timeout_min = float(argv[i])
+        elif a == "--timeout":
+            i += 1
+            try: timeout_min = float(argv[i])
+            except (IndexError, ValueError): argerr = "--timeout takes a number of minutes"
         else: pos.append(a)
         i += 1
     if len(pos) != 3:
+        if argerr: print("bb-mutate: " + argerr, file=sys.stderr)
         print(__doc__, file=sys.stderr); sys.exit(2)
     co, spec_p, out = (os.path.abspath(p) for p in pos)
     SPEC_BASE = os.path.basename(spec_p)
     os.makedirs(out, exist_ok=True)
+    OUT = out
     LOG = open(os.path.join(out, "bb-mutate.log"), "a")
     log(f"start co={co} spec={spec_p} mode={mode} timeout={timeout_min}m")
-    spec = json.load(open(spec_p))
-    build, muts = spec["build"], spec["mutations"]
+    if argerr:
+        die(2, argerr)
+    build, muts = spec_load(spec_p)
     ids = [m.get("id") for m in muts]
     if len(set(ids)) != len(ids):
         die(2, "duplicate mutation ids")
@@ -684,6 +744,7 @@ def compatible(batch, m):
 
 
 def write_results(out, sha, build, muts, results, verdict, ctl_n):
+    global FLUSHED
     cols = ["id", "outcome", "credited", "expected_failed", "all_failures", "testcases", "rc", "secs", "detail"]
     with open(os.path.join(out, "results.tsv.tmp"), "w") as t, open(os.path.join(out, "results.md.tmp"), "w") as md:
         t.write("\t".join(cols) + "\n")
@@ -697,7 +758,27 @@ def write_results(out, sha, build, muts, results, verdict, ctl_n):
             md.write("| " + " | ".join(c.replace("|", "\\|") for c in row) + " |\n")
     for n in ("results.tsv", "results.md"):
         os.replace(os.path.join(out, n + ".tmp"), os.path.join(out, n))
+    FLUSHED = True
+
+
+def on_sigterm(signum, frame):
+    """#135: a terminated driver that has flushed nothing says so, then dies of SIGTERM exactly as it did before."""
+    abort_results("terminated by SIGTERM", 143)
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    os.kill(os.getpid(), signal.SIGTERM)
 
 
 if __name__ == "__main__":
-    main()
+    signal.signal(signal.SIGTERM, on_sigterm)
+    try:
+        main()
+    except SystemExit as e:
+        if e.code not in (0, None):  # die() has written already; a bare sys.exit(<nonzero>) before the first flush has not
+            abort_results(f"exit {e.code} before the first results flush", e.code)
+        raise
+    except BaseException as e:  # an exception no die() foresaw: the traceback stays on stderr, results.md now says so too
+        import traceback
+        traceback.print_exc()
+        log(f"FATAL uncaught {type(e).__name__}: {e}")
+        abort_results(f"uncaught {type(e).__name__}: {e}", 1)
+        sys.exit(1)
