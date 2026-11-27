@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# bb-co-gc [--live] [--days N] [--pace S] -- remove idle checkouts from ~/work/co (issue #113). Nothing removed them before: on 2026-11-24 the
+# bb-co-gc [--live] [--days N | --hours H] [--pace S] -- remove idle checkouts from ~/work/co (issue #113). Nothing removed them before: on 2026-11-24 the
 # five bb hosts held 400-1000 checkouts of about 2.7 GB each and the soak runner stops submitting at 85% home use.
 #
 # DRY BY DEFAULT: without --live it only READS. It prints, per checkout, `candidate` (with size and newest activity) or `keep` with every
 # reason that holds, then a total. It takes no lock, creates no file and writes no log; the only write paths (lock, mv, rm, chmod, the log)
 # are the functions lock_run, qlock (opens $Q/.lock), log_line, remove_one and remove_leftover, and the leftover move-back in the main loop;
 # all of them run only under `[ "$LIVE" = 1 ]`.
-# N = --days (default 3, an integer 1..3650). S = --pace (default 2, an integer 0..3600 seconds).
+# N = --days (default 3, an integer 1..3650); H = --hours (an integer 1..87600), the same window in hours, for a sub-day age; --days and --hours
+# together are a usage error. S = --pace (default 2, an integer 0..3600 seconds).
 #
 # THE RULE. A checkout C (an entry of ~/work/co) is removed only when ALL of these hold; each reason that fails is printed by its name:
 #   1 ticket           no ticket in ~/work/queue/{waiting,running} names C (its co= field has C's name after .../work/co/)
@@ -14,7 +15,7 @@
 #                      writes it when the run ends, so start without rc is a run in flight, or a killed run nobody finished; either is kept.
 #                      Existence tests only: the run identity files are read by bb-queue-lib.sh run_current alone, a grep row in BbSameSecondIT)
 #   3 process          no process of this user has its cwd, its exe or an open file under C (/proc scan, as bb-mutate's kill path)
-#   4 recent           the newest activity is older than N days. Activity = max(the ticket log's last ended= for C, mtime of C/.bb/end,
+#   4 recent           the newest activity is older than N days (H hours with --hours). Activity = max(the ticket log's last ended= for C, mtime of C/.bb/end,
 #                      mtime of C/.git/HEAD, mtime of C/.git/index); the .git files cover a checkout made but never built.
 #                      activity-unknown: none of these exists, so the age is unknown: kept, never guessed.
 #   5 keep-file        C/.bb/keep is absent (an owner's opt-out)
@@ -42,7 +43,18 @@
 # sleeps S seconds (--pace, default 2). The whole live pass is DEFERRED (log `deferred: builds running`, exit 0, nothing read or removed)
 # when ~/work/queue/running holds a ticket with group=1 (the port group) or more than half the host cap (the first 1..999 line of
 # ~/work/max-reactors, else 3) tickets; checked once, at the start of the pass.
+# PRESSURE (issue #154). The deferral above made a full disk unrecoverable: on 2026-11-26 cloudbb-10 reached 98% and cloudbb-9 92% with the pass
+# DEFERRED on both (a group=1 ticket, or more than half the cap, was always running) and most bytes in checkouts idle for less than a day, which
+# --days 1 cannot reach. So bb-co-gc itself reads the use of the home filesystem (`df --output=pcent $HOME`, the unit ExecCondition's own
+# measure) once at the start of the pass; at FLOOR (80) percent or more the deferral is WAIVED: the pass runs although tickets are running.
+# Pressure waives the deferral and nothing else: the age is whatever --days/--hours says (the pressure unit passes --hours 6), and each of the
+# seven keep reasons above still holds (a ticket, an in-flight marker, an open process stay protected); the queue lock protocol is unchanged.
+# Below FLOOR the deferral is exactly the one above. A df that cannot be read is `unknown`: no pressure. Why 80: the soak runner stops submitting
+# at 85% (#113) and a run guard kills at 90%; at the observed fill (~1 GB per 3-5 min on a 601 GB disk) 80% leaves one or two hourly timer firings
+# before 90%. The 6 hours of the pressure unit are a guess, not derived (the age distribution of keep=recent checkouts on a full host would settle it).
+# Both DRY and live print one `pressure:` line (use, floor, decision, what the deferral would do); live logs PRESSURE when it waived one.
 # TEST SEAM: BB_CO_GC_PROC=<dir> replaces /proc (BbCoGcIT's blind rows: a real unreadable process is seen by every concurrent run on the host).
+# BB_CO_GC_DF=<command> replaces `df` (called as `<command> --output=pcent $HOME`; BbCoGcIT's pressure rows: the real disk of the build host must not decide).
 # OWNER INSTALL STEPS (not code): the timer units need `loginctl enable-linger aether` (root, once per host): with Linger=no the user manager
 # stops at the last logout, which pauses the timers and SIGTERMs a run between its mv and its rm (the leftovers above exist for that).
 # FOLLOW-UP (not here): bb-temper should name the co-gc.log REMOVED line when a checkout it was given has vanished (today: `cd: ... No such file`).
@@ -61,20 +73,23 @@
 #   - The ticket log is read by header name; a checkout whose name appears in no row relies on the other three activity signals.
 #   - A mapping held only through mmap (the file closed, the process gone from the directory) is not seen by guard 3: the proc scan reads
 #     cwd, exe and open fds, not /proc/<pid>/maps. A running build has its cwd there, so this needs a daemonised process with a closed fd.
-#   - The deferral is read once; builds that start during a long pass are met by the pace and the guards, not by a second deferral.
+#   - The deferral and the pressure are read once; builds that start during a long pass are met by the pace and the guards, not by a second deferral,
+#     and a pass that frees the disk below FLOOR does not stop itself.
 #   - A checkout stuck with a start and no rc (a killed build) is kept for ever by guard 2; DRY prints it as in-flight so it is visible.
 set -euo pipefail
 PROG=bb-co-gc
 
-usage() { echo "usage: bb-co-gc [--live] [--days N] [--pace S]   (N = 1..3650, default 3; S = 0..3600 seconds, default 2; DRY unless --live)" >&2; exit 2; }
+usage() { echo "usage: bb-co-gc [--live] [--days N | --hours H] [--pace S]   (N = 1..3650, default 3; H = 1..87600; not both; S = 0..3600 seconds, default 2; DRY unless --live)" >&2; exit 2; }
 die() { local rc=$1; shift; echo "$PROG: $*" >&2; exit "$rc"; }
 
-LIVE=0; DAYS=3; PACE=2
+LIVE=0; DAYS=3; HOURS=; DAYS_SET=0; HOURS_SET=0; PACE=2
 while [ $# -gt 0 ]; do
   case $1 in
     --live) LIVE=1 ;;
-    --days) shift; [ $# -gt 0 ] || usage; DAYS=$1 ;;
-    --days=*) DAYS=${1#--days=} ;;
+    --days) shift; [ $# -gt 0 ] || usage; DAYS=$1; DAYS_SET=1 ;;
+    --days=*) DAYS=${1#--days=}; DAYS_SET=1 ;;
+    --hours) shift; [ $# -gt 0 ] || usage; HOURS=$1; HOURS_SET=1 ;;
+    --hours=*) HOURS=${1#--hours=}; HOURS_SET=1 ;;
     --pace) shift; [ $# -gt 0 ] || usage; PACE=$1 ;;
     --pace=*) PACE=${1#--pace=} ;;
     -h|--help) usage ;;
@@ -82,9 +97,18 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
-case $DAYS in ''|*[!0-9]*) usage ;; esac
-DAYS=$((10#$DAYS))
-{ [ "$DAYS" -ge 1 ] && [ "$DAYS" -le 3650 ]; } || usage
+[ $((DAYS_SET + HOURS_SET)) -le 1 ] || usage
+if [ "$HOURS_SET" = 1 ]; then
+  case $HOURS in ''|*[!0-9]*) usage ;; esac
+  HOURS=$((10#$HOURS))
+  { [ "$HOURS" -ge 1 ] && [ "$HOURS" -le 87600 ]; } || usage
+  LIMIT=$((HOURS * 3600)); WINDOW=hours=$HOURS
+else
+  case $DAYS in ''|*[!0-9]*) usage ;; esac
+  DAYS=$((10#$DAYS))
+  { [ "$DAYS" -ge 1 ] && [ "$DAYS" -le 3650 ]; } || usage
+  LIMIT=$((DAYS * 86400)); WINDOW=days=$DAYS
+fi
 case $PACE in ''|*[!0-9]*) usage ;; esac
 PACE=$((10#$PACE))
 [ "$PACE" -le 3600 ] || usage
@@ -99,6 +123,8 @@ Q=$WORK/queue
 TLOG=$WORK/bb-ticket-log.tsv
 LOG=$WORK/co-gc.log
 LOCK=$WORK/.co-gc.lock
+FLOOR=80   # percent of the home filesystem in use: at or above it the deferral is waived (the header, PRESSURE)
+DFCMD=${BB_CO_GC_DF:-df}   # TEST ONLY: BbCoGcIT's pressure rows (the build host's real disk must not decide)
 PROC=${BB_CO_GC_PROC:-/proc}   # TEST ONLY: BbCoGcIT's blind rows point it at a fake tree (a real unreadable process would show to every concurrent run on the host)
 QLOCK=$Q/.lock
 MAXREACT=$WORK/max-reactors
@@ -113,7 +139,6 @@ CO_REAL=$(cd -P "$CO" && pwd -P)
 if [ -e "$TLOG" ]; then [ -f "$TLOG" ] && [ -r "$TLOG" ] || die 65 "$TLOG is not a readable file"; fi
 
 NOW=$(date +%s)
-LIMIT=$((DAYS * 86400))
 
 iso() { date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ; }
 mtime() { stat -c %Y -- "$1" 2> /dev/null || echo 0; }   # 0: missing
@@ -233,6 +258,13 @@ deferred() {
   CAP=${cap:-3}
   [ "$GROUPED" -gt 0 ] || [ $((RUNNING * 2)) -gt "$CAP" ]
 }
+# read_pressure: USE = percent of the home filesystem in use (empty when df cannot be read), PRESSURE = 1 when USE >= FLOOR (unknown is 0)
+read_pressure() {
+  USE=$("$DFCMD" --output=pcent "$HOME" 2> /dev/null | tail -n 1 | tr -dc 0-9) || USE=
+  case $USE in ''|????*|*[!0-9]*) USE= ;; *) USE=$((10#$USE)) ;; esac
+  PRESSURE=0
+  if [ -n "$USE" ] && [ "$USE" -ge "$FLOOR" ]; then PRESSURE=1; fi
+}
 log_line() { printf '%s %s\n' "$(iso "$(date +%s)")" "$*" >> "$LOG"; }
 # recheck_moved <name> <dir>: why the moved directory must go back, or nothing. The caller has run `scan` (after the mv, for a fresh one).
 recheck_moved() {
@@ -264,7 +296,7 @@ remove_one() {  # remove_one <name> <size_kb> <activity epoch> <owner>; the call
     return 0
   fi
   if rm_tree "$g"; then
-    log_line "REMOVED path=$CO_REAL/$n size_mb=$(($2 / 1024)) last_activity=$(iso "$3") owner=$4 days=$DAYS"
+    log_line "REMOVED path=$CO_REAL/$n size_mb=$(($2 / 1024)) last_activity=$(iso "$3") owner=$4 $WINDOW"
     REMOVED=$((REMOVED + 1)); FREED_KB=$((FREED_KB + $2)); OUTCOME=removed
   else
     log_line "RM-FAILED path=$CO_REAL/$n moved=$g"; FAILED=$((FAILED + 1))
@@ -282,14 +314,20 @@ scan
 FAILED=0; REMOVED=0; FREED_KB=0; CANDIDATES=0; CAND_KB=0; KEPT=0; LEFT=0
 KEEP_COUNTS=; OUTCOME=
 
+[ "$LIVE" = 0 ] || lock_run
+read_pressure
+if deferred; then DEFER=1; else DEFER=0; fi   # sets RUNNING, GROUPED, CAP; reads only
+if [ "$DEFER" = 0 ]; then DEFERRAL=none; elif [ "$PRESSURE" = 1 ]; then DEFERRAL=waived; else DEFERRAL=applies; fi
+if [ "$PRESSURE" = 1 ]; then PSTATE=yes; elif [ -n "$USE" ]; then PSTATE=no; else PSTATE=unknown; fi
+echo "pressure: use=${USE:-unknown}% floor=$FLOOR% pressure=$PSTATE deferral=$DEFERRAL (running=$RUNNING group=$GROUPED cap=$CAP)"
 if [ "$LIVE" = 1 ]; then
-  lock_run
-  if deferred; then
+  if [ "$DEFERRAL" = applies ]; then
     log_line "DEFERRED builds running running=$RUNNING group=$GROUPED cap=$CAP"
     echo "deferred: builds running (running=$RUNNING group=$GROUPED cap=$CAP); nothing removed"
     exit 0
   fi
-  log_line "RUN live days=$DAYS pace=$PACE"
+  if [ "$DEFERRAL" = waived ]; then log_line "PRESSURE deferral waived use=$USE floor=$FLOOR running=$RUNNING group=$GROUPED cap=$CAP"; fi
+  log_line "RUN live $WINDOW pace=$PACE"
 fi
 
 # leftovers of a crash between the move and the rm: .gc-<epoch>-<name>, real directories only. The second look is the one a fresh move gets.
@@ -349,16 +387,16 @@ for p in "$CO"/*; do
       *) echo "failed $n (see $LOG)" ;;
     esac
   else
-    echo "candidate $n size_mb=$((kb / 1024)) newest=$(iso "$ACT") age_days=$(((NOW - ACT) / 86400)) owner=$OWN"
+    echo "candidate $n size_mb=$((kb / 1024)) newest=$(iso "$ACT") age_days=$(((NOW - ACT) / 86400)) age_hours=$(((NOW - ACT) / 3600)) owner=$OWN"
   fi
 done
 
 # kept, by reason (a checkout failing several counts under each)
 counts=$(printf '%s\n' "${KEEP_COUNTS#,}" | tr ',' '\n' | grep -v '^$' | sort | uniq -c | awk '{ printf "%s%s=%d", (s++ ? " " : ""), $2, $1 }' || true)
 if [ "$LIVE" = 1 ]; then
-  echo "total: removed $REMOVED of $CANDIDATES candidates, freed $((FREED_KB / 1024)) MB, failed $FAILED, skipped $SKIPPED, kept $KEPT (${counts:-none}), days=$DAYS, blind=$BLIND unlisted-blind=$BLIND_BAD"
+  echo "total: removed $REMOVED of $CANDIDATES candidates, freed $((FREED_KB / 1024)) MB, failed $FAILED, skipped $SKIPPED, kept $KEPT (${counts:-none}), $WINDOW, blind=$BLIND unlisted-blind=$BLIND_BAD"
   log_line "RUN end removed=$REMOVED candidates=$CANDIDATES freed_mb=$((FREED_KB / 1024)) failed=$FAILED skipped=$SKIPPED kept=$KEPT blind=$BLIND unlisted_blind=$BLIND_BAD"
   [ "$FAILED" = 0 ] || exit 74
 else
-  echo "total: DRY $CANDIDATES candidates, $((CAND_KB / 1024)) MB ($((CAND_KB / 1048576)) GB) would be freed incl. $LEFT leftover .gc dirs; kept $KEPT (${counts:-none}); days=$DAYS; blind=$BLIND unlisted-blind=$BLIND_BAD; nothing removed"
+  echo "total: DRY $CANDIDATES candidates, $((CAND_KB / 1024)) MB ($((CAND_KB / 1048576)) GB) would be freed incl. $LEFT leftover .gc dirs; kept $KEPT (${counts:-none}); $WINDOW; blind=$BLIND unlisted-blind=$BLIND_BAD; nothing removed"
 fi
