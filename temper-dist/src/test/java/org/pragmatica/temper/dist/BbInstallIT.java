@@ -848,10 +848,11 @@ class BbInstallIT {
 
         try (var in = BbInstallIT.class.getResourceAsStream("/bb/" + resource)) {
             assertThat(in).as("test resource bb/" + resource).isNotNull();
-            new String(in.readAllBytes()).lines()
-                                         .filter(l -> !l.isBlank() && !l.startsWith("#"))
-                                         .map(l -> l.split(" "))
-                                         .forEach(f -> live.put(f[0], f[1].equals("repo") ? BbFixtures.md5(OPS_BB.resolve(f[0])) : f[1]));
+            for (var line : new String(in.readAllBytes()).lines().filter(l -> !l.isBlank() && !l.startsWith("#")).toList()) {
+                var f = line.split(" ");
+
+                live.put(f[0], f[1].equals("repo") ? BbFixtures.md5(OPS_BB.resolve(f[0])) : f[1]);
+            }
         }
 
         var files = Pattern.compile("(?m)^FILES=\\(([^)]*)\\)").matcher(Files.readString(INSTALL));
