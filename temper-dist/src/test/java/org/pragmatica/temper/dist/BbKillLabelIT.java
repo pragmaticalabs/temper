@@ -426,20 +426,39 @@ class BbKillLabelIT {
     }
 
     // ---- fix round 1 of #144: rows for the survivors of v144a/v144b ------------------------------------------------------
-    /// The window ends when the job ends (right after the waiter's wait), not after the bound runner has finished stopping the ticket's processes. A fake `java` (argv[0] java: the bound
-    /// runner's kill set) takes 2 s to die once TERMed and moves the counter as its last act: after the stub maven is gone, before the bound runner is. Probe (read oom_kill_end after
-    /// `wait "$W"`): end reads 6 -> red.
+    /// The window ends when the job ends (right after the waiter's wait), not after the bound runner has finished stopping the ticket's processes. The verdict depends only on the ORDER
+    /// of two events, never on how long the waiter takes between the job's exit and its end read: BB_TEST_VMSTAT is a FIFO served by a loop of this test, which sees each read as it
+    /// happens. It serves oom_kill 5 until the bound runner has written .bb/rc (the kill set is reaped: the moment the old row approximated with a 2 s sleep) and 6 from then on.
+    /// A fake `java` (the runner's kill set), once TERMed, stays alive until the server has served the second read (the end read) and only then dies, so the runner cannot finish
+    /// first however long the waiter stalls (up to the runner's 5 s KILL grace, see Limits). Probes: end read after `wait "$W"` -> the java is only KILLed after 5 s, the runner
+    /// finishes, the read gets 6, red; a `sleep 3` before the end read -> still 5, green (the old row, a bump 2 s after the TERM, went red).
     @Test
     void theWindowEndsWhenTheJobEnds_notWhenTheBoundRunnerHasStoppedTheTicketsProcesses() throws Exception {
+        var fifo = dir.resolve("vmstat-fifo");
+        var served = dir.resolve("vmstat-served");
+        var endRead = dir.resolve("vmstat-end-read");
+        var runnerRc = dir.resolve("work").resolve(ME + "-late").resolve(".bb").resolve("rc");
+        var server = BbFixtures.executable(dir.resolve("vmstatd.sh"),
+                                           "#!/bin/bash\ntrap '' PIPE\nn=0\nwhile :; do\n"
+                                          + "  { n=$((n+1)); if [ -e " + runnerRc + " ]; then v=6; else v=5; fi\n"
+                                          + "    printf 'nr_free_pages 1\\noom_kill %s\\npgfault 9\\n' \"$v\"; echo \"$n:$v\" >> " + served + "\n"
+                                          + "    [ \"$n\" -lt 2 ] || : > " + endRead + "; } > " + fifo + "\ndone\n");
         var fakeJava = BbFixtures.executable(dir.resolve("fakejava.sh"),
-                                             "#!/bin/bash\ntrap 'sleep 2; echo \"oom_kill 6\" > " + vmstat + "; exit 0' TERM\nwhile :; do sleep 0.2; done\n");
-        var id = start("late", "bash -c 'exec -a java bash " + fakeJava + "' &\nsleep 60", "bound=2\n", Map.of());
+                                             "#!/bin/bash\ntrap 'while [ ! -e " + endRead + " ]; do sleep 0.1; done; exit 0' TERM\nwhile :; do sleep 0.2; done\n");
+
+        assertThat(BbFixtures.run(List.of("mkfifo", fifo.toString()), Map.of(), null, null).rc()).isZero();
+        started.add(BbFixtures.processClean(List.of("bash", server.toString()), Map.of("PATH", System.getenv("PATH")))
+                             .redirectErrorStream(true)
+                             .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+                             .start());
+        var id = start("late", "bash -c 'exec -a java bash " + fakeJava + "' &\nsleep 60", "bound=2\n", Map.of("BB_TEST_VMSTAT", fifo.toString()));
 
         finished(id);
         assertThat(field(id, "bound_hit")).isNotEmpty();
-        assertThat(Files.readString(vmstat)).as("the late bump happened (the row's premise)").contains("oom_kill 6");
+        assertThat(Files.readString(served).strip()).as("the counter was read twice, both while the runner was still stopping the ticket").isEqualTo("1:5\n2:5");
+        assertThat(BbFixtures.run(List.of("cat", fifo.toString()), Map.of(), null, null).stdout()).as("the row's premise: once the runner is done the counter reads 6").contains("oom_kill 6");
         assertThat(field(id, "oom_kill_start")).isEqualTo("5");
-        assertThat(field(id, "oom_kill_end")).as("a bump after the job ended is not in the job's window").isEqualTo("5");
+        assertThat(field(id, "oom_kill_end")).as("a read after the job ended and the runner finished is not the job's window").isEqualTo("5");
     }
 
     @Test
