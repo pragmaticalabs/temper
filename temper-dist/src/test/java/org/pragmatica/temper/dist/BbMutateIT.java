@@ -49,6 +49,14 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 ///  - #100: the summary line without the KILLED-ELSEWHERE count or note -> [#theKilledElsewhereTally_andTheFlakeNote_showInTheSummaryAndTheResults]
 ///  - results.tsv header columns reordered -> [#resultsTsv_headerNamesTheColumnsInRowOrder]
 ///  - #112: bb-build's `-pl` without `-am` check dropped (the real bb-build, not the fake, runs in its row) -> [#aBuildWithoutAm_withASiblingNotInstalled_stopsAtTheControl_withBbBuildsRefusal]
+///  - #135: die() without abort_results, or abort_results never writing -> every ABORTED row below, [#aPreflightRefusal_leavesAbortedResults_andReplacesAStaleOne]
+///  - #135: the spec read back to a bare `json.load(open(...))` -> [#aMissingSpec_leavesAbortedResults_exitTwo], [#aSpecThatIsNotJson_leavesAbortedResults],
+///    [#aSpecWithoutMutations_leavesAbortedResults], [#aSpecWithAnEntryThatIsNotAnObject_leavesAbortedResults]
+///  - #135: the top-level handler for an unforeseen exception dropped -> [#anUnforeseenException_leavesAbortedResults_withTheTraceback]
+///  - #135: the `--timeout` argument error left to float() -> [#aTimeoutThatIsNotANumber_leavesAbortedResults]
+///  - #135: the SIGTERM handler dropped -> [#aDriverTerminatedBeforeItsFirstFlush_leavesAbortedResults]
+///  - #135: `abort_results` ignoring FLUSHED -> [#aRunAbortedByTheQueueWait_leavesTheRestNotRunCreditedDash] (results.md of a flushed run stays)
+///  - #135: the duplicate-ids check dropped -> [#duplicateIds_leaveAbortedResults]
 class BbMutateIT {
     private static final Path TOOL = BbFixtures.OPS_BB.resolve("bb-mutate");
 
@@ -578,6 +586,7 @@ class BbMutateIT {
         assertThat(out.rc()).isEqualTo(4);
         assertThat(out.outcomes()).containsEntry("mA", "NOT-RUN").containsEntry("mC", "NOT-RUN");
         assertThat(out.credited()).containsEntry("mA", "-").containsEntry("mC", "-");
+        assertThat(out.md()).startsWith("# bb-mutate results").doesNotContain("ABORTED:");
     }
 
     /// A lone mutant whose build outlives its bound is TIMEOUT, from a build of one: `solo`.
@@ -702,6 +711,134 @@ class BbMutateIT {
         assertThat(out.outcomes()).as("the mutant was never launched").containsEntry("mB", "NOT-RUN");
         assertThat(home.resolve("builds.log")).as("no build ran").doesNotExist();
         assertThat(dir.resolve("q/waiting")).as("nothing queued").isEmptyDirectory();
+    }
+
+    // ---- #135: no exit before the first flush is silent
+
+    private static final String RAW_SPEC = "spec-raw.json";
+
+    private record Raw(int rc, String stderr, String md, String log) {
+        String firstLine() {
+            return md.lines().findFirst().orElse("<empty>");
+        }
+    }
+
+    /// bb-mutate on the fixture checkout with `spec` as the spec file (null: no such file) and the given extra arguments; never asserts the rc.
+    private Raw raw(String spec, String... extraArgs) throws Exception {
+        return rawIn(co, spec, extraArgs);
+    }
+
+    private Raw rawIn(Path checkout, String spec, String... extraArgs) throws Exception {
+        var specPath = dir.resolve(RAW_SPEC);
+        var out = dir.resolve("out-raw");
+        var argv = new java.util.ArrayList<>(List.of("python3", TOOL.toString(), checkout.toString(), specPath.toString(), out.toString()));
+
+        argv.addAll(List.of(extraArgs));
+        if (spec != null) {
+            Files.writeString(specPath, spec);
+        }
+        var run = BbFixtures.run(argv, Map.of("PATH", System.getenv("PATH"), "HOME", home.toString(), "BB_OWNER", "t"), null, null);
+
+        return new Raw(run.rc(), run.stderr(), read(out.resolve("results.md")), read(out.resolve("bb-mutate.log")));
+    }
+
+    private static String read(Path p) throws IOException {
+        return Files.exists(p) ? Files.readString(p) : "";
+    }
+
+    /// INVARIANT (#135): an exit before the first flush is non-zero and results.md starts `ABORTED: <reason>`; nothing was built.
+    private void assertAborted(Raw run, int rc, String firstLine) throws IOException {
+        assertThat(run.rc()).as(run.stderr()).isEqualTo(rc);
+        assertThat(run.firstLine()).as(run.md()).startsWith(firstLine);
+        assertThat(home.resolve("builds.log")).doesNotExist();
+    }
+
+    /// The incident (bigboy v130b, 03:00:35): a spec file that is not there wrote one log line and died with a traceback on stderr, no results.md.
+    /// Mutation: `spec_load` back to a bare `json.load(open(spec_p))` -> no results.md, red.
+    @Test
+    void aMissingSpec_leavesAbortedResults_exitTwo() throws Exception {
+        var run = raw(null);
+
+        assertAborted(run, 2, "ABORTED: spec not found: " + dir.resolve(RAW_SPEC));
+        assertThat(run.log()).contains("FATAL spec not found");
+    }
+
+    @Test
+    void aSpecThatIsNotJson_leavesAbortedResults() throws Exception {
+        assertAborted(raw("this is not json"), 2, "ABORTED: spec is not valid JSON: " + dir.resolve(RAW_SPEC));
+    }
+
+    @Test
+    void aSpecWithoutMutations_leavesAbortedResults() throws Exception {
+        assertAborted(raw("{\"build\":{}}"), 2, "ABORTED: spec has no \"mutations\": " + dir.resolve(RAW_SPEC));
+    }
+
+    @Test
+    void aSpecWithAnEntryThatIsNotAnObject_leavesAbortedResults() throws Exception {
+        assertAborted(raw("{\"build\":{},\"mutations\":[\"mA\"]}"), 2, "ABORTED: spec \"mutations\" holds an entry that is not a JSON object");
+    }
+
+    @Test
+    void duplicateIds_leaveAbortedResults() throws Exception {
+        assertAborted(raw("{\"build\":{},\"mutations\":[" + mutation("mA", "A", "ATest", "MUT") + "," + mutation("mA", "C", "CTest", "MUT") + "]}"),
+                      2,
+                      "ABORTED: duplicate mutation ids");
+    }
+
+    /// An exception no die() foresaw (build.mutantTimeoutSecs is not a number): the traceback stays on stderr, results.md says so too, exit 1.
+    /// Mutation: drop the top-level `except BaseException` -> no results.md, red.
+    @Test
+    void anUnforeseenException_leavesAbortedResults_withTheTraceback() throws Exception {
+        var run = raw("{\"build\":{\"mutantTimeoutSecs\":\"abc\"},\"mutations\":[" + mutation("mA", "A", "ATest", "MUT") + "]}");
+
+        assertAborted(run, 1, "ABORTED: uncaught ValueError");
+        assertThat(run.stderr()).contains("Traceback");
+        assertThat(run.log()).contains("FATAL uncaught ValueError");
+    }
+
+    @Test
+    void aTimeoutThatIsNotANumber_leavesAbortedResults() throws Exception {
+        assertAborted(raw("{\"build\":{},\"mutations\":[]}", "--timeout", "soon"), 2, "ABORTED: --timeout takes a number of minutes");
+    }
+
+    /// The preflight die(), the real incident's other face (a checkout whose maven.config is not its own): results.md names it, and a results.md that an
+    /// earlier run left in the same out dir is replaced, never left to read as this run's.
+    /// Mutation: drop `abort_results` from die() -> the stale file stays, red.
+    @Test
+    void aPreflightRefusal_leavesAbortedResults_andReplacesAStaleOne() throws Exception {
+        var stale = Files.createDirectories(dir.resolve("out-raw")).resolve("results.md");
+
+        Files.writeString(stale, "# bb-mutate results\n\nSHA stale\n");
+        Files.writeString(co.resolve(".mvn/maven.config"), "-Dmaven.repo.local=/elsewhere/.m2-local\n");
+        var run = raw("{\"build\":{},\"mutations\":[" + mutation("mA", "A", "ATest", "MUT") + "]}");
+
+        assertAborted(run, 2, "ABORTED: maven.config does not carry this checkout's own .m2-local: not a bb-checkout");
+        assertThat(run.md()).doesNotContain("SHA stale");
+    }
+
+    /// A driver killed (SIGTERM) while its control build waits has flushed nothing: results.md says it was terminated, and it still dies of the signal.
+    /// Mutation: drop the SIGTERM handler -> no results.md, red.
+    @Test
+    void aDriverTerminatedBeforeItsFirstFlush_leavesAbortedResults() throws Exception {
+        BbFixtures.executable(home.resolve("tools/bb-build"), "#!/bin/sh\necho ticket=T1\n");  // queued, never started, never ends
+        Files.writeString(dir.resolve(RAW_SPEC), "{\"build\":{},\"mutations\":[" + mutation("mA", "A", "ATest", "MUT") + "]}");
+        var out = dir.resolve("out-raw");
+        var proc = BbFixtures.process(List.of("python3", TOOL.toString(), co.toString(), dir.resolve(RAW_SPEC).toString(), out.toString()),
+                                      Map.of("PATH", System.getenv("PATH"), "HOME", home.toString(), "BB_OWNER", "t"))
+                             .redirectErrorStream(true)
+                             .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+                             .start();
+        var deadline = System.nanoTime() + 60_000_000_000L;
+
+        while (!read(out.resolve("bb-mutate.log")).contains("bb-build exit=0") && System.nanoTime() < deadline) {
+            Thread.sleep(50);
+        }
+        assertThat(read(out.resolve("bb-mutate.log"))).contains("bb-build exit=0");
+        proc.destroy();
+        assertThat(proc.waitFor(30, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+
+        assertThat(proc.exitValue()).isEqualTo(143);
+        assertThat(read(out.resolve("results.md")).lines().findFirst().orElse("")).isEqualTo("ABORTED: terminated by SIGTERM");
     }
 
     // ---- harness
