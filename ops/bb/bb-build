@@ -130,7 +130,10 @@
 #   cell        when                                                     outcome
 #   NOSEL       neither -Dtest nor -Dit.test given (a build)             NOT GATED, rc kept (any rc), but logged (CTO ruling 2026-11-22):
 #                                                                        `bb-build: testcases (no selector, not gated): surefire(all)=n failsafe(all)=m`
-#   POS         S(P) non-empty                                           every token of S(P) has executed testcases > 0 in P's reports, else 19
+#   POS         S(P) non-empty                                           every token of S(P) has executed testcases > 0 in P's reports, else 19;
+#                                                                        a token in BOTH S(surefire) and S(failsafe) is one token whose count
+#                                                                        is the sum over both plugins' reports (CTO 2026-11-27: a failsafe-only
+#                                                                        module with surefire skip=true, `-Dtest=X -Dit.test=X,Y`, was 19)
 #   ALL         S(P) empty (no selector, only `!`), P not `none`, P RAN  P(all) executed > 0, logged `surefire(all)=n` / `failsafe(all)=n`, else 19
 #   NONE        P's selector is exactly `none`                           P is not counted
 #   IDLE        a selector given, but no cell above counted anything     19 (both `none`, or no selected plugin ran)
@@ -294,6 +297,10 @@ for p, s, runs, ran in plugins:
         counts += [count(label + t, lambda fq, t=t: hit(t, fq), found) for label, found in runs for t in s]
     elif not s and 'ALL' in CELLS and ran(p):
         counts += [count(label + p + '(all)', lambda fq: True, found) for label, found in runs]
+merged = {}                                      # POS: a token in BOTH -Dtest and -Dit.test is ONE count, summed over the two (CTO 2026-11-27)
+for t, n, k in counts:
+    a = merged.setdefault(t, [0, 0]); a[0] += n; a[1] += k
+counts = [(t, n, k) for t, (n, k) in merged.items()]
 if counts:
     print('bb-build: selected testcases: ' + ' '.join('%s=%d' % (t, n) + ('(+%d skipped)' % k if k else '') for t, n, k in counts))
 empty = [t for t, n, k in counts if n == 0]
