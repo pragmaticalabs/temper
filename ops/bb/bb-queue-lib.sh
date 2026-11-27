@@ -42,7 +42,7 @@ PSLIST=${BB_TEST_PS:-}   # TEST ONLY: a file of "pid ppid rss_kb args..." lines,
 # is read from the ps list; a tree at E claims nothing more, so memory it already holds is never counted twice (MemAvailable has it). WHERE
 # THE BUILD RUNS: a launch's tree is its ledger pid's descendants PLUS, for an isolated ticket (iso=1: maven runs in docker container bb-<id>,
 # whose processes hang off containerd-shim, not off the ledger pid), the descendants of that container's init pid (one `docker inspect`, 5 s
-# bound, for all the isolated launches); a container that is gone, a docker that does not answer in time or a pid that is not a positive
+# bound by KILL, which a docker ignoring TERM cannot outlast, for all the isolated launches); a container that is gone, a docker that does not answer in time or a pid that is not a positive
 # integer adds 0, so the claim is then E - tree (an over-claim, never an under-claim). A bb-hold
 # ticket claims nothing (its containers are in MemAvailable). With no claiming launch alive the claims are 0 and #53's floor test alone
 # decides; its starvation override stays as it was. A config with floor < E is REFUSED at pick only (mem_config_refusal): pick() grants nothing (no starvation override either) while it holds;
@@ -465,7 +465,7 @@ offqueue_headroom_kb() { offqueue_jvms | awk '{ s += $2 } END { printf "%.0f\n",
 # its ancestors, or when its cgroup holds a running container named temper-* (a temper CI job, as HostReactors.foreign reads it) or bb-*
 # (bb-netns-run's isolated build: its tree ends at containerd-shim, not at a waiter). Observation only: it never signals anything, and the cap
 # does not read it. A docker that cannot answer leaves a containerised launcher listed (over-reports, never hides). Reads $PROCROOT, the ps list
-# (PSLIST seam) and, only when a candidate sits in a container, one `docker ps`.
+# (PSLIST seam) and, only when a candidate sits in a container, one `docker ps` (5 s bound, `timeout -s KILL`).
 PROCROOT=${BB_TEST_PROC:-/proc}
 DOCKERPS=${BB_TEST_DOCKER_PS:-}   # TEST ONLY: a file of "<64-hex id> <name>" lines, read instead of `docker ps`
 CO_ROOT=${BB_TEST_CO_ROOT:-$HOME/work/co}
@@ -485,7 +485,7 @@ offqueue_reactors() {
     cg=$(cat "$PROCROOT/$pid/cgroup" 2>/dev/null) || continue
     hit=0
     for cid in $(printf '%s\n' "$cg" | grep -Eo '[0-9a-f]{64}' | sort -u); do
-      [ -n "$ids" ] || ids=$( { if [ -n "$DOCKERPS" ]; then cat "$DOCKERPS" 2>/dev/null; else timeout 5 docker ps --no-trunc --format '{{.ID}} {{.Names}}' 2>/dev/null; fi; } | awk '$1 ~ /^[0-9a-f]{64}$/ && $2 ~ /^(temper|bb)-/ { print $1 }'; echo none)
+      [ -n "$ids" ] || ids=$( { if [ -n "$DOCKERPS" ]; then cat "$DOCKERPS" 2>/dev/null; else timeout -s KILL 5 docker ps --no-trunc --format '{{.ID}} {{.Names}}' 2>/dev/null; fi; } | awk '$1 ~ /^[0-9a-f]{64}$/ && $2 ~ /^(temper|bb)-/ { print $1 }'; echo none)
       case $'\n'"$ids"$'\n' in *$'\n'"$cid"$'\n'*) hit=1;; esac
     done
     [ "$hit" = 0 ] || continue
@@ -553,10 +553,10 @@ mem_claim_note() {
   printf '%s mem-claim-gb: file %s: "%s" is not a positive integer: E falls back to 6 GB\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$MEMCLAIM" "$bad" >> "$Q/mem-claim.log"
 }
 # queue_container_pids <ticket id>...: "bb-<id>:<pid>" per isolated launch whose container bb-<id> is running (pid = the container's init
-# as the host sees it); one `docker inspect` for all of them, 5 s bound. Gone, not running (pid 0), no docker, no answer in time: no line.
+# as the host sees it); one `docker inspect` for all of them, 5 s bound (`timeout -s KILL`: a docker that ignores TERM still ends at 5 s). Gone, not running (pid 0), no docker, no answer in time: no line.
 queue_container_pids() {
   [ $# -gt 0 ] || return 0
-  timeout 5 docker inspect -f '{{.Name}} {{.State.Pid}}' "$@" 2>/dev/null | awk '$1 ~ /^\/bb-/ && $2 ~ /^[1-9][0-9]*$/ { sub(/^\//, "", $1); printf "%s:%s ", $1, $2 }' || true
+  timeout -s KILL 5 docker inspect -f '{{.Name}} {{.State.Pid}}' "$@" 2>/dev/null | awk '$1 ~ /^\/bb-/ && $2 ~ /^[1-9][0-9]*$/ { sub(/^\//, "", $1); printf "%s:%s ", $1, $2 }' || true
 }
 # queue_claims: one line "ticket pid tree_rss_kb claim_kb" per live ledger launch that claims (a bb-hold ticket, kind=bb-hold in running/<id>, claims
 # nothing). tree_rss_kb = RSS of the launch pid and all its descendants in the ps list, plus for an isolated ticket (iso=1) the descendants of its
