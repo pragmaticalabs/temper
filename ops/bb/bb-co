@@ -1,0 +1,339 @@
+#!/usr/bin/env bash
+# bb-co [--host auto|<name>] <name> <ref> -- create a pragmatica checkout (~/work/co/<name>, via ~/tools/bb-checkout) on the bb host with the
+# FEWEST WAITING tickets, and print where it landed. Mac-side; reads the same host config as bb-temper (~/.config/bb-temper/hosts or
+# BB_TEMPER_HOSTS; format ops/bb/hosts.example): its host-config block and path-choice block below are copies of bb-temper's (BbCoIT holds them
+# equal), so the ssh key, jump hosts, pinned known_hosts, the direct-then-jump path choice and its cache (~/.temper/bb-path) are shared.
+#
+# INVARIANT (#135): without a named host (or with --host auto) the checkout is created on the host with pick "auto" that has the fewest WAITING
+# tickets; ties break by running/cap (lower wins), then load5 per core (lower wins), then config order. --host <name> (a configured host, pick
+# auto or explicit) uses exactly that host and makes no queue probe, and needs no host with pick auto in the config.
+# ENFORCER: the pick inside this script, at checkout time. Host affinity is not enforced anywhere else, it FOLLOWS from the checkout existing on
+# one host only: every later bb-submit / bb-temper / bb-mutate / fetch names the checkout path on the host that holds it. bb-mutate runs ON that
+# host against the checkout directory it is given and queues its control and mutant tickets through that host's ~/tools/bb-build, so a run cannot
+# leave the host of its checkout. To keep "one host only" true, an auto pick refuses (exit 3) a <name> that already exists on ANY probed auto host.
+#
+# Output: on success stdout is exactly one line, HOST=<configured host name>; everything else (the pick table, bb-checkout's own output) goes to stderr,
+# and no HOST= line is printed on any failure. <name> must start with "$BB_OWNER-" and, like <ref> (a branch, tag, SHA or probes/<owner>/<name>),
+# is checked against its form before any ssh (values: [A-Za-z0-9._-], ref also '/', first character alphanumeric), so nothing shell-active reaches
+# the remote command line. BB_OWNER is [A-Za-z0-9_]{1,64}, as bb-checkout requires.
+#
+# How the pick reads a host (one read-only ssh per auto host, in parallel, each with a hard wall of BB_CO_PROBE_WALL seconds, default 30, 1 to 3 digits):
+#   waiting = numeric-named files in ~/work/queue/waiting, running = those in ~/work/queue/running, cap = min(5, host cap) with host cap the first
+#   1..999 line of ~/work/max-reactors else 3 (what `bb-queue` prints as the effective cap), load5 = /proc/loadavg field 2, cores = nproc,
+#   exists = ~/work/co/<name> present, and ~/tools/bb-checkout executable. A host whose ssh fails or times out, whose reply is not exactly that shape,
+#   or that lacks ~/tools/bb-checkout is SKIPPED with a reason on stderr. The controller's /api/v1/hosts (what bb-temper's pick reads) is NOT used:
+#   its queue counts are the worker's last poll, so a burst of lanes reads a stale 0, they can be absent, and one controller read through the home
+#   host would make every pick depend on that host.
+# GUARANTEES, each with its mechanism:
+#   - The pick ranks the counts read by the probes of THIS call (live queue directories at the time of the probe, not a cache and not a poll): the ranking is
+#     (waiting, running/cap, load5/cores, config order), computed over exact integers/fractions for the first two.
+#   - A host that did not answer the probe is never checked out on by an auto pick, and nothing is created when none answered (exit 69, no bb-checkout call).
+#   - bb-checkout runs ONCE, never retried (a session dropped after it acted would repeat a clone); its exit code is the exit code of this script.
+# Named limits:
+#   - Pick and checkout are not atomic: two callers in the same second read the same counts and may choose the same host (a checkout adds no waiting
+#     ticket). The cost is a less even spread, never a wrong host for an existing checkout.
+#   - The probe re-implements the queue layout and the cap rule of bb-queue-lib.sh (a change there needs the probe changed; BbCoIT runs the probe
+#     against a fake queue). `waiting` counts every ticket file in waiting/, also one whose waiter is gone until the next reap.
+#   - --host <name> cannot see another host: a <name> that exists elsewhere is created again here (bb-checkout's own refusal only covers its host).
+#   - An explicit-pick host is never auto-picked and not probed for an existing <name>.
+#   - ssh exit 255 from bb-checkout is ambiguous (the host may have acted); it is passed on with a line saying so.
+#   - The bb-checkout step has no bound of its own beyond ssh's ConnectTimeout 15 (the same as bb-temper's verbs): a session that hangs after it connected
+#     holds bb-co until bb-checkout's own fetch/lock bounds end it.
+#   - "When bb-co exits no process it started is alive" holds for every probe ssh, probe watchdog and the ssh of a probe's path choice (process groups, see
+#     the pick). It does not cover (1) a ControlPersist master of a jumped host (detached on purpose, 10 minutes, shared with bb-temper) and (2) the idle
+#     `sleep` of probe_path's watchdog in the path-choice block for the CHOSEN host (up to 17 s, no connection; the block is a verbatim copy of bb-temper's).
+#   - A TERM/HUP/INT of bb-co during the pick is handled (probes killed, exit 1); during the bb-checkout step ssh is left to ssh's own signal handling.
+# Exit: 0 ok | 2 usage, a malformed value, an unknown --host | 3 <name> exists on a probed host (also bb-checkout's own 3) | 69 no host answered the pick, or
+# a named host that has a jump is unreachable by both paths | 78 host config missing or malformed | else bb-checkout's exit code (4 owner guard, 5 ref not found,
+# 6 mirror lock, 7 fetch bound, ...). A named host WITHOUT a jump that is down fails inside the checkout step: ssh's own 255, with the ambiguity line.
+# bash 3.2 and BSD tools (macOS), also GNU; python3 for the ranking.
+set -euo pipefail
+PROG=bb-co
+: "${BB_OWNER:?set BB_OWNER=<agent name, [A-Za-z0-9_]>}"
+# ---- host config: this block is identical in bb-temper and bb-drift (BbDriftIT holds the two copies equal) --------------
+# The file is ~/.config/bb-temper/hosts, or the one BB_TEMPER_HOSTS names; format and a TEST-NET example: ops/bb/hosts.example.
+# load_hosts sets KEY and the parallel arrays H_NAME H_ADDR H_JUMP H_KNOWN H_PICK (file order). A missing file or any malformed
+# line is exit 78 with the line number: no host, address or key is ever guessed. bash 3.2 compatible.
+HOSTS_FILE=${BB_TEMPER_HOSTS:-$HOME/.config/bb-temper/hosts}
+cfg_die() { echo "$PROG: $HOSTS_FILE: $*" >&2; exit 78; }
+home_path() { case $1 in '~/'*) printf '%s\n' "$HOME/${1#'~/'}" ;; *) printf '%s\n' "$1" ;; esac; }
+host_index() {  # host_index <name>: print the configured host's index; fail when it is not configured
+  local i=0
+  while [ "$i" -lt "${#H_NAME[@]}" ]; do [ "${H_NAME[i]}" = "$1" ] && { echo "$i"; return 0; }; i=$((i + 1)); done
+  return 1
+}
+load_hosts() {
+  local n=0 line f re='^[a-z_][a-z0-9_-]{0,31}@[A-Za-z0-9.:-]+$'
+  KEY=; H_NAME=(); H_ADDR=(); H_JUMP=(); H_KNOWN=(); H_PICK=()
+  [ -r "$HOSTS_FILE" ] || cfg_die "no host config (copy ops/bb/hosts.example there and fill in your hosts)"
+  while IFS= read -r line || [ -n "$line" ]; do
+    n=$((n + 1)); line=${line%$'\r'}; line=${line%%#*}
+    read -r -a f <<< "$line"
+    [ "${#f[@]}" -gt 0 ] || continue
+    case ${f[0]}:${#f[@]} in
+      key:2) [ -z "$KEY" ] || cfg_die "line $n: key is listed twice"; KEY=$(home_path "${f[1]}") ;;
+      host:6)
+        [[ ${f[1]} =~ ^[a-z0-9][a-z0-9-]*$ ]] && [ "${f[1]}" != auto ] && [ "${f[1]}" != mac ] || cfg_die "line $n: bad host name '${f[1]}'"
+        ! host_index "${f[1]}" > /dev/null || cfg_die "line $n: host ${f[1]} is listed twice"
+        [[ ${f[2]} =~ $re ]] || cfg_die "line $n: the address must be user@address"
+        [ "${f[3]}" = - ] || [[ ${f[3]} =~ $re ]] || cfg_die "line $n: the jump must be - or user@address"
+        [ "${f[3]}" = - ] && [ "${f[4]}" = - ] || { [ "${f[3]}" != - ] && [ "${f[4]}" != - ]; } \
+          || cfg_die "line $n: a jump and a known_hosts file go together (both - or both set)"
+        case ${f[5]} in auto|explicit) ;; *) cfg_die "line $n: pick must be auto or explicit" ;; esac
+        H_NAME+=("${f[1]}"); H_ADDR+=("${f[2]}"); H_JUMP+=("${f[3]}"); H_KNOWN+=("$(home_path "${f[4]}")"); H_PICK+=("${f[5]}") ;;
+      *) cfg_die "line $n: expected 'key <path>' or 'host <name> <user@address> <jump> <known_hosts> <auto|explicit>'" ;;
+    esac
+  done < "$HOSTS_FILE"
+  [ -n "$KEY" ] || cfg_die "no 'key <path>' line"
+  [ "${#H_NAME[@]}" -gt 0 ] || cfg_die "no host line"
+}
+auto_hosts() {  # auto_hosts: AUTO = the hosts with pick auto, in file order (the tie order of bb-temper's pick)
+  local i=0
+  AUTO=()
+  while [ "$i" -lt "${#H_NAME[@]}" ]; do [ "${H_PICK[i]}" != auto ] || AUTO+=("${H_NAME[i]}"); i=$((i + 1)); done
+  [ "${#AUTO[@]}" -gt 0 ] || cfg_die "no host with pick auto"
+}
+# ---- end of the shared host-config block ----------------------------------------------------------------------------------
+# ---- path choice for a jumped host (2026-11-19, fb1) ---------------------------------------------------------------------
+# A host whose config line has a jump can be reached two ways: DIRECT (ssh to its address) and through the JUMP host (ProxyCommand
+# ssh -W). Both use the same pinned known_hosts file with StrictHostKeyChecking=yes, so the direct path checks the host key exactly
+# as the jump path does. Before this, the jump was always used, so one dropped ssh to the jump host made every host behind it
+# unreachable.
+#   BB_PATH=auto (default): the path cached in ~/.temper/bb-path/<host> ("<direct|jump> <epoch>", written tmp + mv) when it is
+#     younger than BB_PATH_TTL minutes (default 30); else probe direct (5 s) and, on a connect failure, the jump (15 s), and
+#     cache the one that answered. Both down: exit 69 naming both. The Mac's egress is a rotating VPN that today blocks direct,
+#     so without the cache every call would pay the 5 s direct timeout.
+#   BB_PATH=direct|jump: that path only, never a fallback; unreachable: exit 69 naming the path.
+# HOW A CONNECT FAILURE IS TOLD FROM A COMMAND FAILURE: the choice is made by a no-op probe (`ssh ... true`, hard wall of timeout
+# + 2 s), never by running the real command and looking at its exit code. The probe has no remote effect, so any non-zero from
+# it is a connect failure; the real command then runs ONCE on the chosen path and its exit status is final. ssh exit 255 from the
+# real command is ambiguous (the remote side may have acted), which is why a build is never retried on the other path.
+# A cache hit costs one `true` on the cached path (every verb, via confirm_path; the host pick alone trusts it), never a probe of the other path;
+# the cached path failing drops the cache and probes the other one. Each call prints `bb-co: <host> via direct|jump(<jump>)`
+# on stderr. bb-submit gets BB_SSH_PROXY only on the jump path; BB_KNOWN_HOSTS on both.
+# CONTROL MASTERS: every ssh to a jumped host (probe, command, scp) runs with ControlMaster=auto ControlPersist=10m and a route-specific
+# ControlPath, ~/.ssh/cm/bbd-%C (direct) or bbj-%C (jump), so a live master of one route never answers the other, nor an alias's
+# master at ~/.ssh/cm/%C. The probe goes through the same socket, so a hit means "this route answered". ~/.ssh/cm is created 0700.
+# The ProxyCommand's inner ssh to the jump host uses ControlPath=none. Hosts without a jump (bigboy, user@host) are unchanged.
+PATH_DIR=$HOME/.temper/bb-path
+PATH_TTL=${BB_PATH_TTL:-30}
+[[ $PATH_TTL =~ ^[0-9]+$ ]] || { echo "$PROG: BB_PATH_TTL must be minutes (digits)" >&2; exit 2; }
+case ${BB_PATH:-auto} in auto|direct|jump) ;; *) echo "$PROG: BB_PATH must be auto, direct or jump" >&2; exit 2 ;; esac
+NAME=; JUMP=; KNOWNF=; PATHSEL=direct; PATHSRC=; SETUP_KEY=
+apply_path() {  # apply_path direct|jump: SSHO and the bb-submit variables for that path
+  PATHSEL=$1
+  SSHO=(-i "$KEY" -o BatchMode=yes)
+  # bb-submit reads these (it runs its own ssh); cleared first so a stray value never applies.
+  export BB_SSH_KEY=$KEY
+  unset BB_SSH_PROXY BB_KNOWN_HOSTS
+  [ -n "$JUMP" ] || return 0
+  export BB_KNOWN_HOSTS=$KNOWNF
+  # the paths sit inside ssh -o values (the ProxyCommand one is re-read by a shell), so they are double-quoted: a HOME with spaces
+  SSHO+=(-o "UserKnownHostsFile=\"$KNOWNF\"" -o StrictHostKeyChecking=yes)
+  # One master socket per ROUTE: ssh's %C hashes host/port/user, not the ProxyCommand, so a master made over the jump (or by an alias
+  # in ~/.ssh/config with ControlPath ~/.ssh/cm/%C) would answer the "direct" probe and make the label, cache and pin false.
+  # The prefix (bbd- / bbj-) keeps the routes apart; the command line beats any ControlPath in ~/.ssh/config.
+  [ -d "$HOME/.ssh" ] || mkdir -m 700 "$HOME/.ssh" 2> /dev/null || true
+  [ -d "$HOME/.ssh/cm" ] || mkdir -m 700 "$HOME/.ssh/cm" 2> /dev/null || true
+  SSHO+=(-o ControlMaster=auto -o "ControlPath=\"$HOME/.ssh/cm/bb${1:0:1}-%C\"" -o ControlPersist=10m)
+  if [ "$1" = jump ]; then
+    export BB_SSH_PROXY=$JUMP
+    # The inner ssh to the jump host takes no master: the outer master already amortises that hop, and a second persistent
+    # process (or a socket shared with an alias-made master) would only blur which route answered.
+    SSHO+=(-o "ProxyCommand=ssh -i \"$KEY\" -o BatchMode=yes -o ControlMaster=no -o ControlPath=none -o ConnectTimeout=15 -W %h:%p $JUMP")
+  fi
+}
+path_label() { if [ "$1" = jump ]; then echo "jump($JUMP)"; else echo direct; fi; }
+probe_path() {  # probe_path direct|jump: a no-op `true` over that path; non-zero = connect failure. Hard wall: timeout + 2 s.
+  local t=5 p w rc=0
+  [ "$1" != jump ] || t=15
+  apply_path "$1"
+  ssh "${SSHO[@]}" -o ConnectTimeout=$t "$HOST" true > /dev/null 2>&1 & p=$!
+  ( sleep $((t + 2)); kill "$p" 2> /dev/null ) > /dev/null 2>&1 & w=$!
+  { wait "$p" || rc=$?; } 2> /dev/null  # the shell reports a killed job on stderr
+  kill "$w" 2> /dev/null || true; wait "$w" 2> /dev/null || true
+  return "$rc"
+}
+cache_get() {  # cache_get <name>: print the cached path when it is younger than the TTL
+  local f=$PATH_DIR/$1 p= t= now
+  [ -f "$f" ] || return 1
+  read -r p t < "$f" || true
+  case $p in direct|jump) ;; *) return 1 ;; esac
+  [[ $t =~ ^[0-9]{1,12}$ ]] || return 1  # 12 digits: a longer number wraps 64-bit arithmetic and would pass as fresh
+  now=$(date +%s)
+  [ "$t" -le $((now + 60)) ] && [ $((now - t)) -lt $((PATH_TTL * 60)) ] || return 1  # not from the future (60 s of clock skew allowed)
+  printf '%s\n' "$p"
+}
+# cache_put never fails the run: an unwritable ~/.temper costs the cache (one warning line), not the build. It removes its own tmp file on
+# failure and sweeps tmp files of killed runs (older than 5 min; a fresh one may belong to a concurrent run). No trap: the verbs own EXIT.
+cache_put() {
+  local t=$PATH_DIR/$NAME.tmp.$$
+  { mkdir -p "$PATH_DIR" && find "$PATH_DIR" -maxdepth 1 -name "$NAME.tmp.*" -mmin +5 -exec rm -f {} + \
+      && printf '%s %s\n' "$1" "$(date +%s)" > "$t" && mv "$t" "$PATH_DIR/$NAME"; } 2> /dev/null \
+    || { rm -f "$t" 2> /dev/null; echo "bb-co: warning: cannot write the path cache $PATH_DIR/$NAME; continuing uncached" >&2; }
+}
+choose_path() {  # choose_path [<excluded path>]: set PATHSEL and the ssh options for the jumped host $NAME
+  local c p failed=
+  PATHSRC=
+  if [ "${BB_PATH:-auto}" != auto ]; then
+    probe_path "$BB_PATH" || { die 69 "$NAME unreachable via $(path_label "$BB_PATH"): BB_PATH=$BB_PATH forces that path, no fallback to the other"; return; }
+    apply_path "$BB_PATH"; PATHSRC=forced; return 0
+  fi
+  if [ -z "${1:-}" ] && c=$(cache_get "$NAME"); then apply_path "$c"; PATHSRC=cache; return 0; fi
+  for p in direct jump; do
+    [ "$p" != "${1:-}" ] || { failed="$failed $p"; continue; }
+    if probe_path "$p"; then
+      [ -z "$failed" ] || echo "bb-co: $NAME connect failed via$failed; using $(path_label "$p")" >&2
+      cache_put "$p"; apply_path "$p"; PATHSRC=probe; return 0
+    fi
+    failed="$failed $p"
+  done
+  die 69 "$NAME unreachable: $(path_label direct) and $(path_label jump) both failed to connect"
+}
+confirm_path() {  # a cached path is trusted by setup_host; checkout/build/... confirm it with one `true` before acting
+  [ "$PATHSRC" = cache ] || return 0
+  probe_path "$PATHSEL" && return 0
+  rm -f "$PATH_DIR/$NAME"
+  echo "bb-co: $NAME cached path $(path_label "$PATHSEL") failed to connect; probing again" >&2
+  choose_path "$PATHSEL"
+}
+announce_path() { [ -z "$JUMP" ] || echo "bb-co: $NAME via $(path_label "$PATHSEL")" >&2; }
+# setup_host <key>: HOST and the ssh options for one host key (a configured name, or user@host: direct, ssh's own known_hosts).
+setup_host() {
+  local i=
+  [ "$1" != "$SETUP_KEY" ] || { apply_path "$PATHSEL"; return 0; }
+  NAME=$1; JUMP=; KNOWNF=
+  case $1 in
+    *@*) HOST=$1 ;;
+    *) i=$(host_index "$1") || return 1; HOST=${H_ADDR[i]} ;;
+  esac
+  if [ -n "$i" ] && [ "${H_JUMP[i]}" != - ]; then
+    JUMP=${H_JUMP[i]} KNOWNF=${H_KNOWN[i]}
+    apply_path direct; choose_path || return
+    [ "${CONFIRM:-1}" = 0 ] || confirm_path
+  else
+    apply_path direct
+  fi
+  SETUP_KEY=$1
+}
+rsh() { ssh "${SSHO[@]}" -o ConnectTimeout=15 "$HOST" "$@"; }
+die() { echo "$PROG: $2" >&2; exit "$1"; }
+usage() { die 2 "usage: bb-co [--host auto|<configured name>] <name> <ref>"; }
+
+want=auto
+if [ "${1:-}" = --host ]; then [ $# -ge 2 ] || usage; want=$2; shift 2; fi
+[ $# -eq 2 ] || usage
+NAME_ARG=$1; REF=$2
+[[ $BB_OWNER =~ ^[A-Za-z0-9_]{1,64}$ ]] || die 2 "BB_OWNER must be [A-Za-z0-9_]{1,64}"
+[[ $NAME_ARG =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || die 2 "name must match [A-Za-z0-9][A-Za-z0-9._-]{0,63}"
+[[ $REF =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$ ]] || die 2 "ref must match [A-Za-z0-9][A-Za-z0-9._/-]{0,199} (a branch, tag, SHA or probes/<owner>/<name>)"
+[[ $NAME_ARG == "$BB_OWNER"-* ]] || die 2 "name must start with $BB_OWNER-"
+WALL=${BB_CO_PROBE_WALL:-30}
+[[ $WALL =~ ^[0-9]{1,3}$ ]] && [ "$WALL" -ge 1 ] || die 2 "BB_CO_PROBE_WALL must be 1 to 3 digits, at least 1 (seconds)"
+
+load_hosts
+# a named host decides before auto_hosts: --host <name> needs no host with pick auto in the config
+if [ "$want" = auto ]; then auto_hosts
+else host_index "$want" > /dev/null || die 2 "--host must be auto or a host of $HOSTS_FILE (${H_NAME[*]})"; fi
+
+# The remote probe (POSIX sh on the host): key=value lines, ending with probe=ok so a truncated reply is never read as a short queue.
+read -r -d '' PROBE <<'EOF_PROBE' || true
+[ -x "$HOME/tools/bb-checkout" ] || { echo "no ~/tools/bb-checkout" >&2; exit 1; }
+Q=$HOME/work/queue
+cnt() { n=0; for f in "$1"/[0-9]*; do [ -f "$f" ] && n=$((n + 1)); done; echo "$n"; }
+hc=$(sed -n 's/^[[:space:]]*\([1-9][0-9]\{0,2\}\)[[:space:]]*$/\1/p' "$HOME/work/max-reactors" 2> /dev/null | head -n 1)
+hc=${hc:-3}; cap=5; [ "$hc" -ge 5 ] || cap=$hc
+read -r l1 l5 rest < "${BB_TEST_LOADAVG:-/proc/loadavg}" || exit 1
+cores=${BB_TEST_NPROC:-$(nproc)}
+ex=0; [ ! -e "$HOME/work/co/@NAME@" ] || ex=1
+echo "waiting=$(cnt "$Q/waiting")"; echo "running=$(cnt "$Q/running")"; echo "cap=$cap"; echo "load5=$l5"; echo "cores=$cores"; echo "exists=$ex"; echo "probe=ok"
+EOF_PROBE
+PROBE=${PROBE//@NAME@/$NAME_ARG}
+
+# probe_one <host> <outfile>: runs in a subshell. The ssh is a background job with a watchdog (the ConnectTimeout bounds only the connect).
+probe_one() {
+  local p w rc=0
+  setup_host "$1" || exit 1
+  rsh "$PROBE" < /dev/null > "$2" 2> /dev/null & p=$!
+  ( sleep "$WALL"; kill "$p" 2> /dev/null ) > /dev/null 2>&1 & w=$!
+  { wait "$p" || rc=$?; } 2> /dev/null
+  kill "$w" 2> /dev/null || true; wait "$w" 2> /dev/null || true
+  [ "$rc" -eq 0 ] || { : > "$2"; echo "ssh rc $rc" > "$2.err"; }
+  exit 0
+}
+read -r -d '' PICK_PY <<'EOF_PY' || true
+import sys, re
+from fractions import Fraction
+ok, skipped, exists = [], [], None
+for rank, arg in enumerate(sys.argv[1:]):
+    name, path = arg.split("=", 1)
+    try:
+        text = open(path).read()
+        if not text.strip():
+            try: why = open(path + ".err").read().strip() or "no answer"
+            except OSError: why = "no answer"
+            raise ValueError(why)
+        kv = {}
+        for line in text.splitlines():
+            m = re.fullmatch(r"([a-z0-9]+)=(\S*)", line)
+            if m is None or m.group(1) in kv: raise ValueError("malformed probe reply")
+            kv[m.group(1)] = m.group(2)
+        if sorted(kv) != sorted(["waiting", "running", "cap", "load5", "cores", "exists", "probe"]) or kv["probe"] != "ok":
+            raise ValueError("malformed probe reply")
+        for k in ("waiting", "running", "cap", "cores"):
+            if re.fullmatch(r"[0-9]{1,6}", kv[k]) is None: raise ValueError("malformed probe reply")
+        if re.fullmatch(r"[0-9]{1,6}(\.[0-9]{1,6})?", kv["load5"]) is None or kv["exists"] not in ("0", "1"):
+            raise ValueError("malformed probe reply")
+        w, r, cap, cores, load = int(kv["waiting"]), int(kv["running"]), int(kv["cap"]), int(kv["cores"]), float(kv["load5"])
+        if cap < 1 or cores < 1: raise ValueError("malformed probe reply")
+        if kv["exists"] == "1" and exists is None: exists = name
+        ok.append(((w, Fraction(r, cap), load / cores, rank), name, w, r, cap, load, cores))
+    except (ValueError, OSError) as e:
+        skipped.append(name + " skip: " + str(e))
+for s in skipped: print("SKIP " + s)
+if exists is not None:
+    print("EXISTS " + exists); sys.exit(0)
+if not ok:
+    print("NONE"); sys.exit(0)
+ok.sort(key=lambda t: t[0])
+for k, name, w, r, cap, load, cores in ok:
+    print("ROW %s waiting=%d running=%d/%d load5=%.2f/%d" % (name, w, r, cap, load, cores))
+print("PICK " + ok[0][1])
+EOF_PY
+
+if [ "$want" != auto ]; then chosen=$want
+else
+  tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+  pids=(); args=()
+  # INVARIANT: when bb-co exits, no process its probes started is alive. Each probe runs in a process group of its own (set -m only around the
+  # launch), so one `kill -- -<pid>` reaches the ssh a watchdog did not kill (the watchdog kills the subshell that runs ssh, not ssh itself), the
+  # watchdog's sleep, and the ssh of a path probe; it runs after every probe was waited for and on INT/TERM/HUP. A ControlPersist master (jumped
+  # hosts) detaches with setsid, so it is not in the group: it stays 10 minutes by design, shared with bb-temper.
+  kill_probes() { local q; for q in ${pids[@]+"${pids[@]}"}; do kill -s TERM -- "-$q" 2> /dev/null || true; done; }
+  trap 'kill_probes; for q in ${pids[@]+"${pids[@]}"}; do wait "$q" 2> /dev/null || true; done; exit 1' INT TERM HUP
+  for h in "${AUTO[@]}"; do
+    set -m; ( probe_one "$h" "$tmp/$h" ) & pids+=($!); set +m
+    args+=("$h=$tmp/$h")
+  done
+  for p in "${pids[@]}"; do wait "$p" || true; done
+  kill_probes
+  for h in "${AUTO[@]}"; do [ -e "$tmp/$h" ] || : > "$tmp/$h"; [ -s "$tmp/$h" ] || [ -e "$tmp/$h.err" ] || echo "unreachable (no path to it answered)" > "$tmp/$h.err"; done
+  out=$(python3 -I -c "$PICK_PY" "${args[@]}") || die 1 "the pick failed to rank the probe replies"
+  printf '%s\n' "$out" | sed -n -E 's/^(SKIP|ROW) /bb-co: \1 /p' >&2
+  chosen=$(printf '%s\n' "$out" | sed -n 's/^PICK //p' | head -n 1)
+  held=$(printf '%s\n' "$out" | sed -n 's/^EXISTS //p' | head -n 1)
+  [ -z "$held" ] || die 3 "$NAME_ARG already exists on $held; one checkout lives on one host only (rm it there first)"
+  [ -n "$chosen" ] || die 69 "no auto host answered the queue probe; nothing was created"
+  echo "$PROG: picked $chosen" >&2
+fi
+
+setup_host "$chosen" || die 69 "cannot reach $chosen"
+announce_path
+rc=0
+rsh "BB_OWNER=$BB_OWNER ~/tools/bb-checkout $NAME_ARG $REF" < /dev/null >&2 || rc=$?
+if [ "$rc" -ne 0 ]; then
+  [ "$rc" -ne 255 ] || echo "$PROG: ssh exit 255: the host may or may not have created $NAME_ARG; check before retrying" >&2
+  echo "$PROG: bb-checkout on $chosen failed (rc $rc); no HOST line" >&2
+  exit "$rc"
+fi
+echo "HOST=$chosen"
