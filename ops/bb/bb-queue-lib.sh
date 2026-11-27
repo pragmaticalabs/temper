@@ -34,7 +34,8 @@ PSLIST=${BB_TEST_PS:-}   # TEST ONLY: a file of "pid ppid rss_kb args..." lines,
 # QUEUE CLAIMS TO COME (issue #130, 2026-11-26): MemAvailable and the off-queue headroom still miss the growth of the QUEUE'S OWN launches:
 # three grants in a row at "enough" MemAvailable each later grow by ~5 GB (maven JVM + surefire/failsafe fork) and the kernel kills a fork.
 # INVARIANT: no grant leaves MemAvailable, minus the off-queue headroom, minus what the queue's live launches are still expected to claim,
-# minus this grant's own expectation, below the floor. A launch's claim = max(0, E - RSS of its process tree), E = mem_claim_gb (a measured
+# below the floor (CTO ruling 2026-11-27: no extra term for the grant itself; the floor is already sized for one grant, so the floor must be
+# at least E, see mem_config_refusal). A launch's claim = max(0, E - RSS of its process tree), E = mem_claim_gb (a measured
 # per-host constant, default 6 GB = the 2.4 + 3.6 GB the floor was sized on; file $MEMCLAIM, read at every pick; no production
 # environment fallback, since pick runs with the enqueuer's environment and a submitter would lift the bound: the only environment input is
 # BB_TEST_MEM_CLAIM_FILE, a test seam of the class of BB_TEST_MEMINFO and BB_TEST_PS, which nothing gates outside tests). The tree's RSS so far
@@ -43,8 +44,9 @@ PSLIST=${BB_TEST_PS:-}   # TEST ONLY: a file of "pid ppid rss_kb args..." lines,
 # whose processes hang off containerd-shim, not off the ledger pid), the descendants of that container's init pid (one `docker inspect`, 5 s
 # bound, for all the isolated launches); a container that is gone, a docker that does not answer in time or a pid that is not a positive
 # integer adds 0, so the claim is then E - tree (an over-claim, never an under-claim). A bb-hold
-# ticket claims nothing (its containers are in MemAvailable). The rule applies only while at least one claiming launch lives: with none, #53's
-# floor alone decides (it is sized for one grant), and its starvation override stays as it was. FAILURE MODES: a launch that outgrows E claims
+# ticket claims nothing (its containers are in MemAvailable). With no claiming launch alive the claims are 0 and #53's floor test alone
+# decides; its starvation override stays as it was. A config with floor < E is REFUSED at pick only (mem_config_refusal): pick() grants nothing (no starvation override either) while it holds;
+# a ticket submitted under it is queued and held, not refused at submit (bb-build is untouched). FAILURE MODES: a launch that outgrows E claims
 # 0 while still growing (under-claim); containers a build starts itself (Testcontainers, siblings of bb-<id> on the host docker, not
 # attributable to a ticket) sit outside both trees, are already in MemAvailable and still claim E - tree RSS (over-claim); RSS counts shared file pages (under-claim). Grants are serialised by the queue lock and the ledger line
 # written in the grant's own lock hold (see LAUNCH LEDGER), so two waiters never spend the same headroom.
@@ -379,6 +381,7 @@ reap() {
 pick() {
   local r=${1-} me=${2-${ID-}} id f c hc bs now lh mh cand="" oldest="" ocr=0 cr; now=$(date +%s)   # r: live queue launches (LEDGER), as reap counted them in this lock hold (#88)
   case "$r" in ''|*[!0-9]*) echo "pick: refused: no reap count from this lock hold (got '$r'), nothing granted (#90)" >&2; return 0;; esac
+  [ -z "$(mem_config_refusal)" ] || return 0   # a refused memory config grants nothing, whatever has waited (mem_config_refusal)
   hc=$(host_cap)
   for id in $(grantable); do
     f=$Q/waiting/$id; c=$(field "$f" cap); case "$c" in ''|*[!0-9]*) c=3;; esac; [ "$c" -le "$hc" ] || c=$hc
@@ -499,10 +502,12 @@ mem_available_gb() {
 # mem_held: nothing when MemAvailable minus the off-queue JVM headroom is >= the floor, else the reason ("held: MemAvailable 5.1 GB < floor
 # 8 GB", or with headroom "held: MemAvailable 20.0 GB - off-queue JVM headroom 18.0 GB = 2.0 GB < floor 8 GB"). An unreadable or
 # malformed meminfo (no MemAvailable line, a non-numeric value, a unit other than kB) never holds the queue. When that test passes and the
-# queue has a live claiming launch (QUEUE CLAIMS TO COME), the same minus the launches' claims and this grant's own E is tested; its reason names them:
-# "held: MemAvailable 20.0 GB - queue claims to come 12.0 GB (t1 6.0 GB, t2 6.0 GB) - this grant 6.0 GB = 2.0 GB < floor 8 GB".
+# queue has a live claiming launch (QUEUE CLAIMS TO COME), the same minus the launches' claims is tested; its reason names them:
+# "held: MemAvailable 20.0 GB - queue claims to come 14.0 GB (t1 6.0 GB, t2 6.0 GB, t3 2.0 GB) = 6.0 GB < floor 8 GB". A config the queue refuses
+# (mem_config_refusal) holds everything, first.
 mem_held() {
   local fl hr old k cl detail
+  old=$(mem_config_refusal); [ -z "$old" ] || { echo "$old"; return 0; }
   fl=$(mem_floor_gb); hr=$(offqueue_headroom_kb)
   old=$(awk -v fl="$fl" -v hr="$hr" '$1 == "MemAvailable:" { if ($2 ~ /^[0-9]+$/ && $3 == "kB" && ($2 - hr) / 1048576 < fl + 0) {
       if (hr > 0) printf "held: MemAvailable %.1f GB - off-queue JVM headroom %.1f GB = %.1f GB < floor %d GB\n", $2 / 1048576, hr / 1048576, ($2 - hr) / 1048576, fl
@@ -510,11 +515,19 @@ mem_held() {
   [ -z "$old" ] || { echo "$old"; return 0; }
   read -r k cl detail <<< "$(queue_claims | awk '{ k++; cl += $4; d = d (k > 1 ? ", " : "") $1 " " sprintf("%.1f", $4 / 1048576) " GB" } END { printf "%d %.0f %s\n", k, cl, d }')"
   [ "${k:-0}" -gt 0 ] || return 0
-  awk -v fl="$fl" -v hr="$hr" -v cl="$cl" -v eg="$(mem_claim_gb)" -v d="$detail" '$1 == "MemAvailable:" { e = eg * 1048576   # GiB -> kB in awk: any positive integer, no shell arithmetic to overflow
-    if ($2 ~ /^[0-9]+$/ && $3 == "kB" && ($2 - hr - cl - e) / 1048576 < fl + 0) {
+  awk -v fl="$fl" -v hr="$hr" -v cl="$cl" -v d="$detail" '$1 == "MemAvailable:" {
+    if ($2 ~ /^[0-9]+$/ && $3 == "kB" && ($2 - hr - cl) / 1048576 < fl + 0) {
       printf "held: MemAvailable %.1f GB", $2 / 1048576
       if (hr > 0) printf " - off-queue JVM headroom %.1f GB", hr / 1048576
-      printf " - queue claims to come %.1f GB (%s) - this grant %.1f GB = %.1f GB < floor %d GB\n", cl / 1048576, d, e / 1048576, ($2 - hr - cl - e) / 1048576, fl }; exit }' "$MEMINFO" 2>/dev/null || true
+      printf " - queue claims to come %.1f GB (%s) = %.1f GB < floor %d GB\n", cl / 1048576, d, ($2 - hr - cl) / 1048576, fl }; exit }' "$MEMINFO" 2>/dev/null || true
+}
+# mem_config_refusal: nothing, or the reason when the floor is below E (mem_floor_gb < mem_claim_gb, both as resolved): the floor is sized for
+# ONE launch's growth, so a floor under E lets a grant through with no room for what the launch will claim (CTO ruling 2026-11-27). a ticket
+# submitted under it is queued and held (no submit-time refusal); pick() grants nothing while it holds. Names both values and where each comes from.
+mem_config_refusal() {
+  local fl e; fl=$(mem_floor_gb); e=$(mem_claim_gb)
+  awk -v fl="$fl" -v e="$e" -v ff="$MEMFLOOR" -v ef="$MEMCLAIM" 'BEGIN { if (fl + 0 < e + 0)
+    printf "refused: memory floor %s GB (file %s, else BB_MEM_FLOOR_GB, else 8) < queue claim E %s GB (file %s, else 6): raise the floor or lower E\n", fl, ff, e, ef }'
 }
 # mem_claim_gb: E in GiB: the first line of $MEMCLAIM holding a positive integer of any size (surrounding blanks and leading zeros allowed),
 # else 6; a line that is anything else (0, -3, abc, 5x, empty) is skipped, and a missing file or no such line gives 6. No environment fallback.
