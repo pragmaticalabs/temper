@@ -21,14 +21,18 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 /// QUEUE CLAIMS TO COME (issue #130) in `ops/bb/bb-queue-lib.sh`: a grant must not leave MemAvailable, minus the off-queue headroom, minus
 /// what the queue's own live launches are still expected to claim (E - their tree's RSS, E = 6 GB by default), minus the grant's own E,
 /// below the floor (8 GB). Every row runs REAL `bb-build __run` waiters through the production path (reap, pick, grant, ledger line, all in
-/// one queue-lock hold); only MemAvailable (BB_TEST_MEMINFO), the process list (BB_TEST_PS), /proc/vmstat (BB_TEST_VMSTAT) and the launch
-/// (BB_TEST_MVN: a bash script that holds until <name>.go exists) are fakes.
+/// one queue-lock hold); only MemAvailable (BB_TEST_MEMINFO), the process list (BB_TEST_PS), /proc/vmstat (BB_TEST_VMSTAT), the launch
+/// (BB_TEST_MVN: a bash script that holds until <name>.go exists), `docker inspect` (a script on PATH, answered from a file) and bb-netns-run
+/// (runs the launch directly) are fakes. An isolated ticket (BB_PORT_GROUP=1 with docker on PATH, so iso=1) counts its container's tree too.
 ///
 /// Probes: make mem_held skip the claim term -> [#threeWaiters_at20GbFloor8_thirdIsHeld] and [#twoWaitersInTheSameSecond_neverSpendTheSameHeadroom]
 /// red; count a launch's claim as E whatever its tree holds -> [#aTreeAtItsExpectedSize_claimsNothingMore] red; let the claim rule apply with
 /// no live launch -> [#nothingRunning_anOutsideJobHoldingTheFloor_keepsTheStarvationOverride] still green but #53's rows red; let the memory
 /// override pass while a launch runs -> [#aClaimHeldTicket_isNeverOverridden_whileALaunchRuns] red; drop grant_record ->
-/// [#theGrantRecordsMemAvailableAndOomKill] red.
+/// [#theGrantRecordsMemAvailableAndOomKill] red; ignore the container tree in queue_claims ->
+/// [#anIsolatedLaunch_countsItsContainersMemory_notOnlyItsLedgerTree] red; write the ledger line after the lock release (ledger_add after
+/// `exec 8>&-` in bb-build) -> [#twoWaitersInTheSameSecond_neverSpendTheSameHeadroom] red (the ledger line is delayed 8 s by
+/// BB_TEST_LEDGER_DELAY, so the window is open for every waiter).
 class BbMemClaimIT {
     private static final String ME = "mc";
     private static final long GIB_KB = 1024L * 1024L;
@@ -54,6 +58,14 @@ class BbMemClaimIT {
         BbFixtures.executable(tools.resolve("bb-cp-record"), "#!/bin/sh\nexit 0\n");
         BbFixtures.executable(tools.resolve("launch"),
                               "#!/bin/bash\n: > \"$HOLD_DIR/$1.up\"\nwhile [ ! -e \"$HOLD_DIR/$1.go\" ]; do sleep 0.3; done\n");
+        // docker: only `inspect -f '{{.Name}} {{.State.Pid}}' <name>...`, answered from $HOLD_DIR/container-pids ("<name> <pid>" lines); an unknown name
+        // is an error on stderr and exit 1 while the known ones are still printed, as docker does. The format string is pinned: a changed one exits 2.
+        BbFixtures.executable(tools.resolve("docker"),
+                              "#!/bin/bash\n[ \"$1\" = inspect ] && [ \"$2\" = -f ] && [ \"$3\" = '{{.Name}} {{.State.Pid}}' ] || exit 2\nshift 3\nrc=0\n"
+                              + "for n in \"$@\"; do l=$(grep -E \"^$n \" \"$HOLD_DIR/container-pids\" 2>/dev/null) && echo \"/$l\" || { echo \"Error: No such object: $n\" >&2; rc=1; }; done\nexit $rc\n");
+        // bb-netns-run <id> <checkout> <mvn> args...: the real one runs maven in a container; this one runs the launch directly
+        BbFixtures.executable(tools.resolve("bb-netns-run"), "#!/bin/bash\nshift 2\nexec \"$@\"\n");
+        Files.writeString(dir.resolve("container-pids"), "");
         Files.writeString(dir.resolve("max-reactors"), "3\n");
         Files.writeString(dir.resolve("loadavg"), "0.00 0.00 0.00 1/1 1\n");
         Files.writeString(dir.resolve("ps"), "");
@@ -143,6 +155,7 @@ class BbMemClaimIT {
     @Test
     void twoWaitersInTheSameSecond_neverSpendTheSameHeadroom() throws Exception {
         memAvailableKb(14 * GIB_KB);
+        more.put("BB_TEST_LEDGER_DELAY", "8");  // ledger_add sleeps 8 s before writing: with the line written in the lock hold, the other waiters wait on the lock; written after it, they pick inside the window
         enqueue("a");
         enqueue("b");
         enqueue("c");
@@ -254,6 +267,82 @@ class BbMemClaimIT {
         }
     }
 
+    /// An isolated ticket (iso=1) runs maven in docker container bb-<id>, outside the ledger pid's tree: the container's init tree counts too.
+    /// Tree 0.5 GB + container 3 GB: claim 6 - 3.5 = 2.5 GB (counting the ledger tree only gives 5.5 GB). At 17 GB: 17 - 2.5 - own 6 = 8.5 >= 8, so b
+    /// starts; with the container ignored 17 - 5.5 - 6 = 5.5 < 8 and b is held.
+    @Test
+    void anIsolatedLaunch_countsItsContainersMemory_notOnlyItsLedgerTree() throws Exception {
+        memAvailableKb(17 * GIB_KB);
+        more.put("PATH", tools + ":" + System.getenv("PATH"));  // the fake docker: iso=1 needs `command -v docker`, queue_claims calls it
+        var a = enqueue("a", Map.of("BB_PORT_GROUP", "1"));
+
+        assertThat(within(30_000, () -> up("a"))).isTrue();
+        assertThat(field("running", a, "iso")).as("a is an isolated ticket").isEqualTo("1");
+        var pid = launchPid(a);
+        var container = 777_000L;
+        var half = GIB_KB / 2;
+
+        Files.writeString(dir.resolve("ps"), pid + " 1 " + half + " bash bb-build __run\n"
+                                              + "700 1 2000 containerd-shim\n"
+                                              + container + " 700 " + 1000 + " docker-init\n"
+                                              + (container + 1) + " " + container + " " + (3 * GIB_KB - 1000) + " java maven\n");
+        Files.writeString(dir.resolve("container-pids"), "bb-" + a + " " + container + "\n");
+        assertThat(lib("queue_claims").stdout().strip()).isEqualTo(a + " " + pid + " " + (half + 3 * GIB_KB) + " " + (6 * GIB_KB - half - 3 * GIB_KB));
+        var b = enqueue("b");
+
+        assertThat(within(40_000, () -> up("b"))).as("17 - 2.5 - own 6 = 8.5 >= 8").isTrue();
+        assertThat(in("waiting", b)).isFalse();
+    }
+
+    /// A container that is gone, or not running (State.Pid 0), adds nothing: the claim is E - tree, the over-claim of a launch with no container.
+    @Test
+    void anIsolatedLaunch_whoseContainerCannotBeRead_claimsEMinusItsTree() throws Exception {
+        more.put("PATH", tools + ":" + System.getenv("PATH"));
+        var a = enqueue("a", Map.of("BB_PORT_GROUP", "1"));
+
+        assertThat(within(30_000, () -> up("a"))).isTrue();
+        var pid = launchPid(a);
+
+        Files.writeString(dir.resolve("ps"), pid + " 1 " + GIB_KB + " bash bb-build __run\n" + "778001 1 " + 4 * GIB_KB + " java orphaned-container-java\n");
+        for (var answer : List.of("", "bb-" + a + " 0\n", "bb-other-1 778001\n")) {
+            Files.writeString(dir.resolve("container-pids"), answer);
+            assertThat(lib("queue_claims").stdout().strip()).as("answer '%s'", answer.strip()).isEqualTo(a + " " + pid + " " + GIB_KB + " " + 5 * GIB_KB);
+        }
+    }
+
+    /// $MEMCLAIM: the first line holding a positive integer of any size (blanks and leading zeros allowed) is E in GiB; any other line is skipped;
+    /// no such line, or no file, gives 6. 1000 is 1000, not 6.
+    @Test
+    void theClaimFile_acceptsEveryPositiveInteger_andSkipsEverythingElse() throws Exception {
+        var cases = new java.util.LinkedHashMap<String, String>();
+
+        cases.put("1000\n", "1000");
+        cases.put("  07 \n", "7");
+        cases.put("123456789012\n", "123456789012");
+        cases.put("0\n9\n", "9");
+        cases.put("abc\n-3\n5x\n\n", "6");
+        cases.put("0\n", "6");
+        cases.put("", "6");
+        for (var entry : cases.entrySet()) {
+            Files.writeString(dir.resolve("mem-claim-gb"), entry.getKey());
+            assertThat(lib("mem_claim_gb").stdout().strip()).as("file '%s'", entry.getKey().replace("\n", "|")).isEqualTo(entry.getValue());
+        }
+        Files.delete(dir.resolve("mem-claim-gb"));
+        assertThat(lib("mem_claim_gb").stdout().strip()).as("no file").isEqualTo("6");
+
+        // a 12-digit E goes through the claim arithmetic unchanged (awk doubles, no shell integer overflow)
+        var holder = BbFixtures.process("sleep", "600").start();
+
+        try {
+            Files.writeString(queue.resolve("running").resolve("job-" + BbFixtures.RUN), "started=1\n");
+            BbFixtures.recordLaunch(queue, "job-" + BbFixtures.RUN, holder.pid());
+            Files.writeString(dir.resolve("mem-claim-gb"), "123456789012\n");
+            assertThat(lib("queue_claims").stdout().strip()).endsWith(" 0 " + 123_456_789_012L * GIB_KB);
+        } finally {
+            holder.destroyForcibly();
+        }
+    }
+
     /// A waiting ticket created `ageSecs` ago, as BbMemFloorIT writes one; no waiter: only `pick` is called on it.
     private String waitingTicket(String name, long ageSecs) throws IOException {
         var id = name + "-" + BbFixtures.RUN;
@@ -312,8 +401,15 @@ class BbMemClaimIT {
 
     /// Enqueues `bb-build <co> <name>` (the launch gets <name> as its first argument); returns the ticket id.
     private String enqueue(String name) throws Exception {
+        return enqueue(name, Map.of());
+    }
+
+    private String enqueue(String name, Map<String, String> extraEnv) throws Exception {
         var co = checkout(name);
-        var run = BbFixtures.run(List.of(tools.resolve("bb-build").toString(), co.toString(), name), env(), dir, null);
+        var enqueueEnv = env();
+
+        enqueueEnv.putAll(extraEnv);
+        var run = BbFixtures.run(List.of(tools.resolve("bb-build").toString(), co.toString(), name), enqueueEnv, dir, null);
 
         assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
         var id = run.stdout().replaceAll("(?s).*queued ticket=(\\S+).*", "$1").strip();
