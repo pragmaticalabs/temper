@@ -443,11 +443,25 @@ class BbKillLabelIT {
         var served = dir.resolve("vmstat-served");
         var endRead = dir.resolve("vmstat-end-read");
         var runnerRc = dir.resolve("work").resolve(ME + "-late").resolve(".bb").resolve("rc");
+        // The server pairs ONE payload with ONE reader: it holds the FIFO's write end until the reader has closed its end (a probe write then fails with EPIPE) and only then
+        // reopens. Without that hold, a reopen succeeds while the previous reader (awk, exited from its loop but not yet gone: load) still has the FIFO open, so the server
+        // serves and logs a line that no read asked for (#150: 8 and 13 lines, all ":5", for 2 reads).
         var server = BbFixtures.executable(dir.resolve("vmstatd.sh"),
                                            "#!/bin/bash\ntrap '' PIPE\nn=0\nwhile :; do\n"
-                                          + "  { n=$((n+1)); if [ -e " + runnerRc + " ]; then v=6; else v=5; fi\n"
-                                          + "    printf 'nr_free_pages 1\\noom_kill %s\\npgfault 9\\n' \"$v\"; echo \"$n:$v\" >> " + served + "\n"
-                                          + "    [ \"$n\" -lt 2 ] || : > " + endRead + "; } > " + fifo + "\ndone\n");
+                                          + "  exec 3> " + fifo + "\n"
+                                          + "  n=$((n+1)); if [ -e " + runnerRc + " ]; then v=6; else v=5; fi\n"
+                                          + "  printf 'nr_free_pages 1\\noom_kill %s\\npgfault 9\\n' \"$v\" >&3; echo \"$n:$v\" >> " + served + "\n"
+                                          + "  [ \"$n\" -lt 2 ] || : > " + endRead + "\n"
+                                          + "  while printf '\\n' >&3 2> /dev/null; do sleep 0.02; done\n"
+                                          + "  exec 3>&-\ndone\n");
+        // The load seam of #150, always on: every awk that reads the counter lingers 0.5 s after its read (the fd stays open), as a descheduled or slow-exiting reader does under load.
+        var realAwk = BbFixtures.run(List.of("sh", "-c", "command -v awk"), Map.of(), null, null).stdout().strip();
+        var slowAwkDir = Files.createDirectories(dir.resolve("slow-awk"));
+
+        BbFixtures.executable(slowAwkDir.resolve("awk"),
+                              "#!/bin/bash\nfor last; do :; done\n"
+                             + "case \"$*\" in *oom_kill*) exec 3< \"$last\"; " + realAwk + " \"${@:1:$#-1}\" <&3; r=$?; sleep 0.5; exit $r;; esac\n"
+                             + "exec " + realAwk + " \"$@\"\n");
         var fakeJava = BbFixtures.executable(dir.resolve("fakejava.sh"),
                                              "#!/bin/bash\ntrap 'while [ ! -e " + endRead + " ]; do sleep 0.1; done; exit 0' TERM\nwhile :; do sleep 0.2; done\n");
 
@@ -456,7 +470,7 @@ class BbKillLabelIT {
                              .redirectErrorStream(true)
                              .redirectOutput(ProcessBuilder.Redirect.DISCARD)
                              .start());
-        var id = start("late", "bash -c 'exec -a java bash " + fakeJava + "' &\nsleep 60", "bound=2\n", Map.of("BB_TEST_VMSTAT", fifo.toString()));
+        var id = start("late", "bash -c 'exec -a java bash " + fakeJava + "' &\nsleep 60", "bound=2\n", Map.of("BB_TEST_VMSTAT", fifo.toString(), "PATH", slowAwkDir + ":" + System.getenv("PATH")));
 
         finished(id);
         assertThat(field(id, "bound_hit")).isNotEmpty();
