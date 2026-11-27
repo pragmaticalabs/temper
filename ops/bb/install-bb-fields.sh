@@ -46,7 +46,7 @@ readonly BB_LIB_PRE88=f5bd1cc5ac79506f341a414b79558852   # the #81 version: pick
 readonly BB_LIB_PRE90=745b72b5d32d6c7e8fd81c889edc81b1   # the #88 version: pick reads the reap count from the global REAP_LAUNCHES (issue #90)
 readonly BB_LIB_PRE116=bca5488e9abb94003471286f2ac35ca5   # the version before #116: order() has no order_at= and no driver check
 readonly BB_LIB_PRE130=7d5898b17a56ef5552fd0d80fc4f1dd2   # the version before #130: no queue claims to come, no grant record
-readonly BB_LIB_NEW=7a86b6105ec8e99cd4fa7557130e2d66
+readonly BB_LIB_NEW=c2c3d75c8e18dae4b8de365de2e4bbe2
 readonly BB_QUEUE_OLD=7efbfbecb9739fed35223cdc97eb185d
 readonly BB_QUEUE_PREV=a04b7be02f840d4f1e2bd19c54c52b3f
 readonly BB_QUEUE_LIVE=af86457ae18f4ca331e47137cd088bc7   # what the 2026-11-11 hosts run: its header says `group tickets running:`, which the worker cannot parse

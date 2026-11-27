@@ -546,7 +546,7 @@ mem_claim_gb() {
 # A missing, empty or blank-only file is the default, not a typo: no line.
 mem_claim_note() {
   local bad stamp=$Q/.mem-claim-noted
-  bad=$(sed -n '/[^[:space:]]/{ s/^[[:space:]]*//; s/[[:space:]]*$//; p; q; }' "$MEMCLAIM" 2>/dev/null | tr -c '\040-\176' '?' | cut -c1-60)
+  bad=$(sed -n '/[^[:space:]]/{ s/^[[:space:]]*//; s/[[:space:]]*$//; p; q; }' "$MEMCLAIM" 2>/dev/null | tr -c '\040-\176\n' '?' | cut -c1-60)
   if [ -z "$bad" ] || [ -n "$(mem_claim_valid)" ]; then rm -f "$stamp"; return 0; fi
   [ "$(cat "$stamp" 2>/dev/null)" != "$bad" ] || return 0
   printf '%s\n' "$bad" > "$stamp"
