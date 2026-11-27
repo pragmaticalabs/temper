@@ -445,14 +445,15 @@ class BbKillLabelIT {
         var runnerRc = dir.resolve("work").resolve(ME + "-late").resolve(".bb").resolve("rc");
         // The server pairs ONE payload with ONE reader: it holds the FIFO's write end until the reader has closed its end (a probe write then fails with EPIPE) and only then
         // reopens. Without that hold, a reopen succeeds while the previous reader (awk, exited from its loop but not yet gone: load) still has the FIFO open, so the server
-        // serves and logs a line that no read asked for (#150: 8 and 13 lines, all ":5", for 2 reads).
+        // serves and logs a line that no read asked for (#150: 8 and 13 lines, all ":5", for 2 reads). The hold ends when the reader closes (a reader that stops early, like awk and
+        // `head -n 2`, but NOT `cat`, which waits for an EOF this server would never give) and is bounded at 30 s, so no reader can hang the server.
         var server = BbFixtures.executable(dir.resolve("vmstatd.sh"),
                                            "#!/bin/bash\ntrap '' PIPE\nn=0\nwhile :; do\n"
                                           + "  exec 3> " + fifo + "\n"
                                           + "  n=$((n+1)); if [ -e " + runnerRc + " ]; then v=6; else v=5; fi\n"
                                           + "  printf 'nr_free_pages 1\\noom_kill %s\\npgfault 9\\n' \"$v\" >&3; echo \"$n:$v\" >> " + served + "\n"
                                           + "  [ \"$n\" -lt 2 ] || : > " + endRead + "\n"
-                                          + "  while printf '\\n' >&3 2> /dev/null; do sleep 0.02; done\n"
+                                          + "  for _ in $(seq 1500); do printf '\\n' >&3 2> /dev/null || break; sleep 0.02; done\n"
                                           + "  exec 3>&-\ndone\n");
         // The load seam of #150, always on: every awk that reads the counter lingers 0.5 s after its read (the fd stays open), as a descheduled or slow-exiting reader does under load.
         var realAwk = BbFixtures.run(List.of("sh", "-c", "command -v awk"), Map.of(), null, null).stdout().strip();
@@ -475,7 +476,7 @@ class BbKillLabelIT {
         finished(id);
         assertThat(field(id, "bound_hit")).isNotEmpty();
         assertThat(Files.readString(served).strip()).as("the counter was read twice, both while the runner was still stopping the ticket").isEqualTo("1:5\n2:5");
-        assertThat(BbFixtures.run(List.of("cat", fifo.toString()), Map.of(), null, null).stdout()).as("the row's premise: once the runner is done the counter reads 6").contains("oom_kill 6");
+        assertThat(BbFixtures.run(List.of("timeout", "20", "head", "-n", "2", fifo.toString()), Map.of(), null, null).stdout()).as("the row's premise: once the runner is done the counter reads 6").contains("oom_kill 6");
         assertThat(field(id, "oom_kill_start")).isEqualTo("5");
         assertThat(field(id, "oom_kill_end")).as("a read after the job ended and the runner finished is not the job's window").isEqualTo("5");
     }
