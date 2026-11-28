@@ -7,7 +7,7 @@
 # are the functions lock_run, qlock (opens $Q/.lock), log_line, remove_one and remove_leftover, and the leftover move-back in the main loop;
 # all of them run only under `[ "$LIVE" = 1 ]`.
 # N = --days (default 3, an integer 1..3650); H = --hours (an integer 1..87600), the same window in hours, for a sub-day age; --days and --hours
-# together are a usage error. S = --pace (default 2, an integer 0..3600 seconds).
+# together are a usage error. S = --pace (default 2, an integer 0..3600 seconds). Each is decimal, leading zeros allowed (08 is 8), at most 9 significant digits: a longer one is a usage error before any arithmetic (bash wraps at 2^64).
 #
 # THE RULE. A checkout C (an entry of ~/work/co) is removed only when ALL of these hold; each reason that fails is printed by its name:
 #   1 ticket           no ticket in ~/work/queue/{waiting,running} names C (its co= field has C's name after .../work/co/)
@@ -49,11 +49,12 @@
 # measure) once at the start of the pass; at FLOOR (80) percent or more the deferral is WAIVED: the pass runs although tickets are running.
 # Pressure waives the deferral and nothing else: the age is whatever --days/--hours says (the pressure unit passes --hours 6), and each of the
 # seven keep reasons above still holds (a ticket, an in-flight marker, an open process stay protected); the queue lock protocol is unchanged.
-# Below FLOOR the deferral is exactly the one above. A df that cannot be read is `unknown`: no pressure. Why 80: the soak runner stops submitting
+# Below FLOOR the deferral is exactly the one above. A df that cannot be read, or does not answer within 10 seconds (`timeout -k 2`; the run lock is held meanwhile), is `unknown`: no pressure. Why 80: the soak runner stops submitting
 # at 85% (#113) and a run guard kills at 90%; at the observed fill (~1 GB per 3-5 min on a 601 GB disk) 80% leaves one or two hourly timer firings
 # before 90%. The 6 hours of the pressure unit are a guess, not derived (the age distribution of keep=recent checkouts on a full host would settle it).
 # Both DRY and live print one `pressure:` line (use, floor, decision, what the deferral would do); live logs PRESSURE when it waived one.
 # TEST SEAM: BB_CO_GC_PROC=<dir> replaces /proc (BbCoGcIT's blind rows: a real unreadable process is seen by every concurrent run on the host).
+# BB_CO_GC_DF_WAIT=<seconds, 1..99999> replaces the 10 s bound on that df (BbCoGcIT's hung-df row).
 # BB_CO_GC_DF=<command> replaces `df` (called as `<command> --output=pcent $HOME`; BbCoGcIT's pressure rows: the real disk of the build host must not decide).
 # OWNER INSTALL STEPS (not code): the timer units need `loginctl enable-linger aether` (root, once per host): with Linger=no the user manager
 # stops at the last logout, which pauses the timers and SIGTERMs a run between its mv and its rm (the leftovers above exist for that).
@@ -73,6 +74,8 @@
 #   - The ticket log is read by header name; a checkout whose name appears in no row relies on the other three activity signals.
 #   - A mapping held only through mmap (the file closed, the process gone from the directory) is not seen by guard 3: the proc scan reads
 #     cwd, exe and open fds, not /proc/<pid>/maps. A running build has its cwd there, so this needs a daemonised process with a closed fd.
+#   - A df stuck in uninterruptible sleep (D state) survives the kill of `timeout -k`, and the pressure read waits for it: the bound holds for a df that
+#     can be signalled (a hang in a pipe, a sleep), not for one blocked inside the kernel.
 #   - The deferral and the pressure are read once; builds that start during a long pass are met by the pace and the guards, not by a second deferral,
 #     and a pass that frees the disk below FLOOR does not stop itself.
 #   - A checkout stuck with a start and no rc (a killed build) is kept for ever by guard 2; DRY prints it as in-flight so it is visible.
@@ -80,6 +83,9 @@ set -euo pipefail
 PROG=bb-co-gc
 
 usage() { echo "usage: bb-co-gc [--live] [--days N | --hours H] [--pace S]   (N = 1..3650, default 3; H = 1..87600; not both; S = 0..3600 seconds, default 2; DRY unless --live)" >&2; exit 2; }
+# short <digits>: usage unless the value has at most 9 significant digits (leading zeros do not count). Bash arithmetic wraps at 2^64, so
+# 18446744073709551622 would read as 6: a value is accepted only when $((10#..)) can mean exactly its decimal value. Runs before the arithmetic.
+short() { local v=$1; while [ "${v#0}" != "$v" ]; do v=${v#0}; done; [ "${#v}" -le 9 ] || usage; }
 die() { local rc=$1; shift; echo "$PROG: $*" >&2; exit "$rc"; }
 
 LIVE=0; DAYS=3; HOURS=; DAYS_SET=0; HOURS_SET=0; PACE=2
@@ -100,21 +106,28 @@ done
 [ $((DAYS_SET + HOURS_SET)) -le 1 ] || usage
 if [ "$HOURS_SET" = 1 ]; then
   case $HOURS in ''|*[!0-9]*) usage ;; esac
+  short "$HOURS"
   HOURS=$((10#$HOURS))
   { [ "$HOURS" -ge 1 ] && [ "$HOURS" -le 87600 ]; } || usage
   LIMIT=$((HOURS * 3600)); WINDOW=hours=$HOURS
 else
   case $DAYS in ''|*[!0-9]*) usage ;; esac
+  short "$DAYS"
   DAYS=$((10#$DAYS))
   { [ "$DAYS" -ge 1 ] && [ "$DAYS" -le 3650 ]; } || usage
   LIMIT=$((DAYS * 86400)); WINDOW=days=$DAYS
 fi
 case $PACE in ''|*[!0-9]*) usage ;; esac
+short "$PACE"
 PACE=$((10#$PACE))
 [ "$PACE" -le 3600 ] || usage
 LOCK_WAIT=${BB_CO_GC_LOCK_WAIT:-30}
 case $LOCK_WAIT in ''|*[!0-9]*) die 65 "BB_CO_GC_LOCK_WAIT is not an integer: $LOCK_WAIT" ;; esac
 LOCK_WAIT=$((10#$LOCK_WAIT))
+DF_WAIT=${BB_CO_GC_DF_WAIT:-10}   # seconds the df of the pressure read may take (the run lock is held meanwhile); TEST ONLY to shorten
+case $DF_WAIT in ''|*[!0-9]*|??????*) die 65 "BB_CO_GC_DF_WAIT is not an integer of at most 5 digits: $DF_WAIT" ;; esac
+DF_WAIT=$((10#$DF_WAIT))
+[ "$DF_WAIT" -ge 1 ] || die 65 "BB_CO_GC_DF_WAIT is 0: timeout 0 would mean no bound"
 
 [ -n "${HOME:-}" ] || die 65 "HOME is not set"
 WORK=$HOME/work
@@ -258,9 +271,10 @@ deferred() {
   CAP=${cap:-3}
   [ "$GROUPED" -gt 0 ] || [ $((RUNNING * 2)) -gt "$CAP" ]
 }
-# read_pressure: USE = percent of the home filesystem in use (empty when df cannot be read), PRESSURE = 1 when USE >= FLOOR (unknown is 0)
+# read_pressure: USE = percent of the home filesystem in use (empty when df cannot be read or does not answer within DF_WAIT seconds: timeout
+# ends it and its children, the pipeline fails, and USE stays empty, so a df that hangs never turns the waiver on), PRESSURE = 1 when USE >= FLOOR (unknown is 0)
 read_pressure() {
-  USE=$("$DFCMD" --output=pcent "$HOME" 2> /dev/null | tail -n 1 | tr -dc 0-9) || USE=
+  USE=$(timeout -k 2 "$DF_WAIT" "$DFCMD" --output=pcent "$HOME" 2> /dev/null | tail -n 1 | tr -dc 0-9) || USE=
   case $USE in ''|????*|*[!0-9]*) USE= ;; *) USE=$((10#$USE)) ;; esac
   PRESSURE=0
   if [ -n "$USE" ] && [ "$USE" -ge "$FLOOR" ]; then PRESSURE=1; fi
