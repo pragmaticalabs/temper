@@ -1,0 +1,19 @@
+# bb/live-md5s.pre154: a host holding main (9a110724d) bb-co-gc, the copy #154 changes (its BB_COGC_PRE154 pin, vendored as bb/bb-co-gc.pre154.prev);
+# every other file is `repo`. <file> <md5|absent|repo>; one line per install-bb-fields.sh FILES entry.
+bb-cp-record repo
+bb-test repo
+bb-testcount repo
+bb-tickets repo
+bb-hold repo
+bb-wait repo
+bb-await repo
+bb-netns-run repo
+bb-portgroup.py repo
+bb-modules.py repo
+bb-jbct-bootstrap repo
+bb-result repo
+bb-co-gc 3d5b04a7875496e37288c9ae21cab701
+bb-queue-lib.sh repo
+bb-queue repo
+bb-build repo
+bb-mutate repo

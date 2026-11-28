@@ -265,6 +265,7 @@ class BbInstallIT {
         assertThat(pin("BB_RESULT_PRE131")).isEqualTo(BbFixtures.md5(prev("bb-result.pre131")));
         assertThat(pin("BB_WAIT_PRE131")).isEqualTo(BbFixtures.md5(prev("bb-wait.pre131")));
         assertThat(pin("BB_AWAIT_PRE131")).isEqualTo(BbFixtures.md5(prev("bb-await.pre131")));
+        assertThat(pin("BB_COGC_PRE154")).isEqualTo(BbFixtures.md5(prev("bb-co-gc.pre154")));
     }
 
     /// The bb-test lane helpers go in before bb-build (which calls bb-cp-record); a host holding a stranger's bb-test is refused, naming the one pin and
@@ -845,6 +846,13 @@ class BbInstallIT {
     @Test
     void aHostAtTheVersionsBefore131_isAcceptedForEveryFile_andUpgraded() throws Exception {
         installOntoTheLiveSet("live-md5s.pre131");
+    }
+
+    /// #154 changed bb-co-gc, which every host already holds: a host holding main's copy (BB_COGC_PRE154) is accepted and upgraded, backed up.
+    /// Mutation: drop BB_COGC_PRE154 from accepted_of -> refused bb-co-gc, exit 65, red.
+    @Test
+    void aHostAtTheBb_co_gcBefore154_isAcceptedAndUpgraded() throws Exception {
+        installOntoTheLiveSet("live-md5s.pre154");
     }
 
     private void installOntoTheLiveSet(String resource) throws Exception {

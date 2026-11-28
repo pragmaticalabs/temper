@@ -171,24 +171,66 @@ class BbCoGcIT {
         Files.writeString(log, row, java.nio.file.StandardOpenOption.APPEND);
     }
 
+    /// The only argv the tool may give df: the real `df --output=pcent <home>` (production reads the use of $HOME). A fake that accepted any argv would
+    /// let a dropped or changed argument pass unseen; this one answers every other argv as a failing df does (message, rc 64), which reads as `unknown`.
+    private String onlyTheProductionArgv() {
+        return "[ \"$#\" = 2 ] && [ \"$1\" = --output=pcent ] && [ \"$2\" = '" + home + "' ] || { echo \"df: unexpected argv: $*\" >&2; exit 64; }\n";
+    }
+
+    /// A `df` that reports `percent` use for `--output=pcent <home>` and refuses any other argv, in df's own two lines (header, value). Outside `home`.
+    private Path fakeDf(int percent) throws IOException {
+        return BbFixtures.executable(procRoot.resolve("df-" + percent),
+                                     "#!/bin/sh\n" + onlyTheProductionArgv() + "printf 'Use%%\\n %s%%\\n' " + percent + "\n");
+    }
+
+    /// A `df` that records that it was called, then reports 10%.
+    private Path recordingDf(Path marker) throws IOException {
+        return BbFixtures.executable(procRoot.resolve("df-recording"),
+                                     "#!/bin/sh\n" + onlyTheProductionArgv() + ": > '" + marker + "'\nprintf 'Use%%\\n  10%%\\n'\n");
+    }
+
+    private Map<String, String> atUse(int percent) throws IOException {
+        return Map.of("BB_CO_GC_DF", fakeDf(percent).toString());
+    }
+
+    private Path payload(Path checkout) {
+        return checkout.resolve("module/target/payload.bin");
+    }
+
     private BbFixtures.Outcome gc(String... args) throws Exception {
         return gcWith(Map.of(), args);
     }
 
-    private BbFixtures.Outcome gcWith(Map<String, String> extraEnv, String... args) throws Exception {
-        assumeTrue(BbFixtures.linux(), "bb-co-gc reads /proc and uses GNU stat, date, mv, flock");
+    private HashMap<String, String> gcEnv(Map<String, String> extraEnv) throws IOException {
         var env = new HashMap<String, String>(extraEnv);
 
         env.putIfAbsent("PATH", System.getenv("PATH"));
         env.putIfAbsent("BB_CO_GC_PROC", fakeProc().toString());
+        env.putIfAbsent("BB_CO_GC_DF", fakeDf(10).toString());   // the build host's real disk must not decide: 10% is below the floor
         env.put("HOME", home.toString());
         env.put("USER", System.getProperty("user.name"));
+        return env;
+    }
+
+    private BbFixtures.Outcome gcWith(Map<String, String> extraEnv, String... args) throws Exception {
+        assumeTrue(BbFixtures.linux(), "bb-co-gc reads /proc and uses GNU stat, date, mv, flock");
+        var env = gcEnv(extraEnv);
         var command = new java.util.ArrayList<String>();
 
         command.add(BbFixtures.OPS_BB.resolve("bb-co-gc").toString());
         command.addAll(List.of(args));
 
         return BbFixtures.run(command, env, home, null);
+    }
+
+    /// Like gcWith, but the arguments are a shell word list that bash expands, so their BYTES are exact whatever the JVM's own encoding does to argv
+    /// (a JVM in the C locale turns a non-ASCII argument into `?`).
+    private BbFixtures.Outcome gcShell(Map<String, String> extraEnv, String shellWords, String... assignments) throws Exception {
+        assumeTrue(BbFixtures.linux(), "bb-co-gc reads /proc and uses GNU stat, date, mv, flock");
+        var command = List.of("/bin/bash", "-c", String.join(" ", assignments) + " exec \"$0\" " + shellWords,
+                              BbFixtures.OPS_BB.resolve("bb-co-gc").toString());
+
+        return BbFixtures.run(command, gcEnv(extraEnv), home, null);
     }
 
     private BbFixtures.Outcome live() throws Exception {
@@ -204,7 +246,7 @@ class BbCoGcIT {
         assertKeptOnlyFor(victim, reason, Map.of());
     }
 
-    private void assertKeptOnlyFor(Path victim, String reason, Map<String, String> env) throws Exception {
+    private BbFixtures.Outcome assertKeptOnlyFor(Path victim, String reason, Map<String, String> env) throws Exception {
         var control = checkout("control", 10);
         var run = liveWith(env);
 
@@ -215,6 +257,8 @@ class BbCoGcIT {
                   .hasSize(1)
                   .allMatch(l -> l.contains(" reasons=" + reason + " ") || l.endsWith(" reasons=" + reason));
         assertThat(run.stdout()).doesNotContain("removed " + victim.getFileName() + " ");
+
+        return run;
     }
 
     // ---- keep reasons 1..6
@@ -836,6 +880,599 @@ class BbCoGcIT {
     }
 
     // ---- command stubs: state that changes at an exact step of the run (#113 test round)
+    // ---- #154: --hours, and the pressure floor that waives the deferral
+    /// At 81% a running port-group ticket does NOT defer the pass: the idle checkout is removed (old code: `deferred: builds running`, nothing removed),
+    /// and with 5 tickets running at cap 5 (more than half) it runs too. The age stays the given --days 3: a checkout of 2 days is kept.
+    @Test
+    void atOrAboveTheFloor_aRunningGroupTicketOrMoreThanHalfTheCap_doesNotDeferThePass() throws Exception {
+        skeleton();
+        var idle = checkout("idle", 10);
+        var young = checkout("young", 2);
+
+        ticket("running", "r1", "busy", "group=1");
+        var grouped = gcWith(atUse(81), "--live", "--days", "3", "--pace", "0");
+
+        assertThat(grouped.rc()).as(grouped.stdout() + grouped.stderr()).isZero();
+        assertThat(idle).as(grouped.stdout()).doesNotExist();
+        assertThat(payload(young)).exists();
+        assertThat(grouped.stdout()).contains("pressure: use=81% floor=80% pressure=yes deferral=waived (running=1 group=1 cap=3)")
+                  .doesNotContain("deferred: builds running");
+        assertThat(logLines()).anyMatch(l -> l.contains(" PRESSURE deferral waived use=81 floor=80 running=1 group=1 cap=3"));
+        Files.delete(home.resolve("work/queue/running/r1"));
+        var idle2 = checkout("idle2", 10);
+
+        Files.writeString(home.resolve("work/max-reactors"), "5\n");
+        for (var i = 1; i <= 5; i++) {
+            ticket("running", "f" + i, "busy" + i);
+        }
+
+        var five = gcWith(atUse(81), "--live", "--days", "3", "--pace", "0");
+
+        assertThat(five.rc()).as(five.stdout() + five.stderr()).isZero();
+        assertThat(idle2).as(five.stdout()).doesNotExist();
+        assertThat(five.stdout()).contains("deferral=waived (running=5 group=0 cap=5)");
+    }
+
+    /// The floor is 80, inclusive: at 79 the group ticket defers the pass as before (nothing removed, the old DEFERRED line), at exactly 80 it does not.
+    /// Mutation: `-ge` to `-gt` on the floor -> the 80 half stays deferred, red; drop the floor test -> the 79 half runs, red.
+    @Test
+    void belowTheFloorTheDeferralStands_atTheFloorItIsWaived() throws Exception {
+        skeleton();
+        var idle = checkout("idle", 10);
+
+        ticket("running", "r1", "busy", "group=1");
+        var below = gcWith(atUse(79), "--live", "--days", "3", "--pace", "0");
+
+        assertThat(below.rc()).as(below.stdout() + below.stderr()).isZero();
+        assertThat(below.stdout()).contains("pressure: use=79% floor=80% pressure=no deferral=applies (running=1 group=1 cap=3)",
+                                            "deferred: builds running (running=1 group=1 cap=3); nothing removed");
+        assertThat(payload(idle)).exists();
+        assertThat(Files.readString(home.resolve("work/co-gc.log"))).contains("DEFERRED builds running running=1 group=1 cap=3")
+                  .doesNotContain("RUN live").doesNotContain("PRESSURE");
+        var at = gcWith(atUse(80), "--live", "--days", "3", "--pace", "0");
+
+        assertThat(at.rc()).as(at.stdout() + at.stderr()).isZero();
+        assertThat(idle).as(at.stdout()).doesNotExist();
+    }
+
+    /// A df that cannot be read is `unknown`, not pressure: the deferral stands, and the line says so.
+    @Test
+    void anUnreadableDf_isNoPressure_theDeferralStands() throws Exception {
+        skeleton();
+        var idle = checkout("idle", 10);
+        var broken = BbFixtures.executable(procRoot.resolve("df-broken"), "#!/bin/sh\necho 'df: cannot read' >&2\nexit 1\n");
+
+        ticket("running", "r1", "busy", "group=1");
+        var run = gcWith(Map.of("BB_CO_GC_DF", broken.toString()), "--live", "--days", "3", "--pace", "0");
+
+        assertThat(run.stdout()).contains("pressure: use=unknown% floor=80% pressure=unknown deferral=applies", "deferred: builds running");
+        assertThat(payload(idle)).exists();
+    }
+
+    /// --hours is the window in hours, by last use, in both spellings: a checkout idle 5 h is kept as recent, one idle 7 h is removed, and --hours 8
+    /// keeps the 7 h one (old code: `--hours` is a usage error, rc 2).
+    @Test
+    void hours_setsTheWindow_aCheckoutIdleFiveHoursIsKept_sevenIsRemoved() throws Exception {
+        skeleton();
+        var five = checkout("idle5h", 5.0 / 24);
+        var seven = checkout("idle7h", 7.0 / 24);
+        var wide = gc("--live", "--hours=8", "--pace", "0");
+
+        assertThat(wide.rc()).as(wide.stdout() + wide.stderr()).isZero();
+        assertThat(payload(five)).exists();
+        assertThat(payload(seven)).as(wide.stdout()).exists();
+        var dry = gc("--hours", "6");
+
+        assertThat(dry.rc()).as(dry.stdout() + dry.stderr()).isZero();
+        assertThat(dry.stdout()).contains("keep idle5h reasons=recent ", "candidate idle7h ", "age_hours=7 ", "hours=6;");
+        var run = gc("--live", "--hours", "6", "--pace", "0");
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        assertThat(payload(five)).as(run.stdout()).exists();
+        assertThat(seven).as(run.stdout()).doesNotExist();
+        assertThat(run.stdout()).contains("hours=6,");
+        assertLogHas("RUN live hours=6 pace=0");
+        assertThat(logLines()).anyMatch(l -> l.contains(" REMOVED path=") && l.endsWith(" hours=6"));
+    }
+
+    /// Pressure waives the deferral, not the age: at 81% with --hours 6 the 5 h checkout is still kept as recent and the 7 h one is removed, while a
+    /// group ticket runs. Mutation: age 0 under pressure -> the 5 h one goes, red.
+    @Test
+    void underPressure_theAgeStillHolds() throws Exception {
+        skeleton();
+        var five = checkout("idle5h", 5.0 / 24);
+        var seven = checkout("idle7h", 7.0 / 24);
+
+        ticket("running", "r1", "busy", "group=1");
+        var run = gcWith(atUse(81), "--live", "--hours", "6", "--pace", "0");
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        assertThat(payload(five)).as(run.stdout()).exists();
+        assertThat(run.stdout()).contains("keep idle5h reasons=recent ");
+        assertThat(seven).as(run.stdout()).doesNotExist();
+    }
+
+    /// Pressure never waives a reference guard: at 81%, while a group ticket runs, a checkout with a live ticket, an in-flight marker, a keep file or
+    /// a process with its cwd inside is kept (each with exactly its reason), next to a control that is removed.
+    /// Mutation: skip a guard when the pressure is on -> that victim goes, red.
+    @Test
+    void underPressure_everyReferenceGuardStillHolds() throws Exception {
+        skeleton();
+        var ticketed = checkout("victim-ticket", 10);
+        var queued = checkout("victim-queued", 10);
+        var started = checkout("victim-started", 10);
+        var kept = checkout("victim-keep", 10);
+        var worked = checkout("victim-process", 10);
+        var control = checkout("control", 10);
+
+        ticket("running", "r0", "busy", "group=1");
+        ticket("waiting", "w1", "victim-ticket");
+        Files.writeString(queued.resolve(".bb/queued"), "1");
+        Files.delete(started.resolve(".bb/rc"));
+        Files.writeString(kept.resolve(".bb/keep"), "");
+        var sleeper = BbFixtures.process("sleep", "120").directory(worked.resolve("module").toFile()).start();
+
+        try {
+            var proc = fakeProcWithCwd(Map.of(sleeper.pid(), worked.resolve("module")));
+            var env = new HashMap<>(atUse(81));
+
+            env.put("BB_CO_GC_PROC", proc.toString());
+            var run = gcWith(env, "--live", "--hours", "6", "--pace", "0");
+
+            assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+            assertThat(control).as(run.stdout()).doesNotExist();
+            for (var v : List.of(ticketed, queued, started, kept, worked)) {
+                assertThat(payload(v)).as(v + "\n" + run.stdout()).exists();
+            }
+
+            assertThat(run.stdout()).contains("keep victim-ticket reasons=ticket ",
+                                              "keep victim-queued reasons=in-flight ",
+                                              "keep victim-started reasons=in-flight ",
+                                              "keep victim-keep reasons=keep-file ",
+                                              "keep victim-process reasons=process ");
+        } finally {
+            stop(sleeper);
+        }
+    }
+
+    /// Bad arguments are usage (rc 2) before anything is read: --hours 0, --hours garbage, an overlarge --hours, and --hours with --days in either
+    /// order and spelling. The recording df is never called, nothing is logged, the checkout stays.
+    @Test
+    void badHoursArguments_areUsage_andNothingIsRead() throws Exception {
+        skeleton();
+        var idle = checkout("idle", 10);
+        var marker = procRoot.resolve("df-called");
+        var env = Map.of("BB_CO_GC_DF", recordingDf(marker).toString());
+
+        for (var bad : List.of(List.of("--hours", "0"),
+                               List.of("--hours", "garbage"),
+                               List.of("--hours", "87601"),
+                               List.of("--hours"),
+                               List.of("--hours", ""),
+                               List.of("--hours="),
+                               List.of("--hours", "6", "--days", "3"),
+                               List.of("--days=3", "--hours=6"))) {
+            var args = new ArrayList<String>(List.of("--live", "--pace", "0"));
+
+            args.addAll(bad);
+            var run = gcWith(env, args.toArray(String[]::new));
+
+            assertThat(run.rc()).as(bad + "\n" + run.stdout() + run.stderr()).isEqualTo(2);
+            assertThat(run.stderr()).contains("usage: bb-co-gc");
+            assertThat(payload(idle)).as(bad.toString()).exists();
+            assertThat(marker).as(bad.toString()).doesNotExist();
+        }
+
+        assertThat(home.resolve("work/co-gc.log")).doesNotExist();
+        assertThat(gcWith(env, "--hours", "87600").rc()).isZero();
+    }
+
+    /// DRY says the pressure decision and the floor, and what the deferral would do, and still changes nothing.
+    @Test
+    void dry_namesThePressureDecisionAndTheFloor() throws Exception {
+        skeleton();
+        var idle = checkout("idle", 10);
+
+        ticket("running", "r1", "busy", "group=1");
+        var before = snapshot(home);
+        var high = gcWith(atUse(95), "--hours", "6");
+        var low = gcWith(atUse(40), "--hours", "6");
+        var clear = gc("--hours", "6");
+
+        assertThat(high.stdout()).contains("pressure: use=95% floor=80% pressure=yes deferral=waived (running=1 group=1 cap=3)", "candidate idle ");
+        assertThat(low.stdout()).contains("pressure: use=40% floor=80% pressure=no deferral=applies (running=1 group=1 cap=3)");
+        assertThat(clear.stdout()).contains("pressure: use=10% floor=80% pressure=no deferral=applies");
+        assertThat(snapshot(home)).isEqualTo(before);
+        assertThat(payload(idle)).exists();
+    }
+
+    /// The usage text names --hours (the flag's only documentation on a host).
+    @Test
+    void theUsageText_namesHours() throws Exception {
+        skeleton();
+        var run = gc("--bogus");
+
+        assertThat(run.rc()).isEqualTo(2);
+        assertThat(run.stderr()).contains("[--days N | --hours H]", "H = 1..87600");
+    }
+
+    /// --hours 08 is 8, not an octal error: the checkout idle 7 h is kept as recent by an 8 h window, in both spellings and with many leading zeros
+    /// (pace has the same row). Mutation: `10#` dropped from the --hours arithmetic -> `value too great for base`, rc 1, red.
+    @Test
+    void hours_leadingZerosAreDecimal() throws Exception {
+        skeleton();
+        var seven = checkout("idle7h", 7.0 / 24);
+
+        for (var spelling : List.of(List.of("--hours", "08"), List.of("--hours=08"), List.of("--hours", "0000000000000000000000000000008"))) {
+            var args = new ArrayList<String>(spelling);
+            var run = gc(args.toArray(String[]::new));
+
+            assertThat(run.rc()).as(spelling + "\n" + run.stdout() + run.stderr()).isZero();
+            assertThat(run.stdout()).as(spelling.toString()).contains("keep idle7h reasons=recent ", "hours=8;");
+        }
+
+        assertThat(payload(seven)).exists();
+    }
+
+    /// A value accepted for --hours, --days or --pace means exactly its decimal value: one past 2^64 would wrap to 6, 3 and 5 in bash arithmetic
+    /// (18446744073709551622, 18446744073709551619, 18446744073709551621), so it is refused as usage, before any read: the recording df is never
+    /// called and nothing is logged. Mutation: the digit-length check removed at one of the three sites -> that spelling is accepted, red.
+    @Test
+    void aValueThatWouldWrapBashArithmetic_isRefusedAsUsage() throws Exception {
+        skeleton();
+        var idle = checkout("idle", 10);
+        var marker = procRoot.resolve("df-called");
+        var env = Map.of("BB_CO_GC_DF", recordingDf(marker).toString());
+
+        for (var bad : List.of(List.of("--hours", "18446744073709551622"),
+                               List.of("--hours=18446744073709551622"),
+                               List.of("--days", "18446744073709551619"),
+                               List.of("--days=18446744073709551619"),
+                               List.of("--pace", "18446744073709551621"),
+                               List.of("--pace=18446744073709551621"))) {
+            var args = new ArrayList<String>(List.of("--live"));
+
+            if (bad.get(0).startsWith("--pace")) {
+                args.addAll(List.of("--hours", "6"));
+            } else {
+                args.addAll(List.of("--pace", "0"));
+            }
+
+            args.addAll(bad);
+            var run = gcWith(env, args.toArray(String[]::new));
+
+            assertThat(run.rc()).as(args + "\n" + run.stdout() + run.stderr()).isEqualTo(2);
+            assertThat(run.stderr()).contains("usage: bb-co-gc");
+            assertThat(payload(idle)).as(args.toString()).exists();
+            assertThat(marker).as(args.toString()).doesNotExist();
+        }
+
+        assertThat(home.resolve("work/co-gc.log")).doesNotExist();
+    }
+
+    /// Under pressure (81%, a group ticket running) a checkout that is a symlink is still kept as not-direct-child and never followed: the target and the
+    /// link survive untouched, next to a control that is removed, and the pass really ran under the waiver.
+    /// Mutation: not-direct-child waived when the pressure is on -> the symlink is followed and the target removed, red.
+    @Test
+    void underPressure_aSymlinkedCheckout_isKeptAsNotDirectChild() throws Exception {
+        skeleton();
+        var outside = checkout("outside", 10);
+        var outsideDir = Files.move(outside, home.resolve("elsewhere"));
+        var link = Files.createSymbolicLink(co().resolve("link"), outsideDir);
+        var before = snapshot(outsideDir);
+
+        ticket("running", "r1", "busy", "group=1");
+        var run = assertKeptOnlyFor(link, "not-direct-child", atUse(81));
+
+        assertThat(run.stdout()).contains("pressure=yes deferral=waived");
+        assertThat(Files.isSymbolicLink(link)).as(run.stdout()).isTrue();
+        assertThat(snapshot(outsideDir)).isEqualTo(before);
+    }
+
+    /// Under pressure a checkout whose age cannot be determined (no activity signal at all) is kept as activity-unknown, never guessed.
+    /// Mutation: activity-unknown waived when the pressure is on -> the checkout is removed, red.
+    @Test
+    void underPressure_anUnknownAge_isKept() throws Exception {
+        skeleton();
+        var victim = co().resolve("victim");
+
+        Files.createDirectories(victim.resolve("module/target"));
+        Files.writeString(victim.resolve("module/target/payload.bin"), "x");
+        ticket("running", "r1", "busy", "group=1");
+        var run = assertKeptOnlyFor(victim, "activity-unknown", atUse(81));
+
+        assertThat(run.stdout()).contains("pressure=yes deferral=waived");
+    }
+
+    /// Under pressure a blind process (unreadable cwd, not on the allowlist) keeps every candidate, and the run SAYS so: `keep ... reasons=blind` for
+    /// both checkouts, no removal, and no RESTORED/changed-after-move (the after-move re-check would hide a guard skipped in the classification:
+    /// the end state is equal, the line is not).
+    /// Mutation: blind skipped in the classification when the pressure is on -> the lines read `changed-after-move (restored)`, red.
+    @Test
+    void underPressure_aBlindProcess_keepsEveryCandidate_asBlind() throws Exception {
+        skeleton();
+        var victim = checkout("victim", 10);
+        var control = checkout("control", 10);
+        var env = new HashMap<>(atUse(81));
+
+        env.putAll(fakeProcWithBlindProcess("rogue"));
+        ticket("running", "r1", "busy", "group=1");
+        var run = liveWith(env);
+
+        assertThat(payload(victim)).as(run.stdout()).exists();
+        assertThat(payload(control)).as(run.stdout()).exists();
+        assertThat(run.stdout()).contains("pressure=yes deferral=waived", "keep victim reasons=blind ", "keep control reasons=blind ", "blind=1 unlisted-blind=1")
+                  .doesNotContain("\nremoved ", "removed victim ", "removed control ", "changed-after-move");
+        assertThat(logLines()).noneMatch(l -> l.contains("RESTORED"));
+    }
+
+    /// The PRESSURE line of the log says a deferral was waived, so it appears only when one was: at 81% with nothing running there is nothing to waive
+    /// (`deferral=none`), the idle checkout is removed, and no PRESSURE line is written. Mutation: logged whenever the pressure is on -> red.
+    @Test
+    void underPressure_withNothingRunning_noDeferralIsWaived_andNoneIsLogged() throws Exception {
+        skeleton();
+        var idle = checkout("idle", 10);
+        var run = gcWith(atUse(81), "--live", "--days", "3", "--pace", "0");
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        assertThat(idle).as(run.stdout()).doesNotExist();
+        assertThat(run.stdout()).contains("pressure: use=81% floor=80% pressure=yes deferral=none (running=0 group=0 cap=3)");
+        assertThat(logLines()).anyMatch(l -> l.contains(" RUN live ")).noneMatch(l -> l.contains("PRESSURE"));
+    }
+
+    /// The tool reads the use with the real call: a df given anything but `--output=pcent <home>` fails (the fake of every pressure row refuses it, so a
+    /// dropped or changed argument turns each into `unknown` and red), and the REAL df accepts exactly that argv: a passthrough that records its argv and
+    /// execs the host's df yields a number, not `unknown`. Mutation: `--output=pcent` dropped or altered -> red.
+    @Test
+    void theDfCall_isTheRealOneOnHome_andTheRealDfAnswersIt() throws Exception {
+        skeleton();
+        checkout("idle", 10);
+        var argv = procRoot.resolve("df-argv");
+        var passthrough = BbFixtures.executable(procRoot.resolve("df-passthrough"),
+                                                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '" + argv + "'\nexec df \"$@\"\n");
+        var run = gcWith(Map.of("BB_CO_GC_DF", passthrough.toString()), "--hours", "6");
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        assertThat(Files.readAllLines(argv)).containsExactly("--output=pcent", home.toString());
+        assertThat(run.stdout()).containsPattern("pressure: use=[0-9]{1,3}% floor=80% pressure=(yes|no) deferral=");
+        var refused = BbFixtures.run(List.of(fakeDf(81).toString(), "-P", home.toString()), Map.of(), home, null);
+
+        assertThat(refused.rc()).isEqualTo(64);
+    }
+
+    /// A df that hangs cannot hold ~/work/.co-gc.lock without bound, and a df that times out never turns the waiver on: this df answers 95% at once and
+    /// then sleeps 20 s, past the 1 s bound; the pass ends well inside 20 s, reports `unknown`, the running group ticket still defers it (nothing removed),
+    /// and no PRESSURE line is logged. Mutation: the timeout removed -> the pass lasts 20 s, red; fail-open on the timeout -> pressure=yes, red.
+    @Test
+    void aDfThatHangs_isCutAtTheBound_andIsNoPressure() throws Exception {
+        skeleton();
+        var idle = checkout("idle", 10);
+        var hung = BbFixtures.executable(procRoot.resolve("df-hung"),
+                                         "#!/bin/sh\n" + onlyTheProductionArgv() + "printf 'Use%%\\n  95%%\\n'\nsleep 20\n");
+
+        ticket("running", "r1", "busy", "group=1");
+        var started = System.nanoTime();
+        var run = gcWith(Map.of("BB_CO_GC_DF", hung.toString(), "BB_CO_GC_DF_WAIT", "1"), "--live", "--days", "3", "--pace", "0");
+        var seconds = TimeUnit.NANOSECONDS.toSeconds(System.nanoTime() - started);
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        assertThat(seconds).as("the pass must end within the bound, not wait for the df").isLessThan(10);
+        assertThat(run.stdout()).contains("pressure: use=unknown% floor=80% pressure=unknown deferral=applies", "deferred: builds running");
+        assertThat(payload(idle)).exists();
+        assertThat(logLines()).noneMatch(l -> l.contains("PRESSURE"));
+        assertThat(home.resolve("work/.co-gc.lock")).exists();
+        var again = gcWith(atUse(10), "--live", "--days", "3", "--pace", "0");
+
+        assertThat(again.rc()).as("the lock is free after the pass").isZero();
+    }
+
+    /// A df that ignores TERM (and so does everything it starts: an ignored signal is inherited) ends within the bound plus the 2 s grace: timeout's
+    /// `-k` KILLs it. The pass reports `unknown`, the running group ticket still defers it, no waiver, and the run lock is free afterwards.
+    /// Mutation: `timeout -k 2` -> plain `timeout` -> the pass lasts the df's 30 s, red.
+    @Test
+    void aDfThatIgnoresTerm_endsWithinTheBoundPlusItsGrace_andTheLockIsFree() throws Exception {
+        skeleton();
+        var idle = checkout("idle", 10);
+        var stubborn = BbFixtures.executable(procRoot.resolve("df-stubborn"),
+                                             "#!/bin/sh\n" + onlyTheProductionArgv()
+                                             + "trap '' TERM\nprintf 'Use%%\\n  95%%\\n'\nsleep 30\n");
+
+        ticket("running", "r1", "busy", "group=1");
+        var started = System.nanoTime();
+        var run = gcWith(Map.of("BB_CO_GC_DF", stubborn.toString(), "BB_CO_GC_DF_WAIT", "1"), "--live", "--days", "3", "--pace", "0");
+        var seconds = TimeUnit.NANOSECONDS.toSeconds(System.nanoTime() - started);
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        assertThat(seconds).as("bound 1 s + grace 2 s, not the df's 30 s").isLessThan(15);
+        assertThat(run.stdout()).contains("pressure: use=unknown% floor=80% pressure=unknown deferral=applies", "deferred: builds running");
+        assertThat(payload(idle)).exists();
+        assertThat(logLines()).noneMatch(l -> l.contains("PRESSURE"));
+        assertThat(gcWith(atUse(10), "--live", "--days", "3", "--pace", "0").rc()).as("the lock is free after the pass").isZero();
+    }
+
+    /// The waiver turns on ONLY when df's pcent field is a well-formed percentage: 1-3 ASCII digits, `%`, value 0..100, on the second of exactly two
+    /// lines, and df exits 0. Every other output reads exactly as a failed df: pressure=unknown, the deferral stands, nothing removed, no PRESSURE line.
+    /// The first case is the control (a well-formed 95% waives), so a harness that could never waive would not pass. Mutation: the old `tr -dc 0-9`
+    /// parse reads `-95%` as 95 -> pressure=yes, red.
+    @Test
+    void aMalformedPcentField_isNoPressure_exactlyAsAFailedDf() throws Exception {
+        skeleton();
+        var idle = checkout("idle", 10);
+        var well = "Use%\n 95%\n";
+        var cases = new java.util.LinkedHashMap<String, String>();
+
+        cases.put("control: well formed 95", well);
+        cases.put("negative", "Use%\n -95%\n");
+        cases.put("hex", "Use%\n 0x5F%\n");
+        cases.put("hex without percent", "Use%\n 0x5F\n");
+        cases.put("no percent sign", "Use%\n 95\n");
+        cases.put("over 100", "Use%\n 195%\n");
+        cases.put("101", "Use%\n 101%\n");
+        cases.put("four digits", "Use%\n 0095%\n");
+        cases.put("plus sign", "Use%\n +95%\n");
+        cases.put("doubled percent", "Use%\n 95%%\n");
+        cases.put("digits split", "Use%\n 9 5%\n");
+        cases.put("text", "Use%\n abc\n");
+        cases.put("a percent with a trailing word", "Use%\n 95% full\n");
+        cases.put("non-ASCII digits", "Use%\n \u0669\u0665%\n");
+        cases.put("three lines", "Use%\n 95%\n 96%\n");
+        cases.put("two values", "Use%\n 95%\n\n 96%\n");
+        cases.put("value before header", " 95%\nUse%\n");
+        cases.put("one line, no header", "95%\n");
+        cases.put("header only", "Use%\n");
+        cases.put("empty", "");
+        cases.put("a value that fails (rc 1)", well + "@exit 1");
+        ticket("running", "r1", "busy", "group=1");
+        var first = true;
+
+        for (var entry : cases.entrySet()) {
+            var body = entry.getValue();
+            var tail = body.contains("@") ? body.substring(body.indexOf('@') + 1) : "";
+            var out = body.contains("@") ? body.substring(0, body.indexOf('@')) : body;
+            var data = procRoot.resolve("df-out");
+
+            Files.writeString(data, out, java.nio.charset.StandardCharsets.UTF_8);
+            var df = BbFixtures.executable(procRoot.resolve("df-malformed"),
+                                           "#!/bin/sh\n" + onlyTheProductionArgv() + "echo 'df: noise' >&2\ncat '" + data + "'\n" + tail + "\n");
+            var run = gcWith(Map.of("BB_CO_GC_DF", df.toString()), "--live", "--days", "3", "--pace", "0");
+
+            assertThat(run.rc()).as(entry.getKey() + "\n" + run.stdout() + run.stderr()).isZero();
+            assertThat(run.stderr()).as(entry.getKey() + ": df's own stderr is not the tool's").doesNotContain("df: noise");
+
+            if (first) {
+                assertThat(run.stdout()).as(entry.getKey()).contains("pressure=yes deferral=waived");
+                assertThat(payload(idle)).as("the control removed the idle checkout").doesNotExist();
+                first = false;
+                idle = checkout("idle", 10);
+                Files.deleteIfExists(home.resolve("work/co-gc.log"));
+            } else {
+                assertThat(run.stdout()).as(entry.getKey()).contains("pressure=unknown deferral=applies", "deferred: builds running");
+                assertThat(payload(idle)).as(entry.getKey()).exists();
+                assertThat(Files.exists(home.resolve("work/co-gc.log")) ? logLines() : List.<String>of()).as(entry.getKey())
+                          .noneMatch(l -> l.contains("PRESSURE"));
+            }
+        }
+
+        var full = gcWith(atUse(100), "--live", "--days", "3", "--pace", "0");
+
+        assertThat(full.stdout()).as("100% is well formed and waives").contains("use=100% floor=80% pressure=yes");
+        checkout("idle", 10);
+        var empty = gcWith(atUse(0), "--live", "--days", "3", "--pace", "0");
+
+        assertThat(empty.stdout()).as("0% is well formed and is no pressure").contains("use=0% floor=80% pressure=no");
+    }
+
+    /// A non-ASCII digit (U+0666 ARABIC-INDIC DIGIT SIX) in --hours, --days or --pace is a usage error, rc 2, under any locale: nothing reaches bash
+    /// arithmetic (which dies on it with rc 1, or reads it as a digit). The recording df is never called and nothing is logged. In en_US.UTF-8 a
+    /// `[!0-9]` glob lets it through. Mutation: one of the digit tests back to `*[!0-9]*` -> that flag is accepted or dies elsewhere, red.
+    @Test
+    void aNonAsciiDigit_isUsageUnderAnyLocale_andNothingIsRead() throws Exception {
+        skeleton();
+        var idle = checkout("idle", 10);
+        var marker = procRoot.resolve("df-called");
+        var six = "$(printf '\\xd9\\xa6')";
+
+        for (var locale : List.of("en_US.UTF-8", "C.UTF-8", "C")) {
+            for (var flag : List.of("--hours", "--days", "--pace")) {
+                for (var value : List.of(six, "1" + six, six + "1")) {
+                    for (var spelling : List.of(flag + " \"" + value + "\"", flag + "=\"" + value + "\"")) {
+                        var others = flag.equals("--pace") ? " --hours 6" : " --pace 0";
+                        var run = gcShell(Map.of("BB_CO_GC_DF", recordingDf(marker).toString(), "LC_ALL", locale), "--live" + others + " " + spelling);
+                        var label = locale + " " + spelling;
+
+                        assertThat(run.rc()).as(label + "\n" + run.stdout() + run.stderr()).isEqualTo(2);
+                        assertThat(run.stderr().strip()).as(label + ": the usage line alone, no arithmetic error before it").startsWith("usage: bb-co-gc").doesNotContain("\n");
+                        assertThat(payload(idle)).as(label).exists();
+                        assertThat(marker).as(label).doesNotExist();
+                    }
+                }
+            }
+        }
+
+        for (var variable : List.of("BB_CO_GC_LOCK_WAIT", "BB_CO_GC_DF_WAIT")) {
+            var run = gcShell(Map.of("BB_CO_GC_DF", recordingDf(marker).toString(), "LC_ALL", "en_US.UTF-8"),
+                              "--live --hours 6 --pace 0", variable + "=\"" + six + "\"");
+
+            assertThat(run.rc()).as(variable + "\n" + run.stdout() + run.stderr()).isEqualTo(65);
+            assertThat(run.stderr().strip()).as(variable + ": the not-an-integer refusal alone, no arithmetic error and not the later '0' refusal")
+                                             .contains(variable + " is not an integer").doesNotContain("\n");
+            assertThat(payload(idle)).as(variable).exists();
+            assertThat(marker).as(variable).doesNotExist();
+        }
+
+        assertThat(home.resolve("work/co-gc.log")).doesNotExist();
+        assertThat(gcShell(Map.of("LC_ALL", "en_US.UTF-8"), "--hours 6 --days=").rc()).as("control: the shell wrapper reaches the tool").isEqualTo(2);
+        assertThat(gcShell(Map.of("LC_ALL", "en_US.UTF-8"), "--hours 6 --pace 0").rc()).as("control: ASCII digits are accepted").isZero();
+    }
+
+    /// The df bound covers everything that holds df's output. A df that leaves a child behind, whether df exits at once (a background child holding
+    /// the pipe) or hangs on (a TERM-able df whose child ignores TERM), still ends within the bound plus grace, reads `unknown` (no waiver although it
+    /// printed 95%), and the lock is free afterwards. The children sleep 30 s: a pass that waited for them would last that long. Mutations: the pass
+    /// reading df through a pipe -> 30 s, red; the leftover-group check removed -> a waiver (and the idle checkout removed), red.
+    @Test
+    void aDfThatLeavesAChildHoldingItsOutput_endsWithinTheBound_withNoWaiver_andTheLockIsFree() throws Exception {
+        skeleton();
+        var bodies = new java.util.LinkedHashMap<String, String>();
+
+        var late = procRoot.resolve("straggler-woke");
+
+        bodies.put("background child, df exits 0", "printf 'Use%%\\n  95%%\\n'\n(sleep 30 &)\n(sleep 4; : > '" + late + "') &\nexit 0\n");
+        bodies.put("TERM-ignoring child, df hangs", "printf 'Use%%\\n  95%%\\n'\n(trap '' TERM; sleep 30) &\nsleep 30\n");
+        bodies.put("TERM-ignoring child, df exits 0", "printf 'Use%%\\n  95%%\\n'\n(trap '' TERM; sleep 30) &\nexit 0\n");
+        ticket("running", "r1", "busy", "group=1");
+
+        for (var entry : bodies.entrySet()) {
+            var idle = checkout("idle", 10);
+            var df = BbFixtures.executable(procRoot.resolve("df-straggler"), "#!/bin/sh\n" + onlyTheProductionArgv() + entry.getValue());
+            var started = System.nanoTime();
+            var run = gcWith(Map.of("BB_CO_GC_DF", df.toString(), "BB_CO_GC_DF_WAIT", "1"), "--live", "--days", "3", "--pace", "0");
+            var seconds = TimeUnit.NANOSECONDS.toSeconds(System.nanoTime() - started);
+            var label = entry.getKey() + "\n" + run.stdout() + run.stderr();
+
+            assertThat(run.rc()).as(label).isZero();
+            assertThat(seconds).as(entry.getKey() + ": bound 1 s + grace 2 s, not the child's 30 s").isLessThan(15);
+            assertThat(run.stdout()).as(label).contains("pressure=unknown deferral=applies", "deferred: builds running");
+            assertThat(payload(idle)).as(label).exists();
+            assertThat(gcWith(atUse(10), "--live", "--days", "3", "--pace", "0").rc()).as(entry.getKey() + ": the lock is free").isZero();
+        }
+
+        Thread.sleep(4500);
+        assertThat(late).as("the straggler was killed with the group, it did not wake up after the pass").doesNotExist();
+    }
+
+    /// A straggler that leaves df's process group (setsid) is outside what the tool can kill, but it must hold neither a wait nor the run lock: df runs
+    /// without the lock descriptor, so the next run takes the lock while the straggler still sleeps. Mutation: df given fd 9 again -> exit 75, red.
+    @Test
+    void aStragglerThatLeavesTheGroup_doesNotHoldTheRunLock() throws Exception {
+        skeleton();
+        checkout("idle", 10);
+        var df = BbFixtures.executable(procRoot.resolve("df-setsid"),
+                                       "#!/bin/sh\n" + onlyTheProductionArgv() + "printf 'Use%%\\n  10%%\\n'\nsetsid sleep 6 > /dev/null 2>&1 &\nexit 0\n");
+        var first = gcWith(Map.of("BB_CO_GC_DF", df.toString()), "--live", "--days", "3", "--pace", "0");
+
+        assertThat(first.rc()).as(first.stdout() + first.stderr()).isZero();
+        var again = gcWith(atUse(10), "--live", "--days", "3", "--pace", "0");
+
+        assertThat(again.rc()).as("the run lock is free while the straggler sleeps\n" + again.stdout() + again.stderr()).isZero();
+    }
+
+    /// The bound on df is an integer of 1..99999 seconds: 0 (timeout 0 is no bound), text and six digits are refused with 65 before any write.
+    @Test
+    void theDfBound_mustBeAPositiveInteger() throws Exception {
+        skeleton();
+        var idle = checkout("idle", 10);
+
+        for (var bad : List.of("0", "abc", "100000", "-1")) {
+            var run = gcWith(Map.of("BB_CO_GC_DF_WAIT", bad), "--live", "--days", "3", "--pace", "0");
+
+            assertThat(run.rc()).as("[" + bad + "]\n" + run.stdout() + run.stderr()).isEqualTo(65);
+            assertThat(run.stderr()).contains("BB_CO_GC_DF_WAIT");
+            assertThat(payload(idle)).exists();
+        }
+
+        assertThat(home.resolve("work/co-gc.log")).doesNotExist();
+    }
+
     /// Writes `command` into a stub directory outside `home`; the stub removes its own directory from PATH, so a plain `mv`/`flock`/`du`/`rm`
     /// inside `body` is the real command. `@PROC@`, `@CO@` (the resolved ~/work/co) and `@Q@` (the queue) are filled in.
     private void stub(String command, String body) throws IOException {

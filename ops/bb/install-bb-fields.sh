@@ -14,7 +14,7 @@
 #   with no ssh made.
 # Phase 1, read-only, EVERY target first: installed bb-build is one of BB_BUILD_OLD|MID|PREV|LIVE|PRE31|PRERC|PREVIA|PREMEM|PRECAP|PREJBCT|PREHELP|PRESINCE|PREFIELDS|PRESESSION|PRE80|PRE76|PRE86|PRE90|PRE91|PRE102|PRE112|PRE116|PRE133|PRE131|PRE164|NEW, bb-queue-lib.sh one of BB_LIB_OLD|PREV|PRERC|PREMEM|PRECAP|PREOFFQ|PRELEDGER|PRE80|PRE88|PRE90|PRE116|PRE130|PRE164|NEW,
 #   bb-queue one of BB_QUEUE_OLD|PREV|LIVE|PRE31|PRERC|PREVIA|PREMEM|PRECAP|PREOFFQ|PRELEDGER|PRE80|PRE90|NEW, bb-tickets is absent, BB_TICKETS_OLD|PRE31|PREOFFQ|NEW, bb-hold is absent, BB_HOLD_OLD (the 2026-11-09
-#   host snapshot), BB_HOLD_PRELEDGER, BB_HOLD_PRE90 or BB_HOLD_NEW, bb-wait is absent, BB_WAIT_PRERC, BB_WAIT_PREREFUSED, BB_WAIT_PRE80, BB_WAIT_PRE90, BB_WAIT_PRE131 or its NEW, bb-await is absent, BB_AWAIT_PREREFUSED, BB_AWAIT_PRE90, BB_AWAIT_PRE131 or BB_AWAIT_NEW, bb-netns-run is absent, BB_NETNS_PREV, BB_NETNS_PREMOUNTS or BB_NETNS_NEW, bb-portgroup.py is absent, BB_PORTGROUP_PREV, BB_PORTGROUP_PRESINCE or BB_PORTGROUP_NEW, bb-modules.py is absent, BB_MODULES_PRE112 or BB_MODULES_NEW, bb-mutate is absent, BB_MUTATE_OLD, BB_MUTATE_PREVIA, BB_MUTATE_PRE97, BB_MUTATE_PRE100, BB_MUTATE_PRE116, BB_MUTATE_PRE135 or BB_MUTATE_NEW, bb-jbct-bootstrap is absent or BB_JBCTBOOT_NEW, bb-result is absent, BB_RESULT_PRECP, BB_RESULT_PRE80, BB_RESULT_PRE131 or BB_RESULT_NEW, bb-co-gc is absent or BB_COGC_NEW, bb-test is absent, BB_TEST_PRE76, BB_TEST_PRE86 or BB_TEST_NEW, and bb-cp-record and bb-testcount (the bb-test lane) are absent or their NEW pin. Any mismatch prints `refused <target> <file> installed=<md5|absent>
+#   host snapshot), BB_HOLD_PRELEDGER, BB_HOLD_PRE90 or BB_HOLD_NEW, bb-wait is absent, BB_WAIT_PRERC, BB_WAIT_PREREFUSED, BB_WAIT_PRE80, BB_WAIT_PRE90, BB_WAIT_PRE131 or its NEW, bb-await is absent, BB_AWAIT_PREREFUSED, BB_AWAIT_PRE90, BB_AWAIT_PRE131 or BB_AWAIT_NEW, bb-netns-run is absent, BB_NETNS_PREV, BB_NETNS_PREMOUNTS or BB_NETNS_NEW, bb-portgroup.py is absent, BB_PORTGROUP_PREV, BB_PORTGROUP_PRESINCE or BB_PORTGROUP_NEW, bb-modules.py is absent, BB_MODULES_PRE112 or BB_MODULES_NEW, bb-mutate is absent, BB_MUTATE_OLD, BB_MUTATE_PREVIA, BB_MUTATE_PRE97, BB_MUTATE_PRE100, BB_MUTATE_PRE116, BB_MUTATE_PRE135 or BB_MUTATE_NEW, bb-jbct-bootstrap is absent or BB_JBCTBOOT_NEW, bb-result is absent, BB_RESULT_PRECP, BB_RESULT_PRE80, BB_RESULT_PRE131 or BB_RESULT_NEW, bb-co-gc is absent, BB_COGC_PRE154 or BB_COGC_NEW, bb-test is absent, BB_TEST_PRE76, BB_TEST_PRE86 or BB_TEST_NEW, and bb-cp-record and bb-testcount (the bb-test lane) are absent or their NEW pin. Any mismatch prints `refused <target> <file> installed=<md5|absent>
 #   expected=<pin>[|<pin>...]` (every accepted pin except `absent`, in the order above) for every mismatch on every target and exits 65 having written nothing anywhere; an unreachable target is 69.
 # Phase 2, per target and per file to change (bb-cp-record, bb-test, bb-testcount, bb-tickets, bb-hold, bb-wait, bb-await, bb-netns-run, bb-portgroup.py, bb-modules.py, bb-jbct-bootstrap, bb-result, bb-co-gc, bb-queue-lib.sh, bb-queue,
 #   then bb-build, then bb-mutate: the helpers and the lib before the tools that call or source them; bb-build calls bb-cp-record; bb-mutate after
@@ -96,7 +96,9 @@ readonly BB_RESULT_PRE80=f4505867d09a1b3946280944678757ba
 readonly BB_RESULT_PRE131=72f89894ab1a7ddb3cf9b78a4bd2d4b8
 readonly BB_RESULT_NEW=d20323d47f653a16ec335c6983d2facc
 # bb-co-gc (#113): absent on every host before its first install; nothing else calls it. No trailing comment on a pin line: bb-drift reads it by pattern.
-readonly BB_COGC_NEW=3d5b04a7875496e37288c9ae21cab701
+# the version before #154: no --hours, no pressure floor
+readonly BB_COGC_PRE154=3d5b04a7875496e37288c9ae21cab701
+readonly BB_COGC_NEW=5113495da188c07e9d1e477cbdbf3388
 readonly BB_TICKETS_OLD=472cd816644fe0ee0902b8da3d33de8e   # before the per-ticket progressAt (issue #10)
 readonly BB_TICKETS_PRE31=e1aeba98541ba781295001f956b08c8d   # live since 2026-11-12: drops a ticket key with a capital letter
 readonly BB_TICKETS_PREOFFQ=6174119f0cd567c5dc462d1e063c6214   # the #31 version: no `offq` in the trailer (2026-11-20)
@@ -188,6 +190,7 @@ accepted_of() {  # the md5s a host may hold besides absent, in the order the ref
     bb-mutate) echo "$BB_MUTATE_OLD $BB_MUTATE_PREVIA $BB_MUTATE_PRE97 $BB_MUTATE_PRE100 $BB_MUTATE_PRE116 $BB_MUTATE_PRE135 $BB_MUTATE_NEW" ;;
     bb-result) echo "$BB_RESULT_PRECP $BB_RESULT_PRE80 $BB_RESULT_PRE131 $BB_RESULT_NEW" ;;
     bb-test) echo "$BB_TEST_PRE76 $BB_TEST_PRE86 $BB_TEST_NEW" ;;
+    bb-co-gc) echo "$BB_COGC_PRE154 $BB_COGC_NEW" ;;
     *) new_of "$1" ;;
   esac
 }
