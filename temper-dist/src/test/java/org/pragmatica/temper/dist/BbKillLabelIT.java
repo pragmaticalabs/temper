@@ -433,8 +433,8 @@ class BbKillLabelIT {
     // ---- fix round 1 of #144: rows for the survivors of v144a/v144b ------------------------------------------------------
     /// The window ends when the job ends (right after the waiter's wait), not after the bound runner has finished stopping the ticket's processes. The verdict depends only on the ORDER
     /// of two events, never on how long the waiter takes between the job's exit and its end read: BB_TEST_VMSTAT is a FIFO served by a loop of this test, which sees each read as it
-    /// happens. It serves oom_kill 5 until the bound runner has written .bb/rc (the kill set is reaped: the moment the old row approximated with a 2 s sleep) and 6 from then on.
-    /// A fake `java` (the runner's kill set), once TERMed, stays alive until the server has served the second read (the end read) and only then dies, so the runner cannot finish
+    /// happens. A granted ticket makes three reads, in this order: the grant's (bb-queue-lib's grant_record, #130: oom_kill_grant=), the window's start (bb-build) and the window's end (bb-build). It serves oom_kill 4 to the grant's read (its own payload: the window's two never take it, and a window read that took it shows as 4), then 5 until the bound runner has written .bb/rc (the kill set is reaped: the moment the old row approximated with a 2 s sleep) and 6 from then on.
+    /// A fake `java` (the runner's kill set), once TERMed, stays alive until the server has served the third read (the end read) and only then dies, so the runner cannot finish
     /// first however long the waiter stalls (up to the runner's 5 s KILL grace, see Limits). Probes: end read after `wait "$W"` -> the java is only KILLed after 5 s, the runner
     /// finishes, the read gets 6, red; a `sleep 3` before the end read -> still 5, green (the old row, a bump 2 s after the TERM, went red).
     @Test
@@ -458,7 +458,7 @@ class BbKillLabelIT {
                                            while True:
                                                fd = os.open(fifo, os.O_WRONLY)
                                                n += 1
-                                               v = 6 if os.path.exists(rc) else 5
+                                               v = 4 if n == 1 else (6 if os.path.exists(rc) else 5)
                                                os.mkfifo(fifo + ".next")
                                                os.rename(fifo + ".next", fifo)
                                                try:
@@ -467,7 +467,7 @@ class BbKillLabelIT {
                                                    pass
                                                with open(served, "a") as f:
                                                    f.write("%d:%d\\n" % (n, v))
-                                               if n >= 2:
+                                               if n >= 3:
                                                    open(end_read, "w").close()
                                                os.close(fd)
                                            """);
@@ -491,8 +491,9 @@ class BbKillLabelIT {
 
         finished(id);
         assertThat(field(id, "bound_hit")).isNotEmpty();
-        assertThat(Files.readString(served).strip().lines().count()).as("one served line per read by the waiter: the counter was read twice (served: " + Files.readString(served).strip().replace('\n', ' ') + ")").isEqualTo(2L);
+        assertThat(Files.readString(served).strip().lines().count()).as("one served line per read by the waiter: the counter was read three times, the grant's (grant_record, bb-queue-lib.sh), the window's start and the window's end (bb-build) (served: " + Files.readString(served).strip().replace('\n', ' ') + ")").isEqualTo(3L);
         assertThat(BbFixtures.run(List.of("timeout", "20", "head", "-n", "2", fifo.toString()), Map.of(), null, null).stdout()).as("the row's premise: once the runner is done the counter reads 6").contains("oom_kill 6");
+        assertThat(field(id, "oom_kill_grant")).as("the first read is the grant's: it takes the first payload (4), never one meant for the window").isEqualTo("4");
         assertThat(field(id, "oom_kill_start")).isEqualTo("5");
         assertThat(field(id, "oom_kill_end")).as("a read after the job ended and the runner finished is not the job's window").isEqualTo("5");
     }
