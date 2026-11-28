@@ -387,7 +387,7 @@ if [ "${1:-}" = __bound ]; then
   echo "bound_hit=$(date +%s)" >> "$T"
   exec 8>&-
   echo "bb-build: bound of $(field "$T" bound)s reached: job stopped (rc 124)" >> "$B/build.log"
-  until stop_ticket_processes "$ID" "$CO" java > /dev/null; do sleep 5; done
+  until stop_ticket_processes "$ID" "$CO" java "$J:$JS" > /dev/null; do sleep 5; done   # the job's tree, never the waiter's helpers (kill_set, #164)
   [ -f "$B/rc" ] || { date +%s > "$B/end"; write_rc "$B" 124; }
   exit 0
 fi

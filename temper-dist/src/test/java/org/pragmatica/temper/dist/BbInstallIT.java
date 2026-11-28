@@ -260,6 +260,8 @@ class BbInstallIT {
         assertThat(pin("BB_MUTATE_PRE135")).isEqualTo(BbFixtures.md5(prev("bb-mutate.pre135")));
         assertThat(pin("BB_BUILD_PRE133")).isEqualTo(BbFixtures.md5(prev("bb-build.pre133")));
         assertThat(pin("BB_BUILD_PRE131")).isEqualTo(BbFixtures.md5(prev("bb-build.pre131")));
+        assertThat(pin("BB_BUILD_PRE164")).isEqualTo(BbFixtures.md5(prev("bb-build.pre164")));
+        assertThat(pin("BB_LIB_PRE164")).isEqualTo(BbFixtures.md5(prev("bb-queue-lib.sh.pre164")));
         assertThat(pin("BB_RESULT_PRE131")).isEqualTo(BbFixtures.md5(prev("bb-result.pre131")));
         assertThat(pin("BB_WAIT_PRE131")).isEqualTo(BbFixtures.md5(prev("bb-wait.pre131")));
         assertThat(pin("BB_AWAIT_PRE131")).isEqualTo(BbFixtures.md5(prev("bb-await.pre131")));
@@ -1286,6 +1288,26 @@ class BbInstallIT {
         assertThat(tools.resolve("bb-queue-lib.sh.bak-" + pin("BB_LIB_PRE130"))).hasBinaryContent(prev("bb-queue-lib.sh.pre130"));
     }
 
+    /// #164: a host holding main's bb-build and bb-queue-lib.sh from before the bound runner stopped signalling the waiter's helper processes (their BB_*_PRE164 pins) is accepted and upgraded; each .bak file is the old file.
+    /// Mutation: drop BB_BUILD_PRE164 or BB_LIB_PRE164 from accepted_of -> that file is refused, exit 65, red.
+    @Test
+    void aHostWithTheBuildAndLibBefore164_isAcceptedAndUpgraded() throws Exception {
+        var tools = host("h1");
+
+        Files.write(tools.resolve("bb-build"), prev("bb-build.pre164"));
+        Files.write(tools.resolve("bb-queue-lib.sh"), prev("bb-queue-lib.sh.pre164"));
+        var run = install("builder@h1");
+
+        assertThat(run.rc()).as(run.stdout() + run.stderr()).isZero();
+        assertThat(run.stdout()).doesNotContain("refused");
+        assertThat(run.stdout()).contains("installed builder@h1 bb-build before=" + pin("BB_BUILD_PRE164") + " after=" + pin("BB_BUILD_NEW"));
+        assertThat(run.stdout()).contains("installed builder@h1 bb-queue-lib.sh before=" + pin("BB_LIB_PRE164") + " after=" + pin("BB_LIB_NEW"));
+        assertThat(tools.resolve("bb-build")).hasBinaryContent(Files.readAllBytes(OPS_BB.resolve("bb-build")));
+        assertThat(tools.resolve("bb-queue-lib.sh")).hasBinaryContent(Files.readAllBytes(OPS_BB.resolve("bb-queue-lib.sh")));
+        assertThat(tools.resolve("bb-build.bak-" + pin("BB_BUILD_PRE164"))).hasBinaryContent(prev("bb-build.pre164"));
+        assertThat(tools.resolve("bb-queue-lib.sh.bak-" + pin("BB_LIB_PRE164"))).hasBinaryContent(prev("bb-queue-lib.sh.pre164"));
+    }
+
     /// #116: the lib goes first, then bb-build, then bb-mutate (the last of all files), and the .bak files put back in the reverse order give back
     /// the host before the install, so a host only ever holds the mixes [BbMutateOrderIT] pins as free of leaks. The order is read from
     /// what the install printed, not from FILES.
@@ -1416,6 +1438,7 @@ class BbInstallIT {
                                                                  + "|" + pin("BB_BUILD_PRE116")
                                                                  + "|" + pin("BB_BUILD_PRE133")
                                                                  + "|" + pin("BB_BUILD_PRE131")
+                                                                 + "|" + pin("BB_BUILD_PRE164")
                                                                  + "|" + pin("BB_BUILD_NEW"));
         assertThat(listing(good)).isEqualTo(goodBefore);
         assertThat(listing(diverged)).isEqualTo(divergedBefore);
@@ -1460,6 +1483,7 @@ class BbInstallIT {
                            + "|" + pin("BB_LIB_PRE90")
                            + "|" + pin("BB_LIB_PRE116")
                            + "|" + pin("BB_LIB_PRE130")
+                           + "|" + pin("BB_LIB_PRE164")
                            + "|" + pin("BB_LIB_NEW"))
                   .contains("bb-queue installed=" + BbFixtures.md5("unrelated tool\n".getBytes())
                            + " expected=" + BbFixtures.BB_QUEUE_OLD
