@@ -461,17 +461,20 @@ class BbKillLabelIT {
     /// `bb-build __run <id>`) has two children: the job (`sleep 300`) and a helper of its own (`sleep 301`, standing for the end-read substitution). With the job's identity the set is the job alone; with a
     /// start time that is not the job's (a recycled pid) it is empty; with no job argument (cancel) it is the whole waiter tree, helper and waiter included; stopping with the identity ends the job and leaves
     /// the helper and the waiter alive, and succeeds (the survivor check reads the same job tree).
-    /// Mutations: no identity check -> A is not empty; the `else` of the roots drops waiter_pids -> C lacks the helper; stop_ticket_processes' loop call without the fourth argument -> the helper dies; its
+    /// The fake waiter runs with its cwd INSIDE the checkout, as a waiter started from a checkout does: its helper is then also found by cwd, and only the `w` kind (the job's tree) would let it past the java filter.
+    /// Mutations: the `w` tags taken from the waiter's tree instead of the job's -> B holds the helper; no identity check -> A is not empty; the `else` of the roots drops waiter_pids -> C lacks the helper; stop_ticket_processes' loop call without the fourth argument -> the helper dies; its
     /// survivor-check call without it -> rc is 1 (the helper is a survivor of the waiter tree); the identity swapped (`$JS:$J`) -> B is empty and the job survives.
     @Test
     void theBoundRunnersKillSet_isTheJobsTree_neverTheWaitersHelpers() throws Exception {
         var jobFile = dir.resolve("kill-set-job");
         var helperFile = dir.resolve("kill-set-helper");
         var waiterId = "1795733112999999999-164";
+        var co = Files.createDirectories(dir.resolve("co-164"));
         var waiter = BbFixtures.processClean(List.of("bash",
                                                      "-c",
                                                      ": bb-build __run " + waiterId + " -B test; sleep 301 & echo $! > " + helperFile + "; sleep 300 & echo $! > " + jobFile + "; wait"),
                                              Map.of("PATH", System.getenv("PATH")))
+                                    .directory(co.toFile())
                                     .redirectErrorStream(true)
                                     .redirectOutput(ProcessBuilder.Redirect.DISCARD)
                                     .start();
@@ -483,11 +486,12 @@ class BbKillLabelIT {
         var env = env(Map.of());
 
         env.put("ID", waiterId);
+        env.put("COD", co.toString());
         env.put("JOBFILE", jobFile.toString());
         env.put("HELPERFILE", helperFile.toString());
         var out = BbFixtures.run(List.of("bash",
                                          "-c",
-                                         ". \"$1\"; J=$(cat \"$JOBFILE\"); H=$(cat \"$HELPERFILE\"); JS=$(pstart \"$J\"); co=/nonexistent-co-164\n"
+                                         ". \"$1\"; J=$(cat \"$JOBFILE\"); H=$(cat \"$HELPERFILE\"); JS=$(pstart \"$J\"); co=$COD\n"
                                         + "echo \"A=$(kill_set \"$ID\" $co java \"$J:1\" | tr '\\n' ' ')\"\n"
                                         + "echo \"B=$(kill_set \"$ID\" $co java \"$J:$JS\" | tr '\\n' ' ')\"\n"
                                         + "echo \"C=$(kill_set \"$ID\" $co | cut -d: -f1 | tr '\\n' ' ')\"\n"

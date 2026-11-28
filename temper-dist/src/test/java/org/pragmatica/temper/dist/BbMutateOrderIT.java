@@ -1549,7 +1549,7 @@ class BbMutateOrderIT {
 
     /// Item 5, pid reuse: the bound runner stops a job only while the process of that pid has the START TIME the ticket's waiter recorded. A runner
     /// handed the pid of a running job with another start time (the pid was reused) whose deadline has passed ends without a stop: no bound_hit=,
-    /// the build runs on. Control: the same call with the true start time stops it (bound_hit=, rc 124). Mutation: drop the start-time comparison
+    /// the build runs on. Control: the same call with the true start time stops it (bound_hit=, rc 124; the waiter outlives the stop and finalises: finished, #164). Mutation: drop the start-time comparison
     /// from job_runs in the bound runner -> the first call stops the job, red.
     @Test
     void aBoundRunnerHandedAReusedPid_stopsNothing() throws Exception {
@@ -1580,14 +1580,16 @@ class BbMutateOrderIT {
         var same = BbFixtures.run(List.of("bash", tools.resolve("bb-build").toString(), "__bound", id, co, pid, start, "1"), env("mo"), dir, null);
 
         assertThat(same.rc()).as(same.stderr()).isZero();
-        assertThat(field("running", id, "bound_hit")).as("control: the true start time is stopped").isNotEmpty();
         assertThat(within(120, () -> Files.exists(dir.resolve("work/co/mo-1/.bb/rc")))).isTrue();
         assertThat(Files.readString(dir.resolve("work/co/mo-1/.bb/rc")).strip()).isEqualTo("124");
         assertThat(inCheckout("mo-1")).isEmpty();
+        // #164: the stop signals the job's tree only, never the waiter, so the waiter lives and finalises its own ticket (before #164 the stop killed the waiter and a reap made the ticket orphaned)
+        assertThat(within(120, () -> in("done", id))).as("control: the true start time is stopped, and the waiter finalises").isTrue();
+        assertThat(field("done", id, "bound_hit")).isNotEmpty();
+        assertThat(field("done", id, "state")).isEqualTo("finished");
+        assertThat(field("done", id, "rc")).isEqualTo("124");
+        assertThat(field("done", id, "oom_kill_end")).isNotEmpty();
         assertThat(within(60,
                           () -> unchecked(() -> BbFixtures.waiters(id)).isEmpty())).isTrue();
-        lib(tools.resolve("bb-queue-lib.sh"), queue, "exec 8> \"$Q/.lock\" && flock 8 && reap");
-        assertThat(field("done", id, "state")).isEqualTo("orphaned");
-        assertThat(field("done", id, "bound_hit")).isNotEmpty();
     }
 }
