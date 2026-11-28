@@ -153,6 +153,28 @@ class BbOffQueueReactorIT {
         assertThat(offq().lines().map(line -> line.split("\t") [0]).toList()).containsExactly("400");
     }
 
+    /// The `docker ps` of offqueue_reactors is on the pick path (mem_held reads it) and bounded by `timeout -s KILL 5`: a docker that hangs AND
+    /// ignores TERM (`trap '' TERM`; a plain `timeout 5` held 25.01 s in v130d) is cut at 5 s, and the containerised launcher is listed (over-reports,
+    /// never hides). Window [4.9 s, 8 s): `timeout` cannot fire early; the 3 s above the bound is the awk after the cut (0.01-0.03 s measured at
+    /// load 15), so a loaded host does not reach it, and a 12 s bound is 4 s past it. Mutant: `timeout 5 docker ps` (TERM) -> 25 s, red.
+    @Test
+    void aDockerPsIgnoringTerm_isCutAtFiveSeconds_theLauncherIsListed() throws Exception {
+        var tools = Files.createDirectories(dir.resolve("tools"));
+
+        BbFixtures.executable(tools.resolve("docker"), "#!/bin/bash\ntrap '' TERM\nexec sleep 25\n");
+        env.remove("BB_TEST_DOCKER_PS");
+        env.put("PATH", tools + ":" + System.getenv("PATH"));
+        processes("  400     1 9000 /usr/bin/java -classpath boot " + marker);
+        proc("400", co.resolve("t-1"), 10, "0::/system.slice/docker-" + ID_TEMPER + ".scope");
+
+        var t0 = System.nanoTime();
+        var listed = offq().lines().map(line -> line.split("\t") [0]).toList();
+        var seconds = (System.nanoTime() - t0) / 1_000_000_000.0;
+
+        assertThat(listed).containsExactly("400");
+        assertThat(seconds).as("cut at the 5 s bound, not before (it hung) and not at the 25 s hang").isBetween(4.9, 8.0);
+    }
+
     @Test
     void aLauncherThatVanishedFromProc_isSkipped() throws Exception {
         processes("  200     1 9000 /usr/bin/java -classpath boot " + marker);
