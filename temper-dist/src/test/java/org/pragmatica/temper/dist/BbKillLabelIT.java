@@ -457,6 +457,70 @@ class BbKillLabelIT {
         assertThat(field(id, "ended")).isNotEmpty();
     }
 
+    /// #164, the kill set itself: a bound runner (kill_set / stop_ticket_processes given its job's `<pid>:<start>`) signals the job's tree and nothing else of the waiter. A fake waiter (its command line names
+    /// `bb-build __run <id>`) has two children: the job (`sleep 300`) and a helper of its own (`sleep 301`, standing for the end-read substitution). With the job's identity the set is the job alone; with a
+    /// start time that is not the job's (a recycled pid) it is empty; with no job argument (cancel) it is the whole waiter tree, helper and waiter included; stopping with the identity ends the job and leaves
+    /// the helper and the waiter alive, and succeeds (the survivor check reads the same job tree).
+    /// Mutations: no identity check -> A is not empty; the `else` of the roots drops waiter_pids -> C lacks the helper; stop_ticket_processes' loop call without the fourth argument -> the helper dies; its
+    /// survivor-check call without it -> rc is 1 (the helper is a survivor of the waiter tree); the identity swapped (`$JS:$J`) -> B is empty and the job survives.
+    @Test
+    void theBoundRunnersKillSet_isTheJobsTree_neverTheWaitersHelpers() throws Exception {
+        var jobFile = dir.resolve("kill-set-job");
+        var helperFile = dir.resolve("kill-set-helper");
+        var waiterId = "1795733112999999999-164";
+        var waiter = BbFixtures.processClean(List.of("bash",
+                                                     "-c",
+                                                     ": bb-build __run " + waiterId + " -B test; sleep 301 & echo $! > " + helperFile + "; sleep 300 & echo $! > " + jobFile + "; wait"),
+                                             Map.of("PATH", System.getenv("PATH")))
+                                    .redirectErrorStream(true)
+                                    .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+                                    .start();
+
+        started.add(waiter);
+        for (var i = 0; i < 100 && !(Files.exists(jobFile) && Files.size(jobFile) > 0); i++) {
+            Thread.sleep(100);
+        }
+        var env = env(Map.of());
+
+        env.put("ID", waiterId);
+        env.put("JOBFILE", jobFile.toString());
+        env.put("HELPERFILE", helperFile.toString());
+        var out = BbFixtures.run(List.of("bash",
+                                         "-c",
+                                         ". \"$1\"; J=$(cat \"$JOBFILE\"); H=$(cat \"$HELPERFILE\"); JS=$(pstart \"$J\"); co=/nonexistent-co-164\n"
+                                        + "echo \"A=$(kill_set \"$ID\" $co java \"$J:1\" | tr '\\n' ' ')\"\n"
+                                        + "echo \"B=$(kill_set \"$ID\" $co java \"$J:$JS\" | tr '\\n' ' ')\"\n"
+                                        + "echo \"C=$(kill_set \"$ID\" $co | cut -d: -f1 | tr '\\n' ' ')\"\n"
+                                        + "stop_ticket_processes \"$ID\" $co java \"$J:$JS\" > /dev/null; echo \"RC=$?\"\n"
+                                        + "proc_live \"$J\" && echo JOB_ALIVE; proc_live \"$H\" && echo HELPER_ALIVE; echo \"J=$J H=$H\"",
+                                         "bash",
+                                         tools.resolve("bb-queue-lib.sh").toString()),
+                                 env,
+                                 dir,
+                                 null);
+        var lines = lines(out.stdout());
+        var job = lines.stream().filter(l -> l.startsWith("J=")).findFirst().orElseThrow().split("[= ]")[1];
+        var helper = lines.stream().filter(l -> l.startsWith("J=")).findFirst().orElseThrow().split("[= ]")[3];
+
+        assertThat(out.rc()).as(out.stderr()).isZero();
+        assertThat(lines).as("a job pid whose start time is not the job's is no root: the set is empty").contains("A=");
+        assertThat(lines.stream().filter(l -> l.startsWith("B=")).findFirst().orElseThrow().trim())
+                .as("with the job's identity the set is the job alone (kind w), not the waiter, not its helper").isEqualTo("B=" + job + ":" + startOf(lines, "B=") + ":w");
+        assertThat(lines.stream().filter(l -> l.startsWith("C=")).findFirst().orElseThrow())
+                .as("without a job argument (cancel) the set is the whole waiter tree: the waiter, the job and the helper")
+                .contains(job).contains(helper).contains(String.valueOf(waiter.pid()));
+        assertThat(lines).as("stopping with the job's identity succeeds").contains("RC=0");
+        assertThat(lines).as("the job is stopped").doesNotContain("JOB_ALIVE");
+        assertThat(lines).as("the waiter's helper is never signalled").contains("HELPER_ALIVE");
+        assertThat(waiter.isAlive()).as("nor the waiter").isTrue();
+    }
+
+    private static String startOf(List<String> lines, String prefix) {
+        var line = lines.stream().filter(l -> l.startsWith(prefix)).findFirst().orElseThrow().trim();
+
+        return line.split(":")[1];
+    }
+
     private String windowEndRow(String lingerSeconds) throws Exception {
         var fifo = dir.resolve("vmstat-fifo");
         var served = dir.resolve("vmstat-served");
