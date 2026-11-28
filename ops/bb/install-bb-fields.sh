@@ -95,7 +95,7 @@ readonly BB_RESULT_NEW=d20323d47f653a16ec335c6983d2facc
 # bb-co-gc (#113): absent on every host before its first install; nothing else calls it. No trailing comment on a pin line: bb-drift reads it by pattern.
 # the version before #154: no --hours, no pressure floor
 readonly BB_COGC_PRE154=3d5b04a7875496e37288c9ae21cab701
-readonly BB_COGC_NEW=0704cbc313ae565de1407921ae087cee
+readonly BB_COGC_NEW=e9c64961ec7e577929bd1d7f66d52a99
 readonly BB_TICKETS_OLD=472cd816644fe0ee0902b8da3d33de8e   # before the per-ticket progressAt (issue #10)
 readonly BB_TICKETS_PRE31=e1aeba98541ba781295001f956b08c8d   # live since 2026-11-12: drops a ticket key with a capital letter
 readonly BB_TICKETS_PREOFFQ=6174119f0cd567c5dc462d1e063c6214   # the #31 version: no `offq` in the trailer (2026-11-20)

@@ -7,7 +7,7 @@
 # are the functions lock_run, qlock (opens $Q/.lock), log_line, remove_one and remove_leftover, and the leftover move-back in the main loop;
 # all of them run only under `[ "$LIVE" = 1 ]`.
 # N = --days (default 3, an integer 1..3650); H = --hours (an integer 1..87600), the same window in hours, for a sub-day age; --days and --hours
-# together are a usage error. S = --pace (default 2, an integer 0..3600 seconds). Each is decimal, leading zeros allowed (08 is 8), at most 9 significant digits: a longer one is a usage error before any arithmetic (bash wraps at 2^64).
+# together are a usage error. S = --pace (default 2, an integer 0..3600 seconds). Each is decimal, leading zeros allowed (08 is 8), at most 9 significant digits: a longer one is a usage error before any arithmetic (bash wraps at 2^64). Digits are the ten ASCII ones, listed one by one (a range such as 0-9 can match U+0666 and the like in a UTF-8 locale); anything else is a usage error under any locale.
 #
 # THE RULE. A checkout C (an entry of ~/work/co) is removed only when ALL of these hold; each reason that fails is printed by its name:
 #   1 ticket           no ticket in ~/work/queue/{waiting,running} names C (its co= field has C's name after .../work/co/)
@@ -49,7 +49,7 @@
 # measure) once at the start of the pass; at FLOOR (80) percent or more the deferral is WAIVED: the pass runs although tickets are running.
 # Pressure waives the deferral and nothing else: the age is whatever --days/--hours says (the pressure unit passes --hours 6), and each of the
 # seven keep reasons above still holds (a ticket, an in-flight marker, an open process stay protected); the queue lock protocol is unchanged.
-# Below FLOOR the deferral is exactly the one above. A df that cannot be read, or does not answer within 10 seconds (`timeout -k 2`; the run lock is held meanwhile), is `unknown`: no pressure. Why 80: the soak runner stops submitting
+# Below FLOOR the deferral is exactly the one above. A df is `unknown` (no pressure, the deferral stands) unless it exits 0 within 10 seconds (`timeout -k 2`, so a df that ignores TERM is killed 2 s later; the run lock is held meanwhile), leaves no process of its own behind (a child that outlives it, on the pipe or not, is killed and the answer discarded), and prints exactly its two lines, a header and a pcent field that is 1-3 ASCII digits then `%`, value 0..100 (so `-95%`, `0x5F`, `95`, `195%`, text and three lines all read as unknown). The output goes to a temporary file, not a pipe: nothing the tool waits on can be held by a straggler, and df runs without the run-lock descriptor, so a straggler cannot hold the lock either. Why 80: the soak runner stops submitting
 # at 85% (#113) and a run guard kills at 90%; at the observed fill (~1 GB per 3-5 min on a 601 GB disk) 80% leaves one or two hourly timer firings
 # before 90%. The 6 hours of the pressure unit are a guess, not derived (the age distribution of keep=recent checkouts on a full host would settle it).
 # Both DRY and live print one `pressure:` line (use, floor, decision, what the deferral would do); live logs PRESSURE when it waived one.
@@ -75,7 +75,8 @@
 #   - A mapping held only through mmap (the file closed, the process gone from the directory) is not seen by guard 3: the proc scan reads
 #     cwd, exe and open fds, not /proc/<pid>/maps. A running build has its cwd there, so this needs a daemonised process with a closed fd.
 #   - A df stuck in uninterruptible sleep (D state) survives the kill of `timeout -k`, and the pressure read waits for it: the bound holds for a df that
-#     can be signalled (a hang in a pipe, a sleep), not for one blocked inside the kernel.
+#     can be signalled (a sleep, a hang in a pipe, a child that ignores TERM), not for one blocked inside the kernel. A straggler that leaves
+#     df's process group (setsid) is not killed: it holds nothing the tool waits on and not the run lock, and the answer is read as df left it.
 #   - The deferral and the pressure are read once; builds that start during a long pass are met by the pace and the guards, not by a second deferral,
 #     and a pass that frees the disk below FLOOR does not stop itself.
 #   - A checkout stuck with a start and no rc (a killed build) is kept for ever by guard 2; DRY prints it as in-flight so it is visible.
@@ -105,27 +106,27 @@ while [ $# -gt 0 ]; do
 done
 [ $((DAYS_SET + HOURS_SET)) -le 1 ] || usage
 if [ "$HOURS_SET" = 1 ]; then
-  case $HOURS in ''|*[!0-9]*) usage ;; esac
+  case $HOURS in ''|*[!0123456789]*) usage ;; esac
   short "$HOURS"
   HOURS=$((10#$HOURS))
   { [ "$HOURS" -ge 1 ] && [ "$HOURS" -le 87600 ]; } || usage
   LIMIT=$((HOURS * 3600)); WINDOW=hours=$HOURS
 else
-  case $DAYS in ''|*[!0-9]*) usage ;; esac
+  case $DAYS in ''|*[!0123456789]*) usage ;; esac
   short "$DAYS"
   DAYS=$((10#$DAYS))
   { [ "$DAYS" -ge 1 ] && [ "$DAYS" -le 3650 ]; } || usage
   LIMIT=$((DAYS * 86400)); WINDOW=days=$DAYS
 fi
-case $PACE in ''|*[!0-9]*) usage ;; esac
+case $PACE in ''|*[!0123456789]*) usage ;; esac
 short "$PACE"
 PACE=$((10#$PACE))
 [ "$PACE" -le 3600 ] || usage
 LOCK_WAIT=${BB_CO_GC_LOCK_WAIT:-30}
-case $LOCK_WAIT in ''|*[!0-9]*) die 65 "BB_CO_GC_LOCK_WAIT is not an integer: $LOCK_WAIT" ;; esac
+case $LOCK_WAIT in ''|*[!0123456789]*) die 65 "BB_CO_GC_LOCK_WAIT is not an integer: $LOCK_WAIT" ;; esac
 LOCK_WAIT=$((10#$LOCK_WAIT))
 DF_WAIT=${BB_CO_GC_DF_WAIT:-10}   # seconds the df of the pressure read may take (the run lock is held meanwhile); TEST ONLY to shorten
-case $DF_WAIT in ''|*[!0-9]*|??????*) die 65 "BB_CO_GC_DF_WAIT is not an integer of at most 5 digits: $DF_WAIT" ;; esac
+case $DF_WAIT in ''|*[!0123456789]*|??????*) die 65 "BB_CO_GC_DF_WAIT is not an integer of at most 5 digits: $DF_WAIT" ;; esac
 DF_WAIT=$((10#$DF_WAIT))
 [ "$DF_WAIT" -ge 1 ] || die 65 "BB_CO_GC_DF_WAIT is 0: timeout 0 would mean no bound"
 
@@ -271,11 +272,34 @@ deferred() {
   CAP=${cap:-3}
   [ "$GROUPED" -gt 0 ] || [ $((RUNNING * 2)) -gt "$CAP" ]
 }
-# read_pressure: USE = percent of the home filesystem in use (empty when df cannot be read or does not answer within DF_WAIT seconds: timeout
-# ends it and its children, the pipeline fails, and USE stays empty, so a df that hangs never turns the waiver on), PRESSURE = 1 when USE >= FLOOR (unknown is 0)
+# read_pressure: USE = percent of the home filesystem in use, or empty (unknown) unless df exited 0 within DF_WAIT seconds (+2 s grace for a df that
+# ignores TERM), left no process behind in its group, and printed a header line and one pcent field of 1-3 ASCII digits, `%`, value 0..100.
+# PRESSURE = 1 when USE >= FLOOR (unknown is 0). df writes to a temp file, not a pipe, so nothing a straggler holds can stall this function, and
+# runs with fd 9 (the run lock) closed so a straggler cannot hold the lock. timeout makes its own process group (the pgid is its pid): when df has
+# ended and the group still has a member, the answer is discarded and the group killed.
 read_pressure() {
-  USE=$(timeout -k 2 "$DF_WAIT" "$DFCMD" --output=pcent "$HOME" 2> /dev/null | tail -n 1 | tr -dc 0-9) || USE=
-  case $USE in ''|????*|*[!0-9]*) USE= ;; *) USE=$((10#$USE)) ;; esac
+  local tmp tpid out rest v rc=0
+  USE=
+  tmp=$(mktemp "${TMPDIR:-/tmp}/bb-co-gc-df.XXXXXX" 2> /dev/null) || tmp=
+  if [ -n "$tmp" ]; then
+    timeout -k 2 "$DF_WAIT" "$DFCMD" --output=pcent "$HOME" > "$tmp" 2> /dev/null < /dev/null 9>&- &
+    tpid=$!
+    wait "$tpid" || rc=$?
+    if kill -0 -- "-$tpid" 2> /dev/null; then rc=1; kill -KILL -- "-$tpid" 2> /dev/null || true; fi
+    out=; [ "$rc" != 0 ] || out=$(head -c 200 -- "$tmp" 2> /dev/null) || out=
+    rm -f -- "$tmp"
+    v=
+    case $out in
+      *$'\n'*) rest=${out#*$'\n'}; case $rest in *$'\n'*) ;; *) v=$rest ;; esac ;;
+    esac
+    while [ "${v# }" != "$v" ]; do v=${v# }; done
+    while [ "${v% }" != "$v" ]; do v=${v% }; done
+    case $v in
+      [0123456789]%|[0123456789][0123456789]%|[0123456789][0123456789][0123456789]%)
+        v=${v%\%}
+        if [ "$((10#$v))" -le 100 ]; then USE=$((10#$v)); fi ;;
+    esac
+  fi
   PRESSURE=0
   if [ -n "$USE" ] && [ "$USE" -ge "$FLOOR" ]; then PRESSURE=1; fi
 }
