@@ -287,7 +287,7 @@ read_pressure() {
     wait "$tpid" || rc=$?
     if kill -0 -- "-$tpid" 2> /dev/null; then rc=1; kill -KILL -- "-$tpid" 2> /dev/null || true; fi
     out=; [ "$rc" != 0 ] || out=$(head -c 200 -- "$tmp" 2> /dev/null) || out=
-    rm -f -- "$tmp"
+    rm -f --one-file-system -- "$tmp"   # the flag is on every rm of this tool (BbCoGcIT audits the argv of each one)
     v=
     case $out in
       *$'\n'*) rest=${out#*$'\n'}; case $rest in *$'\n'*) ;; *) v=$rest ;; esac ;;
