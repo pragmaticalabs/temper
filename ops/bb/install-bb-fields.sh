@@ -12,7 +12,7 @@
 #   everything before <target>, and then no config is read.
 # Phase 0, local: the seventeen files of ops/bb (next to this script) named below must be the pinned reviewed files, else exit 65
 #   with no ssh made.
-# Phase 1, read-only, EVERY target first: installed bb-build is one of BB_BUILD_OLD|MID|PREV|LIVE|PRE31|PRERC|PREVIA|PREMEM|PRECAP|PREJBCT|PREHELP|PRESINCE|PREFIELDS|PRESESSION|PRE80|PRE76|PRE86|PRE90|PRE91|PRE102|PRE112|PRE116|PRE133|PRE131|NEW, bb-queue-lib.sh one of BB_LIB_OLD|PREV|PRERC|PREMEM|PRECAP|PREOFFQ|PRELEDGER|PRE80|PRE88|PRE90|PRE116|PRE130|NEW,
+# Phase 1, read-only, EVERY target first: installed bb-build is one of BB_BUILD_OLD|MID|PREV|LIVE|PRE31|PRERC|PREVIA|PREMEM|PRECAP|PREJBCT|PREHELP|PRESINCE|PREFIELDS|PRESESSION|PRE80|PRE76|PRE86|PRE90|PRE91|PRE102|PRE112|PRE116|PRE133|PRE131|PRE164|NEW, bb-queue-lib.sh one of BB_LIB_OLD|PREV|PRERC|PREMEM|PRECAP|PREOFFQ|PRELEDGER|PRE80|PRE88|PRE90|PRE116|PRE130|PRE164|NEW,
 #   bb-queue one of BB_QUEUE_OLD|PREV|LIVE|PRE31|PRERC|PREVIA|PREMEM|PRECAP|PREOFFQ|PRELEDGER|PRE80|PRE90|NEW, bb-tickets is absent, BB_TICKETS_OLD|PRE31|PREOFFQ|NEW, bb-hold is absent, BB_HOLD_OLD (the 2026-11-09
 #   host snapshot), BB_HOLD_PRELEDGER, BB_HOLD_PRE90 or BB_HOLD_NEW, bb-wait is absent, BB_WAIT_PRERC, BB_WAIT_PREREFUSED, BB_WAIT_PRE80, BB_WAIT_PRE90, BB_WAIT_PRE131 or its NEW, bb-await is absent, BB_AWAIT_PREREFUSED, BB_AWAIT_PRE90, BB_AWAIT_PRE131 or BB_AWAIT_NEW, bb-netns-run is absent, BB_NETNS_PREV, BB_NETNS_PREMOUNTS or BB_NETNS_NEW, bb-portgroup.py is absent, BB_PORTGROUP_PREV, BB_PORTGROUP_PRESINCE or BB_PORTGROUP_NEW, bb-modules.py is absent, BB_MODULES_PRE112 or BB_MODULES_NEW, bb-mutate is absent, BB_MUTATE_OLD, BB_MUTATE_PREVIA, BB_MUTATE_PRE97, BB_MUTATE_PRE100, BB_MUTATE_PRE116, BB_MUTATE_PRE135 or BB_MUTATE_NEW, bb-jbct-bootstrap is absent or BB_JBCTBOOT_NEW, bb-result is absent, BB_RESULT_PRECP, BB_RESULT_PRE80, BB_RESULT_PRE131 or BB_RESULT_NEW, bb-co-gc is absent or BB_COGC_NEW, bb-test is absent, BB_TEST_PRE76, BB_TEST_PRE86 or BB_TEST_NEW, and bb-cp-record and bb-testcount (the bb-test lane) are absent or their NEW pin. Any mismatch prints `refused <target> <file> installed=<md5|absent>
 #   expected=<pin>[|<pin>...]` (every accepted pin except `absent`, in the order above) for every mismatch on every target and exits 65 having written nothing anywhere; an unreachable target is 69.
@@ -46,7 +46,8 @@ readonly BB_LIB_PRE88=f5bd1cc5ac79506f341a414b79558852   # the #81 version: pick
 readonly BB_LIB_PRE90=745b72b5d32d6c7e8fd81c889edc81b1   # the #88 version: pick reads the reap count from the global REAP_LAUNCHES (issue #90)
 readonly BB_LIB_PRE116=bca5488e9abb94003471286f2ac35ca5   # the version before #116: order() has no order_at= and no driver check
 readonly BB_LIB_PRE130=7d5898b17a56ef5552fd0d80fc4f1dd2   # the version before #130: no queue claims to come, no grant record
-readonly BB_LIB_NEW=ff55f07636c5c10541a38aee9f50da87
+readonly BB_LIB_PRE164=ff55f07636c5c10541a38aee9f50da87   # the version before #164: the bound runner's stop rounds signal the waiter's own helper processes
+readonly BB_LIB_NEW=4656e835ab96db419f00ff9883afc43e
 readonly BB_QUEUE_OLD=7efbfbecb9739fed35223cdc97eb185d
 readonly BB_QUEUE_PREV=a04b7be02f840d4f1e2bd19c54c52b3f
 readonly BB_QUEUE_LIVE=af86457ae18f4ca331e47137cd088bc7   # what the 2026-11-11 hosts run: its header says `group tickets running:`, which the worker cannot parse
@@ -83,7 +84,8 @@ readonly BB_BUILD_PRE112=b10f1e002113eafa50a05b8f4fe58eae   # the #102 version: 
 readonly BB_BUILD_PRE116=f1478564c91a6ab3544d1a7c9efec568   # the version before #116: mutant tickets carry no order_at= and have no one-per-owner rule
 readonly BB_BUILD_PRE133=cfb4be8d2cd1261867572e7318b04850   # the version before #133: a token in both -Dtest and -Dit.test is counted per plugin
 readonly BB_BUILD_PRE131=b3afd3d43fe1ad156640bb9b534ac19e   # the version before #131: no kernel window in the ticket, a repeated test goal is queued
-readonly BB_BUILD_NEW=c81e1cf4c486125dd48d91f31be498a2
+readonly BB_BUILD_PRE164=c81e1cf4c486125dd48d91f31be498a2   # the version before #164: the bound runner stops the waiter's whole tree, its end-read substitutions included
+readonly BB_BUILD_NEW=fa062c0204d90ca88d51000f3e47d2c2
 # bb-jbct-bootstrap: absent on every host before its first install; bb-build calls it, so it is installed first.
 readonly BB_JBCTBOOT_NEW=3e5396ecee48b99949456cf805df1e60
 # bb-result: absent on every host before its first install. No trailing comment on a pin line: bb-drift reads it by pattern.
@@ -173,8 +175,8 @@ new_of() {
 }
 accepted_of() {  # the md5s a host may hold besides absent, in the order the refusal names them
   case $1 in
-    bb-build) echo "$BB_BUILD_OLD $BB_BUILD_MID $BB_BUILD_PREV $BB_BUILD_LIVE $BB_BUILD_PRE31 $BB_BUILD_PRERC $BB_BUILD_PREVIA $BB_BUILD_PREMEM $BB_BUILD_PRECAP $BB_BUILD_PREJBCT $BB_BUILD_PREHELP $BB_BUILD_PRESINCE $BB_BUILD_PREFIELDS $BB_BUILD_PRESESSION $BB_BUILD_PRE80 $BB_BUILD_PRE76 $BB_BUILD_PRE86 $BB_BUILD_PRE90 $BB_BUILD_PRE91 $BB_BUILD_PRE102 $BB_BUILD_PRE112 $BB_BUILD_PRE116 $BB_BUILD_PRE133 $BB_BUILD_PRE131 $BB_BUILD_NEW" ;;
-    bb-queue-lib.sh) echo "$BB_LIB_OLD $BB_LIB_PREV $BB_LIB_PRERC $BB_LIB_PREMEM $BB_LIB_PRECAP $BB_LIB_PREOFFQ $BB_LIB_PRELEDGER $BB_LIB_PRE80 $BB_LIB_PRE88 $BB_LIB_PRE90 $BB_LIB_PRE116 $BB_LIB_PRE130 $BB_LIB_NEW" ;;
+    bb-build) echo "$BB_BUILD_OLD $BB_BUILD_MID $BB_BUILD_PREV $BB_BUILD_LIVE $BB_BUILD_PRE31 $BB_BUILD_PRERC $BB_BUILD_PREVIA $BB_BUILD_PREMEM $BB_BUILD_PRECAP $BB_BUILD_PREJBCT $BB_BUILD_PREHELP $BB_BUILD_PRESINCE $BB_BUILD_PREFIELDS $BB_BUILD_PRESESSION $BB_BUILD_PRE80 $BB_BUILD_PRE76 $BB_BUILD_PRE86 $BB_BUILD_PRE90 $BB_BUILD_PRE91 $BB_BUILD_PRE102 $BB_BUILD_PRE112 $BB_BUILD_PRE116 $BB_BUILD_PRE133 $BB_BUILD_PRE131 $BB_BUILD_PRE164 $BB_BUILD_NEW" ;;
+    bb-queue-lib.sh) echo "$BB_LIB_OLD $BB_LIB_PREV $BB_LIB_PRERC $BB_LIB_PREMEM $BB_LIB_PRECAP $BB_LIB_PREOFFQ $BB_LIB_PRELEDGER $BB_LIB_PRE80 $BB_LIB_PRE88 $BB_LIB_PRE90 $BB_LIB_PRE116 $BB_LIB_PRE130 $BB_LIB_PRE164 $BB_LIB_NEW" ;;
     bb-queue) echo "$BB_QUEUE_OLD $BB_QUEUE_PREV $BB_QUEUE_LIVE $BB_QUEUE_PRE31 $BB_QUEUE_PRERC $BB_QUEUE_PREVIA $BB_QUEUE_PREMEM $BB_QUEUE_PRECAP $BB_QUEUE_PREOFFQ $BB_QUEUE_PRELEDGER $BB_QUEUE_PRE80 $BB_QUEUE_PRE90 $BB_QUEUE_NEW" ;;
     bb-hold) echo "$BB_HOLD_OLD $BB_HOLD_PRELEDGER $BB_HOLD_PRE90 $BB_HOLD_NEW" ;;
     bb-tickets) echo "$BB_TICKETS_OLD $BB_TICKETS_PRE31 $BB_TICKETS_PREOFFQ $BB_TICKETS_NEW" ;;

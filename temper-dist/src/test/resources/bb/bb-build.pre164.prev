@@ -1,0 +1,700 @@
+#!/usr/bin/env bash
+# bb-build <checkout-dir> [mvn args...]  (default args: clean install)
+# QUEUED since 2026-09-28: after the guards below, the build is DEDUPED against identical builds, then ENQUEUED and
+# this command returns at once; a detached waiter launches maven when its ticket is granted (priority order from
+# ~/work/priorities, FIFO among equals, under the reactor cap). Poll for .bb/rc exactly as before.
+# Writes in <checkout>/.bb/: queued (ticket id, while waiting), run.marker (at launch), ticket (the granted run's ticket id, written with start), build.log, start/end
+# epochs, rc (a 444 convenience copy of maven's exit code, written INSIDE the job; 5 = queue wait expired, 9 = cancelled/abandoned
+# before maven started; 19 = maven ended 0 but a selected test class ran 0 testcases, see ZERO-TESTCASE REFUSAL). Call rc: 0 queued; 2 usage; 3 already running/queued here; 4 owner; 6 #1553 guard;
+# 7 identical build running/queued elsewhere; 8 identical build already finished (paths printed); 19 BB_QUEUE=0 with a counted selector
+# (ZERO-TESTCASE REFUSAL); 10 -Dtest without
+# -Dit.test on forge-tests (failsafe ignores -Dtest); 11 -pl without -am/-amd, a lifecycle phase at or after `compile`, and a reactor module the run resolves not installed (UNINSTALLED SIBLING, below). BB_DEDUP=0
+# skips dedup; a bb-mutate call (BB_VIA bb-mutate:*) has no dedup key, so nothing dedups onto its ticket either. DEDUP IDENTITY (#80, 2026-11-21): a finished identical build is still the checkout's result only while .bb/ticket names ITS ticket (not while
+# .bb/start equals its started=: two runs granted in one second shared a start, and dedup answered with the newer run's result). A checkout with no
+# .bb/ticket (run before this change) is not current: no dedup, the safe direction. BB_QUEUE=0 runs the pre-queue script (bb-build-direct) -- it also bypasses the port group -- after removing .bb/ticket (that run writes .bb/start only, so an older ticket must not stay current).
+# PORT GROUP (2026-09-29): a run that will execute tests of a fixed-port module (~/work/port-group-modules; decided by
+# bb-portgroup.py from the checkout's own poms and the args) is granted only while no other port-group run is running.
+# BB_PORT_GROUP=1 forces membership, BB_PORT_GROUP=0 forces exclusion.
+# REQUIRE DOCKER (2026-11-12): both maven launches below end with -Daether.requireDocker=true, after the caller's args (pragmatica #2591: a Docker IT
+# class FAILS instead of silently not running when Docker is absent; temper ignores the property). Override point (#31, 2026-11-12):
+# BB_REQUIRE_DOCKER=0 at enqueue omits the flag from both launches, for a run that must see how a guard behaves WITHOUT it (pragmatica #3090);
+# the value is ^[01]$ (anything else: refused, exit 2, nothing queued), unset or 1 = the flag as above. A 0 ticket carries the line
+# requireDocker=0 (bb-tickets shows it, bb-queue marks the row [no-requireDocker]) and a 0 build is never deduped against a guarded one.
+# ISOLATED SLOTS (2026-11-11): a group ticket's maven runs inside its own docker network namespace (bb-netns-run: host userland
+# mounted read-only, checkout and $HOME at the same paths, own loopback), so identical fixed ports cannot collide and up to N
+# (~/work/port-group-slots, default 3) group tickets run at once per host, each holding a slot (bb-queue shows it). No change to the
+# tests. BB_PG_ISOLATE=0 at enqueue = the old host-exclusive behaviour for that ticket (ticket has no iso=1).
+# MUTANT TICKETS (#116): a ticket with via=bb-mutate:* (BB_VIA). bb-mutate also passes BB_ORDER_AT (epoch NANOseconds, the submit time of its
+# whole run, taken once before the control build), BB_DRIVER_PID and BB_DRIVER_START (its pid and /proc start time) and BB_MUTANT_BOUND
+# (seconds); the ticket then carries order_at= driver_pid= driver_start= bound=.
+#   TURN, per host: a waiting mutant ticket is ELIGIBLE only while its owner has no mutant ticket in running/ and none in waiting/ with a smaller
+#     created= (tie: ticket id). grantable() in the lib tests it at every grant test, in the lock hold that moves the ticket to running/, so
+#     at most ONE mutant ticket per owner runs on a host and an owner's batches alternate build by build. A ticket that is not eligible
+#     takes no part in pick: no blocked_since=, never in an override, blocks nothing. The call is never refused for it. NOT COVERED: other
+#     hosts; a waiter that sourced the lib of before #116 (it grants its own ticket by the old rule). Every mutant ticket counts, with or
+#     without order_at=. Priority does not reorder one owner's mutant tickets among themselves: the older one goes first.
+#   ORDER: order() in the lib sorts a ticket by order_at= instead of created= WITHIN its priority (a higher priority still goes first), so it
+#     places the eligible one against OTHER owners' tickets. It is still gated (load, memory, caps, port group) at its own grant; created=
+#     (turn, starvation override, ticket log) is its true enqueue time. FAIRNESS BOUND: at one priority, a ticket created at c is overtaken by
+#     later-created tickets only of runs that started before c: at most one at a time per owner, and in all at most the builds such a run
+#     still has (control + mutants + batch re-runs). No time bound, and blocked_since= does not limit it.
+#   ACCEPTED ONLY when ALL hold, else call rc 2 and nothing queued: BB_ORDER_AT is 19 digits, not later than now and not earlier than the driver's
+#     start (start_ns: up to 1 s of slack; a forward step of the wall clock by more during a run refuses its later builds ("before the start of its driver"),
+#     and so does a BACKWARD step by more than the run's age, the time since its BB_ORDER_AT ("is in the future"): rc 2 for each later call until the clock is back); BB_VIA matches
+#     ^bb-mutate:[A-Za-z0-9._-]{1,20}:[A-Za-z0-9._-]+$; BB_MUTANT_BOUND is 1 to 6 digits, not 0; the driver pid runs with that start time, its
+#     command line is `python* .../bb-mutate` and it is an ancestor process of this call. WHAT THAT DOES NOT COVER: BB_VIA alone is an env
+#     value anyone can set (such a ticket takes turns with its owner's, no more); the driver check ties the call to a live process NAMED
+#     bb-mutate, not to a reviewed bb-mutate. It stops a stray or inherited BB_ORDER_AT, not a deliberate same-uid forgery.
+#   DRIVER GONE: the ticket's waiter checks the driver at every poll (5 s), in the lock hold of its grant test, and moves a WAITING ticket
+#     whose driver is gone to done/ (state=abandoned, .bb/rc 9). A RUNNING ticket is never touched on driver death.
+#   BOUND: the waiter starts a runner (`bb-build __bound`) with the job: a job still running bound= seconds after its start is stopped (its process
+#     tree, its container, java processes whose cwd is the checkout; nothing else, so not a driver or shell standing there), with a live driver or without; the
+#     ticket gets bound_hit=, rc=124 and .bb/rc 124. A job that returned by itself first gets job_end= instead (its rc is kept, whatever the count
+#     and bb-cp-record after it take). WHEN: bound_hit= comes bound to bound + 2 s after the grant (whole seconds rounded up, so never before the
+#     bound; one test a second; plus a wait for the queue lock). Then TERM after one /proc scan, KILL 5 s later to what ignores it, two more scans,
+#     .bb/rc: measured 4 to 8 s after bound_hit=, 9 to 10 s for a job that ignores TERM (300 processes on the host; a scan grows with them,
+#     and a stop that left survivors is retried, so there is no fixed upper limit).
+#     A runner outlives its waiter; NOT COVERED: the runner itself killed, and tickets without bound= (a bb-mutate of before #116). A ticket still WAITING
+#     when bb-build is rolled back (the installer's reverse order) runs WITHOUT its bound: its waiter starts the runner as `bash <this file> __bound`, at
+#     the grant, and the file is then the bb-build of before #116, which has no such mode (it ends at once; the ticket gets no bound_hit=).
+#     bb-mutate reads .bb/rc 124 as the bound only when the ticket carries bound_hit=; a job's own exit 124 is an ordinary rc.
+# The four variables are unset before the waiter (or, under BB_QUEUE=0, bb-build-direct) starts, so a build never inherits them.
+# LOAD GATE (2026-11-11): a ticket is also granted only while load5/cores < 1.2 (BB_LOAD_MAX); the oldest grantable ticket goes
+# once it waited > 1200 s (BB_LOAD_STARVE_SECS) while < 2 queue launches run (BB_LOAD_STARVE_REACTORS). MEMORY FLOOR (#53): a grant also
+# needs MemAvailable >= the per-host floor; the oldest ticket overrides it only while no ticket runs at all. pick() in the lib decides.
+# HOST CAP (#56): a grant also needs live queue launches (the lib's LAUNCH LEDGER, never a process pattern) < min(this ticket's cap, the host's ~/work/max-reactors, default 3); nothing overrides it.
+# Off-queue JVMs (#56): the memory floor is compared against MemAvailable minus their unclaimed heap, max(0, Xmx - RSS) each.
+# VERDICT SOURCE (2026-11-12, bbrc1; reap and too-late cancel fixed 2026-11-13): the ticket's rc= is the exit status of the build subshell
+# as returned by `wait` in the waiter, never a read of .bb/rc. A ticket whose waiter is gone (reap, or a cancel that finds the build
+# already ended) is finalized as orphaned with NO rc: bb-wait exits 70, and .bb/rc is not read into it. .bb/rc is a read-only (444) copy
+# written before the ticket is finalized, replaced only by rm/rename (write_rc in the lib), never by `>`.
+# GUARANTEE: the verdict comes from mvn's exit status, never from the checkout; any later disagreement in the checkout is detected (RC-MISMATCH, exit 71); deliberate tampering with queue/done by the same uid stays possible.
+# BB-TEST (2026-11, bb-test lane): a GREEN build then runs bb-cp-record (offline test-compile + dependency:build-classpath; writes .bb/cp/<module>.cp and
+# .bb/cp/manifest for bb-test's stale-jar guard); its failure is logged and never changes rc, and it is bounded by BB_CP_RECORD_TIMEOUT seconds
+# (default 300; on timeout: "cp-record skipped: timeout" in the log, any record removed, write_rc delayed by at most the bound + 10 s). BB_LAUNCH=<cmd> makes the waiter run <cmd> instead of maven
+# (bb-test's own __launch mode); such a ticket sets BB_NO_CP_RECORD=1 and BB_DEDUP=0.
+# LAUNCH FIELDS (#76, CTO ruling 2026-11-21): every job gets BB_TICKET=<its id> (bb-netns-run passes it into the container); bb-test's __launch
+# never sees the queue and writes its ticket fields to .bb/fields.<id>. That file is UNTRUSTED (test code can write the checkout). Once the
+# job has exited, the waiter reads it (before the queue lock: a regular file, not a symlink, at most 64 KiB, under a 10 s timeout) and
+# appends, under the queue lock in the same append as (just before) state=finished/rc=, ONLY lines of this grammar (C locale, byte counts):
+#   verdict_source=guard | verdict_source=java     (nothing else)
+#   refused=<v>   v: 1..1024 bytes, no control byte (so no CR/LF/NUL injection), first byte not '='
+# Every other line is rejected by its key (malformed: no <[A-Za-z0-9_]{1,32}>= key), and so is the whole file when the ticket is not a
+# BB_LAUNCH one (not_launch), it names another id (foreign_file), it is not regular (not_regular), it cannot be read (unreadable) or
+# .bb/ticket does not read <id> (ticket_mismatch). Rejections are recorded as one fields_rejected=<token>[,<token>...] line (at most 256
+# bytes; details in build.log). Under the lock, just before the append, the run ticket is read again (run_ticket): a marker that no longer reads <id> drops the copied lines and records fields_rejected=ticket_changed + verdict_source=missing (never a pass); a process the job left behind can still rewrite its OWN fields between the read and the lock, within the grammar (accepted, CTO 2026-11-21). BB_TEST_BEFORE_LOCK=<cmd> (TEST SEAM, inert unless set) runs in that window. A BB_LAUNCH ticket with no accepted verdict_source gets verdict_source=missing (a crash, OOM or kill
+# before bb-test wrote it). A rejection or a missing verdict is never a pass: a job rc of 0 is then recorded as rc=18; a non-zero rc is
+# kept. .bb/rc stays the job's own exit status. Every .bb/fields.* is removed at the grant and after the read.
+# Every ticket reaching done/ appends one line to ~/work/bb-ticket-log.tsv. `bb-wait <ticket>` blocks until it finishes (exit = rc).
+# TICKET OWNER FIELDS (T3, 2026-11): the ticket gains optional key=value lines after group_reason= and before args= (readers
+# take the LAST line of a key, so every existing reader ignores them): session_pid, session_start (epoch s) and session_label
+# from BB_SESSION_PID / BB_SESSION_START / BB_SESSION_LABEL (all three or none), agent, lane, pr from BB_AGENT, BB_LANE, BB_PR,
+# output (always <checkout>/.bb/build.log) and detached_reader from `bb-build --detached --reader <label> <checkout> [args]`
+# (those three words first, in that order; refused with rc 2 under BB_QUEUE=0 or without --reader; the flag is not part of the
+# maven args or the dedup key). A malformed value never blocks a build: "bb-build: ignoring BB_<NAME>: not <regex>" on stderr,
+# the field is omitted. Old callers set none of these.
+# INCREMENTAL (2026-11-19, design docs/bb-build-once-design.md §1): `bb-build [--detached --reader L] --since <base> <checkout> [goals]` asks
+# bb-modules.py (next to this file) for the module set S = am(C u amd(C)) of the paths changed since <base> (git diff <base>...HEAD, dirty
+# tracked and untracked files), prints it, and runs the goals with an explicit `-pl S` (no -am/-amd: the closure already covers the whole
+# set, so no upstream resolves from a stale .m2-local jar). FULL (root/parent pom, .mvn/, unmapped path, unparsable pom; the cause goes on the since_reason= ticket line) keeps the whole
+# reactor; NONE (no change at all) prints "nothing changed", queues nothing and exits 0. The ticket gains since=<base> and modules=<n|FULL>
+# right after group_reason= (same optional-line rule as the owner fields). The dedup key hashes the EXPANDED args. Refused (rc 2): a missing
+# or unreadable base, a missing bb-modules.py, or caller args that already carry -pl/-am/-amd/-f (two selections of the modules).
+# UNINSTALLED SIBLING (#112, call rc 11, nothing queued; checked after the guards below, before dedup and enqueue). THE RULE: refused only when ALL hold:
+# the args carry `-pl`/`--projects` and none of -am/--also-make/-amd/--also-make-dependents; they carry a lifecycle phase at or after `compile` (a plugin goal
+# `x:y` alone, such as jbct:check or jbct:format, or `clean`, is never refused); and a reactor module the selected ones resolve has no pom in the repo.
+# bb-modules.py --installed reads the checkout's poms. Resolved: a selected jar/war module's direct <dependencies> (from `test-compile` on every scope, before
+# it every scope but `test`; a pom-packaged selected module resolves none), and, for each such module that is not itself selected, ITS compile- and runtime-scope
+# <dependencies>, transitively; `!x`/`-x` leaves x out of the selected set, so it counts. A dependency is a reactor module only when (groupId, artifactId) both
+# match (groupId substituted from the pom's own <properties>, or inherited from the parent; a groupId still holding `${` while its artifactId names a reactor
+# module is SKIP, so the run queues); groupId, artifactId and version are whitespace-stripped. Each needed module must have
+# <repo>/<groupId path>/<artifactId>/<version>/<artifactId>-<version>.pom, repo = the last -Dmaven.repo.local= of .mvn/maven.config + args, else
+# <checkout>/.m2-local. Any missing: refused naming them, "add -am, or install them first" (maven would fail in seconds at dependency resolution with 0
+# testcases, a lane round lost). -pl forms: `-pl a,b`, `-pl=a`, `-pla`, `--projects[=]a`, `?a`, `:artifactId`, `g:a`, `!x`/`-x`. NOT refused (a note on stderr): a
+# form it cannot resolve (unknown selector, `-f`, a coordinate left holding `${`, unreadable poms). Not checked: group mode, --since (its own -pl already covers
+# the closure), BB_QUEUE=0, -pl given only in .mvn/maven.config. LIMITS: a stale installed sibling passes (as in plain maven); only the .pom is looked for (not the
+# jar); -amd alone passes although it does not add upstreams (the caller's choice of flag is trusted); a plugin or parent-only edge is not modelled; a
+# runtime-scope direct dependency counts before test-compile although maven does not resolve it at `compile` (over-refusal, rare); a goal that resolves
+# dependencies without a lifecycle phase (dependency:tree) is not checked.
+# JBCT BOOTSTRAP (2026-11-19, feat/bb-jbct-bootstrap): a run that asks for a jbct:* goal, an org.pragmatica-lite:jbct-maven-plugin:* goal or the jbct
+# profile, in a checkout whose .m2-local lacks the jbct-maven-plugin jar of its effective version (the root pom's plugin entry), first runs CI's bootstrap
+# (`mvn install -B -DskipTests -pl <ci.yml list at HEAD> -am`) inside the same ticket, same cap and port group, before the main maven
+# (bb-jbct-bootstrap holds the rules and its exit codes: failure -> the ticket's rc is the bootstrap's and the main maven does not run;
+# 82-87 are refusals; 88 = the helper itself is missing or not executable on a jbct run, refused before any maven). build.log carries `bootstrap: jbct plugin <ver> installed into .m2-local|present|FAILED rc=<n>`; the ticket carries
+# jbct_bootstrap=<ver> after an install. The jbct-run test lives here (wants_jbct) and only here; any other run never execs or even looks for the helper and is unchanged. Not part of the dedup key.
+# ZERO-TESTCASE REFUSAL (#86; CTO ruling 2026-11-22: ONE invariant, ONE table): selected_testcases, the one counter of EVERY ticket, a
+# build's and a bb-test launch's (BB_LAUNCH) alike, run in the job tail on the job's rc. PLUGINS: surefire (selector: the last -Dtest=),
+# failsafe (the last -Dit.test=); a launch has one, its Class[#method] args. S(P) = P's POSITIVE selector set: the comma-separated
+# tokens minus `!` exclusions. `none` is special ONLY as a property's exact whole value (case-sensitive: `None`, `none,X` are tokens).
+# THE TABLE (a cell's name is its row prefix in BbZeroTestcaseIT and the CELLS name a mutant deletes):
+#   cell        when                                                     outcome
+#   NOSEL       neither -Dtest nor -Dit.test given (a build)             NOT GATED, rc kept (any rc), but logged (CTO ruling 2026-11-22):
+#                                                                        `bb-build: testcases (no selector, not gated): surefire(all)=n failsafe(all)=m`
+#   POS         S(P) non-empty                                           every token of S(P) has executed testcases > 0 in P's reports, else 19;
+#                                                                        a token in BOTH S(surefire) and S(failsafe) is one token whose count
+#                                                                        is the sum over both plugins' reports (CTO 2026-11-27: a failsafe-only
+#                                                                        module with surefire skip=true, `-Dtest=X -Dit.test=X,Y`, was 19)
+#   ALL         S(P) empty (no selector, only `!`), P not `none`, P RAN  P(all) executed > 0, logged `surefire(all)=n` / `failsafe(all)=n`, else 19
+#   NONE        P's selector is exactly `none`                           P is not counted
+#   IDLE        a selector given, but no cell above counted anything     19 (both `none`, or no selected plugin ran)
+#   REJECT      job rc != 0 because the runner rejected the selection    19, the runner's line passed through (below)
+#   UNCOUNTABLE job rc 0, the count cannot be made (no marker, 120 s)   19, never a pass
+#   QUEUEOFF    BB_QUEUE=0 and any -Dtest/-Dit.test (`none` included)    19 at the call, nothing run (bb-build-direct writes .bb/rc from its
+#                                                                        own detached job, so nothing could count it before a poller reads 0)
+# Any other non-zero job rc is kept (a genuine failure stays 1). One exit code means one test: 19 = the selection executed nothing.
+# P RAN (a build): build.log has P's test goal execution (`--- [maven-]surefire[-plugin]:<v>:test` / `failsafe...:integration-test`) not
+# followed, before the next `--- `, by `Tests are skipped.`; or P wrote a report newer than the marker. (A module set that binds no failsafe
+# does not run it, so `-Dtest=X -pl core` is not judged on ITs; limit: a `-q` log shows no execution, and -T interleaving can misplace a skip.)
+# REJECT tells a rejection from a failure by the runner's own words: a build, when EVERY `[ERROR] Failed to execute goal` line of build.log
+# is a surefire/failsafe goal failing with `No tests matching pattern` / `No tests were executed` (a test failure, compile error or any
+# other goal keeps its rc); a launch, when java exited 255 (`bb-test: run i/N java exit 255`) and no testcase of the ticket's reports
+# failed or errored. The passed-through line: the goal's message, or java's first `Caused by: ` line (else its first exception line).
+# REPORTS: a build reads TEST-<fqcn>.xml under any <module>/target/surefire-reports (surefire) or failsafe-reports (failsafe), nothing else
+# (fixture XML under src/ never counts); a launch, its own <module>/target/bb-test-reports/<ticket>/ (--repeat N>1: each run<i>/ is a run of
+# its own and every token must be > 0 in EVERY run). Only reports with an mtime newer than .bb/run.marker count. A <testcase> belongs to the
+# class its file names, else (the launcher's TEST-junit-jupiter.xml) to its classname. EXECUTED = testcases minus those with a <skipped>
+# child (logged `<token>=<n>(+<k> skipped)`). MATCHING: a token's class part (before '#') matches a class or any of its '$'-prefixes (a
+# nested Outer$Inner$Deeper counts for Outer and Outer$Inner); a bare name or glob against the simple name, in any module (`Bb*IT` is ONE
+# token), a dotted or slashed one against the package path, %regex[...] against the class path (limit: a %regex holding ',' is split).
+# build.log: `bb-build: selected testcases: [run<i>:]<token>=<n> ... [surefire(all)=n] [failsafe(all)=n]`, then on refusal
+# `[ERROR] bb-build: refused rc <job rc> -> 19: <cell's reason>`; 19 lands in .bb/rc and the ticket's rc= (no bb-cp-record).
+# KILL LABEL (#131): the ticket carries the host kernel's window of its run: oom_kill_start= mem_avail_kb_start= (written with started=, under the grant's lock hold) and
+# oom_kill_end= mem_avail_kb_end= (read right after the job's wait, written just before the launch fields and state=finished, so the launch fields stay the last lines before the rc); oom_kill is /proc/vmstat's host-wide counter, MemAvailable is in kB, a
+# value is `unavailable` when it cannot be read. bb-result (and bb-wait, bb-await through it) turn them into the outcome, never from the number 137 alone:
+#   OOM-KILLED  rc 137 AND oom_kill_end > oom_kill_start AND no bound_hit=       the ticket's own process was SIGKILLed while the kernel killed something (some process: a
+#                                                                                host-wide counter; a hand-made kill -9 in the same window reads as OOM, see LIMITS)
+#   KILLED      rc 124 with bound_hit= (bb-build's bound), or rc 137 with no counter move or an unreadable counter     named in the line; never OOM-KILLED
+#   (none)      every other rc: a non-signal non-zero rc is a FAILURE as before, whatever the counter did meanwhile (two tickets at once see the same counter)
+# LIMITS: a ticket of before this change has no fields and gets no label; bb-mutate's own kill leaves a ticket with no numeric rc (reap records none); a SIGKILL by hand in a
+# window where another process was OOM-killed is labelled OOM-KILLED (the counter has no victim); an OOM kill of a surefire fork leaves maven's rc 1 and no label.
+# REPEATED TEST GOAL (#132): a call whose maven args run the same test goal more than once is refused, rc 2, nothing queued, before the first write, the message naming
+# `bb-test --repeat N` (one report directory per run): every run of surefire:test writes the same target/surefire-reports files, so a repeat is unobservable and its ticket
+# would claim N runs for one report set. UNITS: surefire `test` (the goal, or any phase from `test` on) and failsafe `integration-test` (the goal, or any phase from
+# `integration-test` on); a unit named twice in any mix of forms is refused: `surefire:test`, org.apache.maven.plugins:maven-surefire-plugin[:<version>]:test (same for failsafe),
+# `<goal>@<execution>` (any id), phases test prepare-package package integration-test post-integration-test verify install deploy (so `test install` is refused, `clean install` and
+# `test-compile surefire:test` are not). An option's separate value (-pl x, -T 2, -D k=v, -rf :x) is not a task. NOT refused: failsafe:verify (runs no test), another plugin's
+# `x:test`, a bb-test launch (BB_LAUNCH; its args are not a goal list). Checked on the queue path and under BB_QUEUE=0; the skip flags (-DskipTests) do not lift it.
+set -euo pipefail
+SELF=$(readlink -f "$0")
+# --help / -h as the only argument: print this header (the usage and the rules above) to stdout, exit 0, touch nothing
+if [ "$#" -eq 1 ] && { [ "$1" = --help ] || [ "$1" = -h ]; }; then sed -n '2,/^set -/{/^set -/!s/^# \{0,1\}//p;}' "$SELF"; exit 0; fi
+wants_jbct() {  # the ONE copy of the jbct-run test (the helper trusts it): a jbct:* or org.pragmatica-lite:jbct-maven-plugin:* goal, or the jbct profile (-Pjbct, -P a,jbct, --activate-profiles); "!jbct" / "-jbct" do not count
+  local a prof=0 p w=1
+  for a in "$@"; do
+    if [ "$prof" = 1 ]; then prof=0; a="-P$a"; fi
+    case $a in
+      jbct:*|org.pragmatica-lite:jbct-maven-plugin:*) w=0 ;;
+      -P|--activate-profiles) prof=1 ;;
+      -P*|--activate-profiles=*) for p in $(printf '%s' "${a#-P}" | sed 's/^--activate-profiles=//' | tr ',' ' '); do [ "$p" != jbct ] || w=0; done ;;
+    esac
+  done
+  return $w
+}
+repeated_test_goal() {  # the ONE copy of the repeated-test-goal test (#132): prints the unit and the tasks of the first test-running goal the maven args name more than once; prints nothing (return 0) when none
+  # UNITS: S = surefire `test`, F = failsafe `integration-test`. A task runs S when it is the goal (`surefire:test`, `org.apache.maven.plugins:maven-surefire-plugin[:<ver>]:test`, any `@<execution>`) or a lifecycle
+  # phase from `test` on (test prepare-package package pre-integration-test integration-test post-integration-test verify install deploy); F likewise for `failsafe`/maven-failsafe-plugin `integration-test` and the
+  # phases from `integration-test` on. An option and its separate value (-pl x, -T 2, -D k=v ...) is not a task; a plugin of another groupId, `failsafe:verify` and `x:test` of any other prefix run none.
+  local a skip=0 s=0 f=0 ts="" t
+  for a in "$@"; do
+    if [ "$skip" = 1 ]; then skip=0; continue; fi
+    case $a in
+      -pl|--projects|-f|--file|-T|--threads|-P|--activate-profiles|-s|--settings|-gs|--global-settings|-rf|--resume-from|-l|--log-file|-b|--builder|-t|--toolchains|-gt|--global-toolchains|-D) skip=1; continue ;;
+      -*) continue ;;
+    esac
+    t=${a%%@*}
+    case $t in
+      test|prepare-package|package|pre-integration-test) s=$((s + 1)); ts="$ts $a" ;;
+      integration-test|post-integration-test|verify|install|deploy) s=$((s + 1)); f=$((f + 1)); ts="$ts $a" ;;
+      surefire:test|org.apache.maven.plugins:maven-surefire-plugin:test|org.apache.maven.plugins:maven-surefire-plugin:*:test) s=$((s + 1)); ts="$ts $a" ;;
+      failsafe:integration-test|org.apache.maven.plugins:maven-failsafe-plugin:integration-test|org.apache.maven.plugins:maven-failsafe-plugin:*:integration-test) f=$((f + 1)); ts="$ts $a" ;;
+    esac
+  done
+  if [ "$s" -gt 1 ]; then printf 'surefire:test (%s)\n' "${ts# }"; elif [ "$f" -gt 1 ]; then printf 'failsafe:integration-test (%s)\n' "${ts# }"; fi
+  return 0
+}
+refuse_repeated_test_goal() {  # refuse_repeated_test_goal <maven args...>: rc 2, nothing queued, for a goal list that runs a test goal more than once (#132)
+  [ -z "${BB_LAUNCH:-}" ] || return 0   # bb-test's own call: its args are __launch <module> <repeat> <selectors>, not a goal list
+  local r; r=$(repeated_test_goal "$@")
+  [ -z "$r" ] || { echo "refusing (rc 2): the goal list runs $r more than once; every run writes the same target/surefire-reports files, so a repeat is one report set that claims N runs: use bb-test --repeat N (one report directory per run); nothing queued" >&2; exit 2; }
+}
+selected_testcases() {  # selected_testcases <co> <marker> mvn|launch:<ticket>|select <job rc> <job args...>: ZERO-TESTCASE REFUSAL (header), THE TABLE. Prints the count line; exit 0 = keep the job rc, 19 = refused, other = the count failed
+  timeout -k 5 120 python3 - "$@" <<'PY'
+import fnmatch, os, re, sys, xml.etree.ElementTree as ET
+co, marker, kind, job_rc, args = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4]), sys.argv[5:]
+CELLS = ('NOSEL', 'POS', 'ALL', 'NONE', 'IDLE', 'REJECT', 'QUEUEOFF')   # THE TABLE (header); UNCOUNTABLE is the caller's; a mutant deletes one name
+JAVA_NAME = re.compile(r'[A-Za-z_$][\w$]*(\.[A-Za-z_$][\w$]*)*\Z')
+def refuse(why):
+    print('[ERROR] bb-build: refused rc %d -> 19: %s' % (job_rc, why))
+    sys.exit(19)
+def positive(v):                                 # S(P): the tokens minus `!` exclusions; `none` (exact whole value) is the NONE cell's
+    return [] if v is None or (v == 'none' and 'NONE' in CELLS) else [t.strip() for t in v.split(',') if t.strip() and not t.strip().startswith('!')]
+values = {}                                      # a build: the last -Dtest= / -Dit.test= (maven keeps the last -D of a property)
+if kind in ('mvn', 'select'):
+    for a in args:
+        for prop in ('test', 'it.test'):
+            if a.startswith('-D' + prop + '='):
+                values[prop] = a[len(prop) + 3:]
+if kind == 'select':                             # QUEUEOFF
+    sys.exit(19 if values and 'QUEUEOFF' in CELLS else 0)
+nosel = kind == 'mvn' and not values and 'NOSEL' in CELLS
+log_path = os.path.join(os.path.dirname(marker), 'build.log')
+log = open(log_path, errors='replace').read().split('\n') if os.path.isfile(log_path) else []
+def cases(p, since):                             # (class, skipped, failed) per <testcase> of one report newer than the marker
+    if not (os.path.isfile(p) and os.stat(p).st_mtime_ns > since):
+        return []
+    try:
+        root = ET.parse(p).getroot()
+    except Exception:
+        print('bb-build: selected testcases: unparseable report %s counts 0' % p)
+        return []
+    name = os.path.basename(p)[5:-4]             # TEST-<fqcn>.xml (surefire/failsafe); else (the launcher's TEST-junit-jupiter.xml) the classname
+    return [(name if JAVA_NAME.match(name) else (c.get('classname') or ''), any(x.tag == 'skipped' for x in c),
+             any(x.tag in ('failure', 'error') for x in c)) for c in root.iter('testcase')]
+def reports_in(d, since):
+    return [c for f in (sorted(os.listdir(d)) if os.path.isdir(d) else []) if f.startswith('TEST-') and f.endswith('.xml')
+            for c in cases(os.path.join(d, f), since)]
+if job_rc != 0 and not nosel:                    # REJECT, else the job's rc is kept
+    if 'REJECT' not in CELLS:
+        sys.exit(0)
+    if kind == 'mvn':
+        goals = [l for l in log if l.startswith('[ERROR] Failed to execute goal')]
+        if goals and all(re.search(r'(surefire|failsafe)[^ ]*:(test|integration-test|verify) ', l)
+                         and re.search(r'No tests matching pattern|No tests were executed', l) for l in goals):
+            refuse('the runner rejected the selection: ' + goals[0][len('[ERROR] '):])
+    else:
+        d = os.path.join(co, args[1], 'target', 'bb-test-reports', kind.split(':', 1)[1])
+        failed = any(f for r, ds, fs in os.walk(d) for _, _, f in reports_in(r, 0))
+        if job_rc == 255 and not failed and any(re.match(r'bb-test: run \d+/\d+ java exit 255;', l) for l in log):
+            why = next((l.strip() for l in log if l.startswith('Caused by: ')), None) \
+                  or next((l.strip() for l in log if re.match(r'[\w.$]+(Exception|Error)\b', l)), 'java exit 255')   # the root cause JUnit printed
+            refuse('the runner rejected the selection: ' + why)
+    sys.exit(0)
+if nosel and not os.path.isfile(marker):
+    print('bb-build: testcases (no selector, not gated): uncountable, no run marker')
+    sys.exit(0)
+since = os.stat(marker).st_mtime_ns              # no marker: the count fails (UNCOUNTABLE, the caller's)
+plugins = []                                     # (P, S(P), runs [(label, cases)], P ran?)
+if kind == 'mvn':                                # only */target/{surefire,failsafe}-reports: fixture XML under src/ never counts
+    found, wrote = {'surefire': [], 'failsafe': []}, {'surefire': False, 'failsafe': False}
+    base = co.rstrip('/').count('/')
+    for root, dirs, files in os.walk(co):
+        name = os.path.basename(root)
+        if name in ('surefire-reports', 'failsafe-reports') and os.path.basename(os.path.dirname(root)) == 'target':
+            dirs[:] = []
+            found[name[:-8]].extend(reports_in(root, since))
+            wrote[name[:-8]] |= any(f.startswith('TEST-') and f.endswith('.xml') and os.stat(os.path.join(root, f)).st_mtime_ns > since for f in files)
+            continue
+        dirs[:] = [d for d in dirs if d in ('surefire-reports', 'failsafe-reports')] if name == 'target' else \
+                  [d for d in dirs if d not in ('.git', '.m2-local', '.bb', 'node_modules', 'src')]
+        if root.rstrip('/').count('/') - base >= 8:
+            dirs[:] = []
+    def ran(p):                                  # P RAN (header): its test goal executed without `Tests are skipped.`, or it wrote a report
+        goal = re.compile(r'--- (maven-)?%s(-plugin)?:[^: ]+:%s ' % (p, 'test' if p == 'surefire' else 'integration-test'))
+        for i, l in enumerate(log):
+            if goal.search(l):
+                block = []
+                for m in log[i + 1:]:
+                    if re.search(r'\] --- ', m):
+                        break
+                    block.append(m)
+                if not any('Tests are skipped.' in m for m in block):
+                    return True
+        return wrote[p]
+    if nosel:                                    # NOSEL (CTO ruling 2026-11-22): never gating, both whole counts logged, a zero included
+        print('bb-build: testcases (no selector, not gated): ' + ' '.join('%s(all)=%d' % (p, sum(1 for _, sk, _ in found[p] if not sk))
+              + ('(+%d skipped)' % k if k else '') for p, k in ((p, sum(1 for _, sk, _ in found[p] if sk)) for p in ('surefire', 'failsafe'))))
+        sys.exit(0)
+    for p, prop in (('surefire', 'test'), ('failsafe', 'it.test')):
+        if values.get(prop) == 'none' and 'NONE' in CELLS:
+            continue
+        plugins.append((p, positive(values.get(prop)), [('', found[p])], ran))
+else:                                            # launch:<ticket>, args `__launch <module> <repeat> <Class[#method]>...`: one plugin
+    rep, d = int(args[2]), os.path.join(co, args[1], 'target', 'bb-test-reports', kind.split(':', 1)[1])
+    runs = [('', reports_in(d, since))] if rep == 1 else [('run%d:' % i, reports_in(os.path.join(d, 'run%d' % i), since)) for i in range(1, rep + 1)]
+    plugins.append(('launch', [t for t in args[3:] if not t.startswith('-')], runs, lambda p: True))
+def matches(token, fqcn):
+    cls = token.split('#', 1)[0]
+    path = fqcn.replace('.', '/')
+    m = re.fullmatch(r'%(regex|ant)\[(.*)\]', token)
+    if m:
+        inner = m.group(2).split('#', 1)[0]
+        if m.group(1) == 'regex':
+            try:
+                return any(re.fullmatch(inner, s) for s in (path, path + '.class', path + '.java'))
+            except re.error:
+                return False
+        cls = inner
+    cls = re.sub(r'\.(java|class)$', '', cls)
+    if '/' in cls or '.' in cls:
+        pat = cls.replace('.', '/')
+        return fnmatch.fnmatchcase(path, pat) or fnmatch.fnmatchcase(path, '*/' + pat)
+    return fnmatch.fnmatchcase(fqcn.rsplit('.', 1)[-1], cls)
+def hit(token, fqcn):                            # a nested Outer$Inner$Deeper counts for every '$'-prefix: Outer, Outer$Inner
+    parts = fqcn.split('$')
+    return bool(fqcn) and any(matches(token, '$'.join(parts[:i])) for i in range(len(parts), 0, -1))
+def count(label, sel, found):                    # EXECUTED testcases: a <testcase> with a <skipped> child does not count
+    return (label, sum(1 for fq, sk, _ in found if not sk and sel(fq)), sum(1 for fq, sk, _ in found if sk and sel(fq)))
+counts = []
+for p, s, runs, ran in plugins:
+    if s and 'POS' in CELLS:
+        counts += [count(label + t, lambda fq, t=t: hit(t, fq), found) for label, found in runs for t in s]
+    elif not s and 'ALL' in CELLS and ran(p):
+        counts += [count(label + p + '(all)', lambda fq: True, found) for label, found in runs]
+merged = {}                                      # POS: a token in BOTH -Dtest and -Dit.test is ONE count, summed over the two (CTO 2026-11-27)
+for t, n, k in counts:
+    a = merged.setdefault(t, [0, 0]); a[0] += n; a[1] += k
+counts = [(t, n, k) for t, (n, k) in merged.items()]
+if counts:
+    print('bb-build: selected testcases: ' + ' '.join('%s=%d' % (t, n) + ('(+%d skipped)' % k if k else '') for t, n, k in counts))
+empty = [t for t, n, k in counts if n == 0]
+if empty:
+    refuse('selected class(es) ran 0 testcases: ' + ','.join(empty))
+if not counts and 'IDLE' in CELLS:
+    refuse('-Dtest=none and -Dit.test=none select no class' if values.get('test') == values.get('it.test') == 'none'
+           else 'the selection counted nothing: no plugin it selects ran')
+PY
+}
+DETACHED_READER=""
+if [ "${1:-}" = --detached ]; then
+  [ "${BB_QUEUE:-1}" != 0 ] || { echo "refusing: --detached needs the queue" >&2; exit 2; }
+  [ "${2:-}" = --reader ] && [ -n "${3:-}" ] || { echo "refusing: --detached needs --reader <label> right after it" >&2; exit 2; }
+  [[ $3 =~ ^[A-Za-z0-9._:-]{1,64}$ ]] || { echo "refusing: --reader label must match ^[A-Za-z0-9._:-]{1,64}\$" >&2; exit 2; }
+  DETACHED_READER=$3; shift 3
+fi
+if [ "${1:-}" != __run ] && [ "${BB_QUEUE:-1}" = 0 ]; then
+  # the legacy run rewrites .bb/start but never .bb/ticket: drop the ticket first, so an older queued run stops being "current" (#80; none = unknown, the safe direction)
+  B=${1:-}; [ "$B" != --since ] || B=${3:-}; B=${B%/}/.bb
+  [ ! -d "$B" ] || rm -f "$B/ticket"
+  A=("$@"); if [ "${A[0]:-}" = --since ]; then A=("${A[@]:3}"); else A=("${A[@]:1}"); fi   # the maven args after [--since <sha>] <checkout>
+  refuse_repeated_test_goal ${A[@]+"${A[@]}"}   # #132, before anything runs
+  selected_testcases / / select 0 ${A[@]+"${A[@]}"} \
+    || { echo "refusing (rc 19): BB_QUEUE=0 cannot count a -Dtest/-Dit.test selection (bb-build-direct writes .bb/rc from its own detached job; ZERO-TESTCASE REFUSAL, #86); run it through the queue" >&2; exit 19; }
+  unset BB_ORDER_AT BB_DRIVER_PID BB_DRIVER_START BB_MUTANT_BOUND   # no ticket here: nothing to order
+  exec "$(dirname "$SELF")/bb-build-direct" "$@"
+fi
+. "$(dirname "$SELF")/bb-queue-lib.sh"
+MVN=${BB_LAUNCH:-${BB_TEST_MVN:-$HOME/tools/maven/bin/mvn}}   # BB_LAUNCH: bb-test enqueues a ticket whose job is its own __launch mode, not maven
+
+if [ "${1:-}" = __bound ]; then
+  # ---- bound runner (header: MUTANT TICKETS, BOUND): __bound <id> <checkout> <job pid> <job start> <deadline, epoch s>; a child of the waiter ----
+  set +e
+  ID=$2 CO=$3 J=$4 JS=$5 END=$6; B=$CO/.bb; T=$Q/running/$ID
+  job_runs() { proc_live "$J" && [ "$(pstart_now "$J")" = "$JS" ]; }
+  while job_runs && [ "$(date +%s)" -lt "$END" ]; do sleep 1; done
+  job_runs || exit 0
+  exec 8> "$Q/.lock"; flock 8
+  [ -f "$T" ] && job_runs && [ -z "$(field "$T" job_end)" ] || exit 0   # a job that ended by itself is never hit: its ticket carries the one or the other (bound_or_end)
+  echo "bound_hit=$(date +%s)" >> "$T"
+  exec 8>&-
+  echo "bb-build: bound of $(field "$T" bound)s reached: job stopped (rc 124)" >> "$B/build.log"
+  until stop_ticket_processes "$ID" "$CO" java > /dev/null; do sleep 5; done
+  [ -f "$B/rc" ] || { date +%s > "$B/end"; write_rc "$B" 124; }
+  exit 0
+fi
+
+if [ "${1:-}" = __run ]; then
+  # ---- waiter: one detached process per ticket; becomes the maven job wrapper when granted ----
+  set +e
+  ID=$2; shift 2
+  # KERNEL WINDOW (#131): the host's OOM-kill counter (/proc/vmstat oom_kill) and MemAvailable (kB) at the grant and right after the job's wait, written into the
+  # ticket as oom_kill_start= mem_avail_kb_start= (with started=) and oom_kill_end= mem_avail_kb_end= (with state=finished); `unavailable` when the file or the line cannot be read.
+  # Seams (inert unless set): BB_TEST_VMSTAT; BB_TEST_MEMINFO is bb-queue-lib's seam too (its memory floor reads it: a small MemAvailable there holds the grant). The counter is host-wide: it says "some process was OOM-killed meanwhile", never whose; bb-result decides (header).
+  oom_now() { local v; v=$(awk '$1 == "oom_kill" { print $2; exit }' "${BB_TEST_VMSTAT:-/proc/vmstat}" 2> /dev/null); case $v in ''|*[!0-9]*) echo unavailable;; *) echo "$v";; esac; }
+  mem_now() { local v; v=$(awk '$1 == "MemAvailable:" { print $2; exit }' "${BB_TEST_MEMINFO:-/proc/meminfo}" 2> /dev/null); case $v in ''|*[!0-9]*) echo unavailable;; *) echo "$v";; esac; }
+  exec 8> "$Q/.lock"
+  T=$Q/waiting/$ID; CO=$(field "$T" co); CAP=$(field "$T" cap); LIMIT=$(field "$T" limit); B=$CO/.bb
+  WAITED=0
+  while :; do
+    flock 8
+    [ -f "$T" ] || exit 0   # cancelled or reaped while we slept
+    if driver_gone "$T"; then abandon "$T" "driver process gone"; exit 0; fi   # header: MUTANT TICKETS; before the grant test, in its lock hold
+    RL=$(reap)   # reap's launch count, passed to pick within this lock hold (#90)
+    if [ "$(pick "$RL" "$ID")" = "$ID" ]; then break; fi   # backfill + starvation bound, see pick() in bb-queue-lib.sh
+    if [ "$LIMIT" -gt 0 ] && [ "$WAITED" -ge "$LIMIT" ]; then
+      never_started "$CO" 5 "queue wait expired after ${WAITED}s (BB_CAP_WAIT_SECS=$LIMIT)"
+      printf 'state=expired\nended=%s\n' "$(date +%s)" >> "$T"; to_done "$T"; exit 0
+    fi
+    flock -u 8; sleep 5; WAITED=$((WAITED + 5))
+  done
+  # granted (lock held): launch, record the launch in the LEDGER (the next grant counts it from that line), release the lock at once
+  NOW=$(date +%s)
+  rm -f "$B/queued" "$B/rc" "$B/end" "$B/refused" "$B"/fields.*; touch "$B/run.marker"; echo "$NOW" > "$B/start"; echo "$ID" > "$B/ticket"; printf '%q ' "$@" > "$B/args"   # for bb-report's EMPTY RUN check
+  RDF=(-Daether.requireDocker=true); [ "$(field "$T" requireDocker)" != 0 ] || RDF=()   # #31: the ticket's own record decides
+  SLOT=""; [ "$(field "$T" iso)" = 1 ] && SLOT=$(pg_free_slot)
+  printf 'started=%s\nwaited=%s\noom_kill_start=%s\nmem_avail_kb_start=%s\n' "$NOW" "$WAITED" "$(oom_now)" "$(mem_now)" >> "$T"; [ -z "$SLOT" ] || printf 'group_slot=%s\n' "$SLOT" >> "$T"; mv "$T" "$Q/running/$ID"; T=$Q/running/$ID
+  # GRANT + LEDGER ATOMIC (vbt6 B2): the job subshell inherits fd 8 (the same open file description, so the same flock) and writes its
+  # own ledger entry, keyed to its own pid, before it closes fd 8. The waiter closes its fd 8 instead of `flock -u` (which would unlock the
+  # shared description for both), so the lock is released only once BOTH have closed it: a waiter SIGKILLed after the spawn can no longer
+  # let the next grant read a ledger without this launch. A subshell killed before its entry has launched nothing.
+  BOUND=$(field "$T" bound)   # header: MUTANT TICKETS, BOUND
+  # bound_or_end (the job subshell, as soon as its job returned): the job of a bounded ticket ended by itself (job_end=) or at its bound
+  # (bound_hit=), decided under the lock, never both. Hit: no .bb/rc from here, the bound runner is stopping this job and writes it.
+  bound_or_end() {
+    [ -n "$BOUND" ] || return 0
+    exec 8> "$Q/.lock"; flock 8
+    [ -z "$(field "$T" bound_hit)" ] || exit 124
+    [ ! -f "$T" ] || echo "job_end=$(date +%s)" >> "$T"   # no file: waiter gone and reaped meanwhile
+    exec 8>&-
+  }
+  (
+    ledger_add "$ID" "$BASHPID"; exec 8>&-
+    cd "$CO"; : > "$B/build.log"
+    if wants_jbct "$@"; then   # jbct plugin bootstrap (see bb-jbct-bootstrap); any other ticket never touches the helper, installed or not
+      HELPER=$(dirname "$SELF")/bb-jbct-bootstrap
+      if [ ! -x "$HELPER" ]; then echo "bootstrap: refused: helper $HELPER missing or not executable (rc=88)" >> "$B/build.log"; date +%s > "$B/end"; write_rc "$B" 88; exit 88; fi
+      "$HELPER" "$CO" "$MVN" "$T" "$@" >> "$B/build.log" 2>&1 || { rc=$?; bound_or_end; date +%s > "$B/end"; write_rc "$B" "$rc"; exit "$rc"; }
+    fi
+    if [ "$(field "$T" iso)" = 1 ]; then
+      "$(dirname "$SELF")/bb-netns-run" "$ID" "$CO" "$MVN" "$@" ${RDF[@]+"${RDF[@]}"} >> "$B/build.log" 2>&1
+    else
+      env -u HCLOUD_TOKEN BB_TICKET="$ID" JAVA_HOME=/usr/lib/jvm/java-25-openjdk-amd64 "$MVN" "$@" ${RDF[@]+"${RDF[@]}"} >> "$B/build.log" 2>&1
+    fi
+    rc=$?
+    bound_or_end
+    c=0   # ZERO-TESTCASE REFUSAL (header, #86): THE TABLE on every job rc, a build's or a bb-test launch's; 19 replaces rc, 0 keeps it
+    selected_testcases "$CO" "$B/run.marker" "$([ -z "${BB_LAUNCH:-}" ] && echo mvn || echo "launch:$ID")" "$rc" "$@" >> "$B/build.log" 2>&1 || c=$?
+    case $c in
+      0) ;;
+      19) rc=19 ;;
+      *) [ "$rc" != 0 ] || { echo "[ERROR] bb-build: refused rc 0 -> 19: the selected-testcase count failed (rc $c)" >> "$B/build.log"; rc=19; } ;;   # UNCOUNTABLE
+    esac
+    date +%s > "$B/end"
+    if [ "$rc" = 0 ]; then   # bb-test lane: classpath + manifest of a GREEN build; bounded, and never changes rc
+      timeout -k 10 "${BB_CP_RECORD_TIMEOUT:-300}" "$(dirname "$SELF")/bb-cp-record" record "$CO" "$@" >> "$B/build.log" 2>&1
+      case $? in
+        124|137) # a SIGKILLed bb-cp-record leaves its maven running: kill that recorded process group, after an identity check (vbt4 L4)
+          { read -r PG PS 2> /dev/null < "$B/cp-record.pgid" && case "$PG" in ''|*[!0-9]*) false;; esac && [ "$(pstart "$PG")" = "$PS" ] \
+              && kill -KILL -- "-$PG" 2> /dev/null && echo "bb-build: cp-record's maven (process group $PG) killed" >> "$B/build.log"; } || true
+          rm -f "$B/cp-record.pgid"
+          echo "bb-build: cp-record skipped: timeout after ${BB_CP_RECORD_TIMEOUT:-300}s (no record is left; bb-test will refuse until a rebuild)" >> "$B/build.log"; rm -rf "$B/cp" "$B/cp.new" "$B/cp.old";;
+      esac
+    fi
+    write_rc "$B" "$rc"   # convenience copy for pollers, 444; the ticket's rc= comes from this subshell's exit status below
+    exit "$rc"
+  ) &
+  C=$!   # the job subshell lives as long as maven / bb-test's java / bb-netns-run (and survives a kill -9 of this waiter)
+  exec 8>&-   # the lock covers the slot decision and the ledger write only, never the launch's run time (released when the subshell closes fd 8)
+  W=""
+  if [ -n "$BOUND" ]; then bash "$SELF" __bound "$ID" "$CO" "$C" "$(pstart "$C")" $((NOW + BOUND + 1)) < /dev/null > /dev/null 2>&1 & W=$!; fi
+  wait "$C"; BRC=$?   # the build's exit status: the verdict. Never re-read from $B/rc, which a lane can delete or rewrite
+  OOM_END=$(oom_now); MEM_END=$(mem_now)   # the window's end: before anything else this waiter does (the bound runner's stop, the launch-fields read, the lock wait)
+  if [ -n "$W" ] && [ -n "$(field "$T" bound_hit)" ]; then wait "$W"; [ "$BRC" -le 128 ] || BRC=124; fi   # stopped by its bound: 124, recorded once nothing of the job is left
+  LF="" REJ=""   # LAUNCH FIELDS (header): read before the lock, so a slow or hostile file never holds the queue; set -e: every read is || true
+  rej() { case ",$REJ," in *",$1,"*) ;; *) REJ=${REJ:+$REJ,}$1;; esac; echo "bb-build: launch fields: rejected $1${2:+: $2}" >> "$B/build.log"; }
+  HT=$(run_ticket "$CO" 2> /dev/null | head -c 128 | head -n 1) || true   # the lib's reader (#80); bounded: head ends the pipe (SIGPIPE) after 128 bytes; an absent run ticket reads as "" = mismatch. run_ticket's [ -f ] follows a symlink but refuses a FIFO or device, so a planted FIFO cannot hang the read, and head bounds a huge file
+  for f in "$B"/fields.*; do
+    [ -e "$f" ] || [ -L "$f" ] || continue
+    n=${f##*/fields.}
+    if [ -z "${BB_LAUNCH:-}" ]; then rej not_launch "$f"
+    elif [ "$n" != "$ID" ]; then rej foreign_file "$f names ticket $n, not $ID"
+    elif [ -L "$f" ] || [ ! -f "$f" ]; then rej not_regular "$f"
+    elif [ "$HT" != "$ID" ]; then rej ticket_mismatch "the checkout's run ticket reads '${HT//[^A-Za-z0-9_-]/?}', not $ID"
+    else
+      X=$(timeout -k 5 10 head -c 65536 "$f" 2> /dev/null | LC_ALL=C awk '
+        { k = ""; if (match($0, /^[A-Za-z0-9_]+=/) && RLENGTH <= 33) { k = substr($0, 1, RLENGTH - 1); v = substr($0, RLENGTH + 1) } }
+        k == "verdict_source" && (v == "guard" || v == "java") { print; next }
+        k == "refused" && length(v) <= 1024 && v ~ /^[^=[:cntrl:]][^[:cntrl:]]*$/ { print; next }
+        { print "#rej " (k == "" ? "malformed" : k) }') || rej unreadable "$f"
+      while IFS= read -r l; do case $l in '') ;; '#rej '*) rej "${l#\#rej }" "a line of $f";; *) LF=${LF:+$LF$'\n'}$l;; esac; done <<< "$X"
+    fi
+    rm -f "$f"
+  done
+  NOPASS=""; [ -z "$REJ" ] || { LF=${LF:+$LF$'\n'}fields_rejected=${REJ:0:256}; NOPASS=1; }
+  if [ -n "${BB_LAUNCH:-}" ] && ! grep -q '^verdict_source=' <<< "$LF"; then LF=${LF:+$LF$'\n'}verdict_source=missing; NOPASS=1; fi
+  WRC=$BRC; [ -z "$NOPASS" ] || [ "$BRC" != 0 ] || WRC=18   # never a pass (header: LAUNCH FIELDS); a non-zero rc is kept as it is
+  [ -z "${BB_TEST_BEFORE_LOCK:-}" ] || bash -c "$BB_TEST_BEFORE_LOCK" || true   # TEST SEAM (inert unless set): runs in the window between the fields read and the lock (BbRcTicketRecordIT)
+  exec 8> "$Q/.lock"; flock 8
+  [ -f "$T" ] || exit 0   # cancel or reap already finalized this ticket (first writer wins): do not recreate running/<id> or overwrite done/<id>
+  # CTO 2026-11-21: under the lock, just before the append, the run ticket must still be ours; a launch whose marker changed since the read copies nothing (a process the job left behind can still rewrite its OWN fields in that window, within the grammar: accepted)
+  if [ -n "${BB_LAUNCH:-}" ] && [ "$HT" = "$ID" ] && [ "$(run_ticket "$CO" 2> /dev/null | head -c 128 | head -n 1)" != "$ID" ]; then LF="fields_rejected=ticket_changed"$'\n'"verdict_source=missing"; [ "$BRC" != 0 ] || WRC=18; fi
+  { printf 'oom_kill_end=%s\nmem_avail_kb_end=%s\n' "$OOM_END" "$MEM_END"; [ -z "$LF" ] || printf '%s\n' "$LF"; printf 'state=finished\nrc=%s\nended=%s\n' "$WRC" "$(cat "$B/end" 2>/dev/null || date +%s)"; } >> "$T"
+  to_done "$T"
+  exit 0
+fi
+
+SINCE=""
+if [ "${1:-}" = --since ]; then
+  [ -n "${2:-}" ] && [ -n "${3:-}" ] || { echo "refusing: --since needs <base> and a checkout" >&2; exit 2; }
+  [[ $2 =~ ^[A-Za-z0-9._/~^@{}-]{1,200}$ ]] && [[ $2 != -* ]] || { echo "refusing: --since base must be a git ref (^[A-Za-z0-9._/~^@{}-]{1,200}\$, not starting with -)" >&2; exit 2; }
+  SINCE=$2; shift 2
+fi
+CO=$(cd "$1" && pwd); shift
+# Ownership guard (2026-09-27, after a cross-agent build into another agent's checkout):
+# every caller declares BB_OWNER (its agent prefix, e.g. s5, v1552); a checkout belongs to the
+# owner whose "<owner>-" prefix its directory name carries. No match -> refuse, before any write.
+: "${BB_OWNER:?refusing: set BB_OWNER=<your agent prefix>; checkout names must start with <prefix>-}"
+case "$BB_OWNER" in *[!A-Za-z0-9_]*|"") echo "refusing: BB_OWNER must be [A-Za-z0-9_]+" >&2; exit 4;; esac
+case "$(basename "$CO")" in "$BB_OWNER"-*) ;; *) echo "refusing: $CO is not owned by BB_OWNER=$BB_OWNER (name must start with $BB_OWNER-)" >&2; exit 4;; esac
+[ $# -gt 0 ] || set -- clean install
+MODS=""; SINCE_REASON=""
+if [ -n "$SINCE" ]; then
+  [ -f "$(dirname "$SELF")/bb-modules.py" ] || { echo "refusing: --since needs bb-modules.py next to bb-build" >&2; exit 2; }
+  case " $* " in *" -pl "*|*" --projects"*|*" -pl"[!\ ]*|*" -am "*|*" -amd "*|*" -f "*|*" --file"*) echo "refusing: --since expands to its own -pl; the args already select modules" >&2; exit 2;; esac
+  SEL=$(python3 "$(dirname "$SELF")/bb-modules.py" "$CO" "$SINCE") || { echo "refusing: bb-modules.py failed for base $SINCE in $CO" >&2; exit 2; }
+  case $SEL in
+    NONE) echo "bb-build: nothing changed since $SINCE; nothing queued"; exit 0;;
+    FULL|"FULL "*) MODS=FULL; SINCE_REASON=$(printf '%s' "${SEL#FULL}" | tr -c 'A-Za-z0-9._/:@+-' '?'); SINCE_REASON=${SINCE_REASON#\?}
+       echo "bb-build: --since $SINCE -> FULL reactor (${SINCE_REASON:-no reason given})";;
+    *) MODS=$(printf '%s' "$SEL" | tr ',' '\n' | wc -l | tr -d ' '); MODS=$((MODS + 1)); set -- -pl "$SEL" "$@"
+       echo "bb-build: --since $SINCE -> -pl $SEL ($MODS modules)";;
+  esac
+fi
+case "${BB_REQUIRE_DOCKER:-1}" in 0|1) ;; *) echo "refusing: BB_REQUIRE_DOCKER must be 0 or 1 (or unset)" >&2; exit 2;; esac
+refuse_repeated_test_goal "$@"   # #132: rc 2, nothing queued, before the first write
+MUTANT_FIELDS=""   # header: MUTANT TICKETS
+if [ -n "${BB_ORDER_AT+x}" ]; then
+  [[ $BB_ORDER_AT =~ ^[1-9][0-9]{18}$ ]] || { echo "refusing: BB_ORDER_AT must be epoch nanoseconds (19 digits)" >&2; exit 2; }
+  [[ ! $BB_ORDER_AT > $(date +%s%N) ]] || { echo "refusing: BB_ORDER_AT $BB_ORDER_AT is in the future" >&2; exit 2; }   # 19 digits on both sides: string order is number order, and a value above 2^63 is compared too
+  [[ ${BB_VIA:-} =~ ^bb-mutate:[A-Za-z0-9._-]{1,20}:[A-Za-z0-9._-]+$ && ${#BB_VIA} -le 64 ]] || { echo "refusing: BB_ORDER_AT is accepted only from bb-mutate (BB_VIA is not a bb-mutate marker)" >&2; exit 2; }
+  [[ ${BB_MUTANT_BOUND:-} =~ ^[1-9][0-9]{0,5}$ ]] || { echo "refusing: BB_ORDER_AT needs BB_MUTANT_BOUND (seconds, 1 to 6 digits)" >&2; exit 2; }
+  [[ ${BB_DRIVER_PID:-} =~ ^[1-9][0-9]{0,9}$ && ${BB_DRIVER_START:-} =~ ^[1-9][0-9]{0,18}$ ]] && mutate_driver "$BB_DRIVER_PID" "$BB_DRIVER_START" \
+    || { echo "refusing: BB_ORDER_AT is accepted only from bb-mutate (BB_DRIVER_PID/BB_DRIVER_START name no running bb-mutate above this call)" >&2; exit 2; }
+  [ "$BB_ORDER_AT" -ge "$(start_ns "$BB_DRIVER_START")" ] || { echo "refusing: BB_ORDER_AT $BB_ORDER_AT is before the start of its driver" >&2; exit 2; }
+  MUTANT_FIELDS=$(printf 'order_at=%s\ndriver_pid=%s\ndriver_start=%s\nbound=%s' "$BB_ORDER_AT" "$BB_DRIVER_PID" "$BB_DRIVER_START" "$BB_MUTANT_BOUND")$'\n'
+fi
+unset BB_ORDER_AT BB_DRIVER_PID BB_DRIVER_START BB_MUTANT_BOUND   # also without BB_ORDER_AT: a stray BB_DRIVER_* or BB_MUTANT_BOUND must not reach the waiter or maven
+B=$CO/.bb; mkdir -p "$B"
+if [ ! -f "$B/rc" ] && [ -f "$B/start" ]; then
+  # .bb/start without .bb/rc: a build still running, or a finished build whose .bb/rc a lane deleted (CTO 2026-11-13: three verifier
+  # lanes rm'd it to "reset" a checkout). Name the second case: no waiting/running ticket for this checkout and the done/ ticket named by .bb/ticket (#80; was: whose started= is this .bb/start), state=finished and a numeric rc= (its build wrote .bb/rc; an orphaned or cancelled run may never have).
+  # Anything else (e.g. a BB_QUEUE=0 build, which has no ticket) keeps the running message. One direct done/<ticket> lookup: done/ holds tens
+  # of thousands of tickets, so no scan (v50a: a field() fork per file took ~2 min on bigboy).
+  TK=$(run_ticket "$CO" || true)   # unknown (no .bb/ticket) leaves TK empty: the plain message below
+  LIVE=""; FIN=""
+  for f in "$Q"/waiting/* "$Q"/running/*; do [ -f "$f" ] && [ "$(field "$f" co)" = "$CO" ] && LIVE=${f##*/}; done
+  if [ -z "$LIVE" ] && [ -n "$TK" ] && [ -f "$Q/done/$TK" ]; then   # #80: .bb/ticket names the run that owns .bb; none (pre-#80 run) = no guess
+    f=$Q/done/$TK
+    [ "$(field "$f" co)" = "$CO" ] && [ "$(field "$f" state)" = finished ] && [[ $(field "$f" rc) =~ ^[0-9]+$ ]] && FIN=$TK
+  fi
+  [ -z "$FIN" ] || { echo "refusing: .bb/rc in $CO was deleted by hand after ticket $FIN finished; never rm it (its verdict is the ticket record: bb-wait $FIN); rerun bb-build in a fresh checkout (a rerun in a checkout whose .bb/rc is intact clears it itself)" >&2; exit 3; }
+  echo "refusing: a build appears to be running in $CO (.bb/start without .bb/rc)" >&2; exit 3
+fi
+# The guards below match the args with a here-string, never `printf | grep -q`: grep exits at its first match, printf then dies of SIGPIPE on a
+# long arg list, and under pipefail that status turns a MATCH into "no match" (#102; a guard would silently not fire).
+# Host-killing test guard (2026-09-27, #1553): StreamPublishReshuffleTest leaks sockets without bound and
+# exhausted this host's ephemeral ports twice. Unless this checkout's copy carries the #1553 @Disabled, refuse
+# any invocation that names it or that selects Heavy forge tests without explicitly excluding it.
+SPRT="$CO/aether/forge/forge-tests/src/test/java/org/pragmatica/aether/forge/StreamPublishReshuffleTest.java"
+if [ -f "$SPRT" ] && ! grep -q '@Disabled("#1553' "$SPRT"; then
+  ARGS=" $* "
+  if grep -Eq '[^!]StreamPublishReshuffleTest' <<< "$ARGS"; then
+    echo "refusing: this run names StreamPublishReshuffleTest (#1553 host-killing leak; see runbook 0c)" >&2; exit 6; fi
+  # the exclusion must sit in -Dit.test: forge-tests runs through failsafe, which ignores -Dtest (2026-09-29)
+  if grep -Eq 'groups=[^ ]*Heavy|excludedGroups= |-Pwith-e2e' <<< "$ARGS" && ! grep -Eq -- ' -Dit\.test=[^ ]*!StreamPublishReshuffleTest' <<< "$ARGS"; then
+    echo "refusing: Heavy/e2e forge selection without '-Dit.test=…,!StreamPublishReshuffleTest' (#1553; see runbook 0c; -Dtest does not reach failsafe)" >&2; exit 6; fi
+fi
+# Failsafe filter guard (2026-09-29, s3's forge run at 36b5c3d42): forge-tests skips surefire and runs every test through
+# failsafe, which reads -Dit.test and IGNORES -Dtest. A run that names forge-tests (-pl or -f), reaches integration-test,
+# and filters with -Dtest but not -Dit.test would run the whole IT suite. Refuse (rc 10); BB_IT_UNFILTERED=1 overrides.
+A=" $* "
+if [ "${BB_IT_UNFILTERED:-0}" != 1 ] && grep -Eq -- ' (-pl|--projects|-f|--file)[= ]?[^ ]*forge-tests' <<< "$A" \
+   && grep -Eq -- ' -Dtest=' <<< "$A" && ! grep -Eq -- ' -Dit\.test=' <<< "$A" \
+   && grep -Eq ' (integration-test|verify|install|deploy) ' <<< "$A"; then
+  echo "refusing: forge-tests runs through failsafe, which ignores -Dtest; filter with -Dit.test=… (BB_IT_UNFILTERED=1 to run the whole IT suite)" >&2; exit 10
+fi
+# Uninstalled sibling (#112): see the header. Fails open: any answer but MISSING (OK, SKIP, a crashed helper) goes on.
+if [ -z "$SINCE" ] && [ -f "$(dirname "$SELF")/bb-modules.py" ] && grep -Eq -- ' (-pl|--projects)' <<< "$A"; then
+  CHK=$(python3 "$(dirname "$SELF")/bb-modules.py" --installed "$CO" "$@" 2>/dev/null) || CHK="SKIP the check itself failed"
+  case "$CHK" in
+    MISSING*) echo "refusing (rc 11): -pl without -am; reactor modules it depends on are not installed: ${CHK#MISSING }; add -am, or install them first (nothing queued)" >&2; exit 11;;
+    SKIP*) echo "bb-build: -pl check skipped: ${CHK#SKIP }" >&2;;
+  esac
+fi
+# Concurrency cap (2026-09-27): above 3 concurrent reactors, fixed-port tests collide (BindException)
+# and Testcontainers fails to start, so results are environmental noise. The queue grants a ticket only while
+# fewer than CAP queue launches (the LEDGER: what this queue started, maven or bb-test's java alike) run, and never more than the host cap (~/work/max-reactors, #56). Override the cap only with BB_MAX_REACTORS. BB_CAP_WAIT_SECS > 0 bounds the
+# queue wait (then .bb/rc = 5); unset = wait until granted.
+CAP=${BB_MAX_REACTORS:-5}; LIMIT=${BB_CAP_WAIT_SECS:-0}
+case "$CAP$LIMIT" in *[!0-9]*) echo "refusing: BB_MAX_REACTORS / BB_CAP_WAIT_SECS must be non-negative integers" >&2; exit 2;; esac
+# cap=1 is for ROOT builds only (2026-09-29): a module build (-pl/-f) with BB_MAX_REACTORS=1 would wait for an EMPTY host
+# and, before backfill, blocked every ticket behind it. Warn and use the default cap.
+if [ "$CAP" = 1 ] && grep -Eq -- ' (-pl|--projects|-f|--file)([= ]|[^ ]*/)' <<< " $* "; then
+  echo "WARNING: BB_MAX_REACTORS=1 is for root builds only; this is a module build (-pl/-f), so the default cap 5 is used" >&2
+  CAP=5
+fi
+
+# Dedup key: HEAD + maven.config (minus the per-checkout repo.local line) + args. Only for a CLEAN tree: a dirty
+# tree (a mutation probe, local edits) is the same SHA with different content, so it is never deduped.
+case "${BB_PORT_GROUP:-}" in
+  1|0) GROUP="$BB_PORT_GROUP forced by BB_PORT_GROUP=$BB_PORT_GROUP";;
+  "") GROUP=$(python3 "$(dirname "$SELF")/bb-portgroup.py" "$PGM" "$CO" "$@" 2>/dev/null) || GROUP="1 classifier failed"
+      case "$GROUP" in [01]\ *) ;; *) GROUP="1 classifier gave no answer";; esac;;
+  *) echo "refusing: BB_PORT_GROUP must be 0, 1 or unset" >&2; exit 2;;
+esac
+
+SHA=$(git -C "$CO" rev-parse HEAD)
+KEY=""
+if [ -z "$(git -C "$CO" status --porcelain --untracked-files=normal)" ]; then
+  KEY=$( { printf '%s\n' "$SHA"; grep -v '^-Dmaven.repo.local=' "$CO/.mvn/maven.config" 2>/dev/null; printf '%s\0' "$@"; [ "${BB_REQUIRE_DOCKER:-1}" = 1 ] || printf 'requireDocker=0\0'; } | sha256sum | cut -c1-16)
+else
+  echo "dedup: skipped (working tree has changes vs $SHA)"
+fi
+
+# A bb-mutate call (BB_VIA bb-mutate:*) has NO dedup key: it is never deduped, and nothing dedups onto its ticket (key= is written empty; the two
+# dedup loops below skip an empty key). Its control is a clean-tree build, and a plain identical build deduped onto it would get no result when its
+# driver dies (the waiting ticket is dropped, .bb/rc 9; N4 of the #117 review). The only readers of key= are those two loops.
+case ${BB_VIA:-} in bb-mutate:*) KEY="";; esac
+exec 8> "$Q/.lock"; flock 8
+reap >/dev/null   # its stdout is the launch count, for pick only (#90)
+QD=$(cat "$B/queued" 2>/dev/null || true)
+if [ -n "$QD" ] && [ -f "$Q/waiting/$QD" ]; then echo "refusing: $CO already has queued ticket $QD" >&2; exit 3; fi
+if [ -n "$KEY" ] && [ "${BB_DEDUP:-1}" != 0 ]; then
+  for f in "$Q"/running/* "$Q"/waiting/*; do
+    [ -f "$f" ] && [ "$(field "$f" key)" = "$KEY" ] || continue
+    echo "dedup: identical build is $(basename "${f%/*}"): ticket=${f##*/} owner=$(field "$f" owner)" >&2
+    echo "dedup: read its result at $(field "$f" co)/.bb (poll for rc); BB_DEDUP=0 to run anyway" >&2; exit 7
+  done
+  for f in $(ls -t "$Q"/done/ 2>/dev/null); do
+    f=$Q/done/$f
+    [ "$(field "$f" key)" = "$KEY" ] && [ "$(field "$f" state)" = finished ] || continue
+    o=$(field "$f" co)
+    [ -f "$o/.bb/rc" ] && run_current "$o" "${f##*/}" || continue   # since rebuilt/removed: not current, and unknown (no .bb/ticket, a pre-#80 run) counts as not current (#80)
+    echo "dedup: identical build already finished: rc=$(field "$f" rc) ended=$(date -d @"$(field "$f" ended)" -Is) owner=$(field "$f" owner)" >&2
+    echo "dedup: read its result at $o/.bb (bb-report $o); BB_DEDUP=0 to run anyway" >&2; exit 8
+  done
+fi
+
+# Ticket owner fields (T3): each optional, each validated; a bad value is dropped with a notice and never blocks the build.
+OWNER_FIELDS=""
+[ -z "$SINCE" ] || OWNER_FIELDS+="since=$SINCE"$'\n'"modules=$MODS"$'\n'
+[ -z "$SINCE_REASON" ] || OWNER_FIELDS+="since_reason=$SINCE_REASON"$'\n'
+ownerval() {  # ownerval <BB_NAME> <regex> -> value on stdout when set and valid; notice on stderr when set and malformed
+  local v=${!1:-}
+  [ -n "$v" ] || return 1
+  [[ $v =~ $2 ]] && { printf '%s' "$v"; return 0; }
+  echo "bb-build: ignoring $1: not $2" >&2; return 1
+}
+LABEL_RE='^[A-Za-z0-9._:-]{1,64}$'; WORD_RE='^[A-Za-z0-9._-]{1,64}$'
+SP=$(ownerval BB_SESSION_PID '^[1-9][0-9]{0,9}$') || SP=""
+SS=$(ownerval BB_SESSION_START '^[1-9][0-9]{8,10}$') || SS=""
+SL=$(ownerval BB_SESSION_LABEL "$LABEL_RE") || SL=""
+if [ -n "$SP" ] && [ -n "$SS" ] && [ -n "$SL" ]; then
+  OWNER_FIELDS+=$(printf 'session_pid=%s\nsession_start=%s\nsession_label=%s\n' "$SP" "$SS" "$SL")$'\n'
+elif [ -n "${BB_SESSION_PID:-}${BB_SESSION_START:-}${BB_SESSION_LABEL:-}" ]; then
+  echo "bb-build: ignoring BB_SESSION_PID/BB_SESSION_START/BB_SESSION_LABEL: need all three, each valid" >&2
+fi
+AG=$(ownerval BB_AGENT "$WORD_RE") && OWNER_FIELDS+="agent=$AG"$'\n'
+LN=$(ownerval BB_LANE "$WORD_RE") && OWNER_FIELDS+="lane=$LN"$'\n'
+PRN=$(ownerval BB_PR '^[1-9][0-9]{0,9}$') && OWNER_FIELDS+="pr=$PRN"$'\n'
+VIA=$(ownerval BB_VIA "$LABEL_RE") && OWNER_FIELDS+="via=$VIA"$'\n'   # who submitted: bb-mutate sets bb-mutate:<spec>:<mutant> (issue #46); additive
+OWNER_FIELDS+="output=$B/build.log"$'\n'
+[ "${BB_REQUIRE_DOCKER:-1}" = 1 ] || OWNER_FIELDS+="requireDocker=0"$'\n'
+[ -z "${BB_LAUNCH:-}" ] || OWNER_FIELDS+="requireDockerEffective=$([ "${BB_REQUIRE_DOCKER:-1}" = 1 ] && echo true || echo false)"$'\n'   # bb-test tickets only (CTO 2026-11-19): a count without Testcontainers must never read as a full one
+[ -z "$DETACHED_READER" ] || OWNER_FIELDS+="detached_reader=$DETACHED_READER"$'\n'
+
+ID=$(date +%s%N)-$$
+T=$Q/waiting/$ID
+rm -f "$B/rc" "$B/end" "$B/start" "$B/ticket"
+echo "bb-build: queued ticket $ID at $(date -Is); maven has not started (bb-queue shows position)" > "$B/build.log"
+echo "$ID" > "$B/queued"
+{ printf 'id=%s\nowner=%s\nco=%s\nsha=%s\nkey=%s\ncap=%s\nlimit=%s\ncreated=%s\n' \
+    "$ID" "$BB_OWNER" "$CO" "$SHA" "$KEY" "$CAP" "$LIMIT" "$(date +%s%N)"
+  printf 'group=%s\ngroup_reason=%s\n' "${GROUP%% *}" "${GROUP#* }"
+  [ "${GROUP%% *}" = 1 ] && [ "${BB_PG_ISOLATE:-1}" != 0 ] && command -v docker > /dev/null && printf 'iso=1\n'
+  printf '%s%s' "$OWNER_FIELDS" "$MUTANT_FIELDS"
+  printf 'args='; printf '%q ' "$@"; printf '\n'; } > "$T"
+setsid nohup bash "$SELF" __run "$ID" "$@" < /dev/null > /dev/null 2>&1 8>&- &
+for _ in $(seq 50); do waiter_alive "$ID" && break; sleep 0.1; done
+waiter_alive "$ID" || { rm -f "$T" "$B/queued"; echo "error: waiter for $ID did not start" >&2; exit 1; }
+POS=$(order | grep -nx -- "$ID" | cut -d: -f1 || true)
+echo "queued ticket=$ID position=$POS priority=$(prio "$BB_OWNER" "$SHA") reactors=$(reactors) cap=$CAP port-group=${GROUP%% *} (${GROUP#* }) port-group-holders=[$(group_holder)] slots=$(pg_slots) log=$B/build.log args: $*"
