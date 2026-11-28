@@ -439,7 +439,7 @@ class BbKillLabelIT {
     /// finishes, the read gets 6, red; a `sleep 3` before the end read -> still 5, green (the old row, a bump 2 s after the TERM, went red).
     @Test
     void theWindowEndsWhenTheJobEnds_notWhenTheBoundRunnerHasStoppedTheTicketsProcesses() throws Exception {
-        windowEndRow("0.5");
+        windowEndRow("0.5", "0", "0");
     }
 
     /// #164: the bound runner's later stop rounds must not signal the WAITER's own helper processes. The waiter's end read (`$(oom_now)`: a command substitution, a child of the waiter) is
@@ -449,8 +449,25 @@ class BbKillLabelIT {
     /// Probe: kill_set's `w` kind taken from the whole waiter tree in bound mode (as at 3d1b066df4) -> `oom_kill_end` is "" here, red.
     @Test
     void aWaiterSlowAtTheWindowEnd_stillFinalisesItsOwnTicketWithTheEndFields_theBoundRunnerNeverSignalsItsHelpers() throws Exception {
-        var id = windowEndRow("3");
+        finalisedByItsOwnWaiter(windowEndRow("3", "0", "0"));
+    }
 
+    /// #164, the same invariant at the waiter's SECOND end read: `$(mem_now)` (bb-build, right after `$(oom_now)`) is a command substitution too, and a bound-runner signal that empties it writes
+    /// `mem_avail_kb_end=` empty. Here only the MemAvailable read lingers (3 s), the oom_kill read does not: the runner's re-collect after its first round lands inside it. Probe: kill_set's `w` kind taken from the
+    /// whole waiter tree in bound mode (origin/main) -> `mem_avail_kb_end` is "" (or the ticket is not finalised by its own waiter), red.
+    @Test
+    void aWaiterSlowAtTheMemAvailableRead_stillFinalisesItsOwnTicketWithTheEndFields_theBoundRunnerNeverSignalsItsHelpers() throws Exception {
+        finalisedByItsOwnWaiter(windowEndRow("0", "3", "0"));
+    }
+
+    /// #164, the same invariant at `$(field "$T" bound_hit)` (bb-build, between the end reads and `wait "$W"`): a signal that empties it makes the waiter skip the `wait` and record the job's own rc (143/137) instead of
+    /// 124, with the runner still stopping the tree. Only the sed of that read lingers (3 s). Probe: origin/main's kill_set -> rc is not 124, red.
+    @Test
+    void aWaiterSlowAtTheBoundHitRead_stillFinalisesItsOwnTicketWithTheEndFields_theBoundRunnerNeverSignalsItsHelpers() throws Exception {
+        finalisedByItsOwnWaiter(windowEndRow("0", "0", "3"));
+    }
+
+    private void finalisedByItsOwnWaiter(String id) throws Exception {
         assertThat(field(id, "state")).isEqualTo("finished");
         assertThat(field(id, "rc")).as("a bound hit is rc 124, recorded by the waiter once nothing of the job is left").isEqualTo("124");
         assertThat(field(id, "mem_avail_kb_end")).as("the second end read is the waiter's too").isEqualTo("100000000");
@@ -462,7 +479,11 @@ class BbKillLabelIT {
     /// start time that is not the job's (a recycled pid) it is empty; with no job argument (cancel) it is the whole waiter tree, helper and waiter included; stopping with the identity ends the job and leaves
     /// the helper and the waiter alive, and succeeds (the survivor check reads the same job tree).
     /// The fake waiter runs with its cwd INSIDE the checkout, as a waiter started from a checkout does: its helper is then also found by cwd, and only the `w` kind (the job's tree) would let it past the java filter.
-    /// Mutations: the `w` tags taken from the waiter's tree instead of the job's -> B holds the helper; no identity check -> A is not empty; the `else` of the roots drops waiter_pids -> C lacks the helper; stop_ticket_processes' loop call without the fourth argument -> the helper dies; its
+    /// A SECOND fake waiter runs from OUTSIDE the checkout (cwd_below finds none of its tree), with a job (`sleep 300`) and a helper whose argv[0] is `java` (`exec -a java sleep 301`): the cancel path (C2: no job argument)
+    /// must find the waiter, its job and its helper by the waiter's process tree alone (INVARIANT: the cancel kill set holds the waiter's own tree whatever the cwd scan finds), and with the job's identity (B2) the
+    /// set is the job alone: a java-named process of the waiter's tree that is not in the job's tree (a helper) never passes the java filter as a `d`/`c` entry.
+    /// Mutations: the `w` tags taken from the waiter's tree instead of the job's -> B holds the helper; no identity check -> A is not empty; the `else` of the roots drops waiter_pids -> C2 is empty (C alone still
+    /// finds the tree by cwd); the tree collected from the waiter instead of the job (`tree_of $(waiter_pids)`) -> B2 holds the java helper as `d`; stop_ticket_processes' loop call without the fourth argument -> the helper dies; its
     /// survivor-check call without it -> rc is 1 (the helper is a survivor of the waiter tree); the identity swapped (`$JS:$J`) -> B is empty and the job survives.
     @Test
     void theBoundRunnersKillSet_isTheJobsTree_neverTheWaitersHelpers() throws Exception {
@@ -470,15 +491,16 @@ class BbKillLabelIT {
         var helperFile = dir.resolve("kill-set-helper");
         var waiterId = "1795733112999999999-164";
         var co = Files.createDirectories(dir.resolve("co-164"));
-        var waiter = BbFixtures.processClean(List.of("bash",
-                                                     "-c",
-                                                     ": bb-build __run " + waiterId + " -B test; sleep 301 & echo $! > " + helperFile + "; sleep 300 & echo $! > " + jobFile + "; wait"),
-                                             Map.of("PATH", System.getenv("PATH")))
-                                    .directory(co.toFile())
-                                    .redirectErrorStream(true)
-                                    .redirectOutput(ProcessBuilder.Redirect.DISCARD)
-                                    .start();
+        var waiter = fakeWaiter(waiterId, co, "sleep 301", helperFile, jobFile);
+        var jobFile2 = dir.resolve("kill-set-job2");
+        var helperFile2 = dir.resolve("kill-set-helper2");
+        var waiterId2 = "1795733112999999998-164";
+        var waiter2 = fakeWaiter(waiterId2, dir, "exec -a java sleep 301", helperFile2, jobFile2);
 
+        started.add(waiter2);
+        for (var i = 0; i < 100 && !(Files.exists(jobFile2) && Files.size(jobFile2) > 0); i++) {
+            Thread.sleep(100);
+        }
         started.add(waiter);
         for (var i = 0; i < 100 && !(Files.exists(jobFile) && Files.size(jobFile) > 0); i++) {
             Thread.sleep(100);
@@ -489,14 +511,19 @@ class BbKillLabelIT {
         env.put("COD", co.toString());
         env.put("JOBFILE", jobFile.toString());
         env.put("HELPERFILE", helperFile.toString());
+        env.put("ID2", waiterId2);
+        env.put("JOBFILE2", jobFile2.toString());
+        env.put("HELPERFILE2", helperFile2.toString());
         var out = BbFixtures.run(List.of("bash",
                                          "-c",
-                                         ". \"$1\"; J=$(cat \"$JOBFILE\"); H=$(cat \"$HELPERFILE\"); JS=$(pstart \"$J\"); co=$COD\n"
+                                         ". \"$1\"; J=$(cat \"$JOBFILE\"); H=$(cat \"$HELPERFILE\"); JS=$(pstart \"$J\"); co=$COD; J2=$(cat \"$JOBFILE2\"); H2=$(cat \"$HELPERFILE2\"); JS2=$(pstart \"$J2\")\n"
                                         + "echo \"A=$(kill_set \"$ID\" $co java \"$J:1\" | tr '\\n' ' ')\"\n"
                                         + "echo \"B=$(kill_set \"$ID\" $co java \"$J:$JS\" | tr '\\n' ' ')\"\n"
                                         + "echo \"C=$(kill_set \"$ID\" $co | cut -d: -f1 | tr '\\n' ' ')\"\n"
+                                        + "echo \"B2=$(kill_set \"$ID2\" $co java \"$J2:$JS2\" | tr '\\n' ' ')\"\n"
+                                        + "echo \"C2=$(kill_set \"$ID2\" $co | cut -d: -f1 | tr '\\n' ' ')\"\n"
                                         + "stop_ticket_processes \"$ID\" $co java \"$J:$JS\" > /dev/null; echo \"RC=$?\"\n"
-                                        + "proc_live \"$J\" && echo JOB_ALIVE; proc_live \"$H\" && echo HELPER_ALIVE; echo \"J=$J H=$H\"",
+                                        + "proc_live \"$J\" && echo JOB_ALIVE; proc_live \"$H\" && echo HELPER_ALIVE; echo \"J=$J H=$H J2=$J2 H2=$H2\"",
                                          "bash",
                                          tools.resolve("bb-queue-lib.sh").toString()),
                                  env,
@@ -517,6 +544,30 @@ class BbKillLabelIT {
         assertThat(lines).as("the job is stopped").doesNotContain("JOB_ALIVE");
         assertThat(lines).as("the waiter's helper is never signalled").contains("HELPER_ALIVE");
         assertThat(waiter.isAlive()).as("nor the waiter").isTrue();
+        var line2 = lines.stream().filter(l -> l.startsWith("J=")).findFirst().orElseThrow().split("[= ]");
+        var job2 = line2[5];
+        var helper2 = line2[7];
+
+        assertThat(lines.stream().filter(l -> l.startsWith("B2=")).findFirst().orElseThrow().trim())
+                .as("a java-named process of the waiter's tree that is not the job's tree (a helper outside the checkout) is never in the bound runner's kill set: the job alone")
+                .isEqualTo("B2=" + job2 + ":" + startOf(lines, "B2=") + ":w");
+        assertThat(lines.stream().filter(l -> l.startsWith("C2=")).findFirst().orElseThrow())
+                .as("the cancel path finds the waiter's own tree by the waiter's process tree, though the cwd scan finds none of it (waiter outside the checkout): the waiter, the job and the helper")
+                .contains(job2).contains(helper2).contains(String.valueOf(waiter2.pid()));
+    }
+
+    /// A fake waiter: its command line names `bb-build __run <id>`; children: a helper (run as `helperCmd`, standing for a command substitution of the waiter) then the job (`sleep 300`); pids go to the files.
+    private Process fakeWaiter(String id, Path cwd, String helperCmd, Path helperFile, Path jobFile) throws Exception {
+        var w = BbFixtures.processClean(List.of("bash",
+                                                "-c",
+                                                ": bb-build __run " + id + " -B test; bash -c '" + helperCmd + "' & echo $! > " + helperFile + "; sleep 300 & echo $! > " + jobFile + "; wait"),
+                                        Map.of("PATH", System.getenv("PATH")))
+                               .directory(cwd.toFile())
+                               .redirectErrorStream(true)
+                               .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+                               .start();
+
+        return w;
     }
 
     private static String startOf(List<String> lines, String prefix) {
@@ -525,7 +576,7 @@ class BbKillLabelIT {
         return line.split(":")[1];
     }
 
-    private String windowEndRow(String lingerSeconds) throws Exception {
+    private String windowEndRow(String oomLinger, String memLinger, String boundHitLinger) throws Exception {
         var fifo = dir.resolve("vmstat-fifo");
         var served = dir.resolve("vmstat-served");
         var endRead = dir.resolve("vmstat-end-read");
@@ -558,14 +609,22 @@ class BbKillLabelIT {
                                                    open(end_read, "w").close()
                                                os.close(fd)
                                            """);
-        // The load seam of #150, always on: every awk that reads the counter lingers 0.5 s after its read (the fd stays open), as a descheduled or slow-exiting reader does under load.
+        // The load seam of #150: every awk that reads the counter lingers after its read (the fd stays open), as a descheduled or slow-exiting reader does under load; the same for the MemAvailable awk and for the
+        // sed of the waiter's `field bound_hit` read (#164: each command substitution of the waiter between the job's exit and `wait "$W"` gets its own row).
         var realAwk = BbFixtures.run(List.of("sh", "-c", "command -v awk"), Map.of(), null, null).stdout().strip();
+        var realSed = BbFixtures.run(List.of("sh", "-c", "command -v sed"), Map.of(), null, null).stdout().strip();
         var slowAwkDir = Files.createDirectories(dir.resolve("slow-awk"));
 
         BbFixtures.executable(slowAwkDir.resolve("awk"),
                               "#!/bin/bash\nfor last; do :; done\n"
-                             + "case \"$*\" in *oom_kill*) exec 3< \"$last\"; " + realAwk + " \"${@:1:$#-1}\" <&3; r=$?; sleep " + lingerSeconds + "; exit $r;; esac\n"
+                             + "case \"$*\" in\n"
+                             + "*oom_kill*) exec 3< \"$last\"; " + realAwk + " \"${@:1:$#-1}\" <&3; r=$?; sleep " + oomLinger + "; exit $r;;\n"
+                             + "*MemAvailable*) exec 3< \"$last\"; " + realAwk + " \"${@:1:$#-1}\" <&3; r=$?; sleep " + memLinger + "; exit $r;;\n"
+                             + "esac\n"
                              + "exec " + realAwk + " \"$@\"\n");
+        BbFixtures.executable(slowAwkDir.resolve("sed"),
+                              "#!/bin/bash\ncase \"$*\" in *bound_hit*) " + realSed + " \"$@\"; r=$?; sleep " + boundHitLinger + "; exit $r;; esac\n"
+                             + "exec " + realSed + " \"$@\"\n");
         var fakeJava = BbFixtures.executable(dir.resolve("fakejava.sh"),
                                              "#!/bin/bash\ntrap 'while [ ! -e " + endRead + " ]; do sleep 0.1; done; exit 0' TERM\nwhile :; do sleep 0.2; done\n");
 
