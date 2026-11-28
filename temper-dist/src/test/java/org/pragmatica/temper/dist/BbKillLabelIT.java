@@ -439,6 +439,25 @@ class BbKillLabelIT {
     /// finishes, the read gets 6, red; a `sleep 3` before the end read -> still 5, green (the old row, a bump 2 s after the TERM, went red).
     @Test
     void theWindowEndsWhenTheJobEnds_notWhenTheBoundRunnerHasStoppedTheTicketsProcesses() throws Exception {
+        windowEndRow("0.5");
+    }
+
+    /// #164: the bound runner's later stop rounds must not signal the WAITER's own helper processes. The waiter's end read (`$(oom_now)`: a command substitution, a child of the waiter) is
+    /// still in flight when the runner re-collects its kill set after the first round (here: the awk of the read lingers 3 s, a descheduled or slow-exiting reader under load): a runner
+    /// that TERMs the whole waiter tree kills that substitution, and the waiter writes `oom_kill_end=` EMPTY into a ticket it still finalises itself. The invariant: a ticket whose job ran
+    /// to its end is finalised by its own waiter with the window's end fields, however slowly the waiter is scheduled between the job's exit and its lock hold.
+    /// Probe: kill_set's `w` kind taken from the whole waiter tree in bound mode (as at 3d1b066df4) -> `oom_kill_end` is "" here, red.
+    @Test
+    void aWaiterSlowAtTheWindowEnd_stillFinalisesItsOwnTicketWithTheEndFields_theBoundRunnerNeverSignalsItsHelpers() throws Exception {
+        var id = windowEndRow("3");
+
+        assertThat(field(id, "state")).isEqualTo("finished");
+        assertThat(field(id, "rc")).as("a bound hit is rc 124, recorded by the waiter once nothing of the job is left").isEqualTo("124");
+        assertThat(field(id, "mem_avail_kb_end")).as("the second end read is the waiter's too").isEqualTo("100000000");
+        assertThat(field(id, "ended")).isNotEmpty();
+    }
+
+    private String windowEndRow(String lingerSeconds) throws Exception {
         var fifo = dir.resolve("vmstat-fifo");
         var served = dir.resolve("vmstat-served");
         var endRead = dir.resolve("vmstat-end-read");
@@ -477,7 +496,7 @@ class BbKillLabelIT {
 
         BbFixtures.executable(slowAwkDir.resolve("awk"),
                               "#!/bin/bash\nfor last; do :; done\n"
-                             + "case \"$*\" in *oom_kill*) exec 3< \"$last\"; " + realAwk + " \"${@:1:$#-1}\" <&3; r=$?; sleep 0.5; exit $r;; esac\n"
+                             + "case \"$*\" in *oom_kill*) exec 3< \"$last\"; " + realAwk + " \"${@:1:$#-1}\" <&3; r=$?; sleep " + lingerSeconds + "; exit $r;; esac\n"
                              + "exec " + realAwk + " \"$@\"\n");
         var fakeJava = BbFixtures.executable(dir.resolve("fakejava.sh"),
                                              "#!/bin/bash\ntrap 'while [ ! -e " + endRead + " ]; do sleep 0.1; done; exit 0' TERM\nwhile :; do sleep 0.2; done\n");
@@ -496,6 +515,7 @@ class BbKillLabelIT {
         assertThat(field(id, "oom_kill_grant")).as("the first read is the grant's: it takes the first payload (4), never one meant for the window").isEqualTo("4");
         assertThat(field(id, "oom_kill_start")).isEqualTo("5");
         assertThat(field(id, "oom_kill_end")).as("a read after the job ended and the runner finished is not the job's window").isEqualTo("5");
+        return id;
     }
 
     @Test
