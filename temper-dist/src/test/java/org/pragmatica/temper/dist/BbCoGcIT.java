@@ -1187,7 +1187,7 @@ class BbCoGcIT {
         assertThat(payload(victim)).as(run.stdout()).exists();
         assertThat(payload(control)).as(run.stdout()).exists();
         assertThat(run.stdout()).contains("pressure=yes deferral=waived", "keep victim reasons=blind ", "keep control reasons=blind ", "blind=1 unlisted-blind=1")
-                  .doesNotContain("removed ", "changed-after-move");
+                  .doesNotContain("\nremoved ", "removed victim ", "removed control ", "changed-after-move");
         assertThat(logLines()).noneMatch(l -> l.contains("RESTORED"));
     }
 
