@@ -1381,7 +1381,7 @@ class BbCoGcIT {
                         var label = locale + " " + spelling;
 
                         assertThat(run.rc()).as(label + "\n" + run.stdout() + run.stderr()).isEqualTo(2);
-                        assertThat(run.stderr()).as(label).contains("usage: bb-co-gc");
+                        assertThat(run.stderr().strip()).as(label + ": the usage line alone, no arithmetic error before it").startsWith("usage: bb-co-gc").doesNotContain("\n");
                         assertThat(payload(idle)).as(label).exists();
                         assertThat(marker).as(label).doesNotExist();
                     }
@@ -1394,7 +1394,8 @@ class BbCoGcIT {
                               "--live --hours 6 --pace 0", variable + "=\"" + six + "\"");
 
             assertThat(run.rc()).as(variable + "\n" + run.stdout() + run.stderr()).isEqualTo(65);
-            assertThat(run.stderr()).as(variable).contains(variable);
+            assertThat(run.stderr().strip()).as(variable + ": the not-an-integer refusal alone, no arithmetic error and not the later '0' refusal")
+                                             .contains(variable + " is not an integer").doesNotContain("\n");
             assertThat(payload(idle)).as(variable).exists();
             assertThat(marker).as(variable).doesNotExist();
         }
