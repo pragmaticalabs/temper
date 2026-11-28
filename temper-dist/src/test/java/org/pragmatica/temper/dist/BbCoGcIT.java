@@ -225,9 +225,10 @@ class BbCoGcIT {
 
     /// Like gcWith, but the arguments are a shell word list that bash expands, so their BYTES are exact whatever the JVM's own encoding does to argv
     /// (a JVM in the C locale turns a non-ASCII argument into `?`).
-    private BbFixtures.Outcome gcShell(Map<String, String> extraEnv, String shellWords) throws Exception {
+    private BbFixtures.Outcome gcShell(Map<String, String> extraEnv, String shellWords, String... assignments) throws Exception {
         assumeTrue(BbFixtures.linux(), "bb-co-gc reads /proc and uses GNU stat, date, mv, flock");
-        var command = List.of("/bin/bash", "-c", "exec \"$0\" " + shellWords, BbFixtures.OPS_BB.resolve("bb-co-gc").toString());
+        var command = List.of("/bin/bash", "-c", String.join(" ", assignments) + " exec \"$0\" " + shellWords,
+                              BbFixtures.OPS_BB.resolve("bb-co-gc").toString());
 
         return BbFixtures.run(command, gcEnv(extraEnv), home, null);
     }
@@ -1332,10 +1333,11 @@ class BbCoGcIT {
 
             Files.writeString(data, out, java.nio.charset.StandardCharsets.UTF_8);
             var df = BbFixtures.executable(procRoot.resolve("df-malformed"),
-                                           "#!/bin/sh\n" + onlyTheProductionArgv() + "cat '" + data + "'\n" + tail + "\n");
+                                           "#!/bin/sh\n" + onlyTheProductionArgv() + "echo 'df: noise' >&2\ncat '" + data + "'\n" + tail + "\n");
             var run = gcWith(Map.of("BB_CO_GC_DF", df.toString()), "--live", "--days", "3", "--pace", "0");
 
             assertThat(run.rc()).as(entry.getKey() + "\n" + run.stdout() + run.stderr()).isZero();
+            assertThat(run.stderr()).as(entry.getKey() + ": df's own stderr is not the tool's").doesNotContain("df: noise");
 
             if (first) {
                 assertThat(run.stdout()).as(entry.getKey()).contains("pressure=yes deferral=waived");
@@ -1350,6 +1352,14 @@ class BbCoGcIT {
                           .noneMatch(l -> l.contains("PRESSURE"));
             }
         }
+
+        var full = gcWith(atUse(100), "--live", "--days", "3", "--pace", "0");
+
+        assertThat(full.stdout()).as("100% is well formed and waives").contains("use=100% floor=80% pressure=yes");
+        checkout("idle", 10);
+        var empty = gcWith(atUse(0), "--live", "--days", "3", "--pace", "0");
+
+        assertThat(empty.stdout()).as("0% is well formed and is no pressure").contains("use=0% floor=80% pressure=no");
     }
 
     /// A non-ASCII digit (U+0666 ARABIC-INDIC DIGIT SIX) in --hours, --days or --pace is a usage error, rc 2, under any locale: nothing reaches bash
@@ -1379,6 +1389,16 @@ class BbCoGcIT {
             }
         }
 
+        for (var variable : List.of("BB_CO_GC_LOCK_WAIT", "BB_CO_GC_DF_WAIT")) {
+            var run = gcShell(Map.of("BB_CO_GC_DF", recordingDf(marker).toString(), "LC_ALL", "en_US.UTF-8"),
+                              "--live --hours 6 --pace 0", variable + "=\"" + six + "\"");
+
+            assertThat(run.rc()).as(variable + "\n" + run.stdout() + run.stderr()).isEqualTo(65);
+            assertThat(run.stderr()).as(variable).contains(variable);
+            assertThat(payload(idle)).as(variable).exists();
+            assertThat(marker).as(variable).doesNotExist();
+        }
+
         assertThat(home.resolve("work/co-gc.log")).doesNotExist();
         assertThat(gcShell(Map.of("LC_ALL", "en_US.UTF-8"), "--hours 6 --days=").rc()).as("control: the shell wrapper reaches the tool").isEqualTo(2);
         assertThat(gcShell(Map.of("LC_ALL", "en_US.UTF-8"), "--hours 6 --pace 0").rc()).as("control: ASCII digits are accepted").isZero();
@@ -1393,7 +1413,9 @@ class BbCoGcIT {
         skeleton();
         var bodies = new java.util.LinkedHashMap<String, String>();
 
-        bodies.put("background child, df exits 0", "printf 'Use%%\\n  95%%\\n'\nsleep 30 &\nexit 0\n");
+        var late = procRoot.resolve("straggler-woke");
+
+        bodies.put("background child, df exits 0", "printf 'Use%%\\n  95%%\\n'\n(sleep 30 &)\n(sleep 4; : > '" + late + "') &\nexit 0\n");
         bodies.put("TERM-ignoring child, df hangs", "printf 'Use%%\\n  95%%\\n'\n(trap '' TERM; sleep 30) &\nsleep 30\n");
         bodies.put("TERM-ignoring child, df exits 0", "printf 'Use%%\\n  95%%\\n'\n(trap '' TERM; sleep 30) &\nexit 0\n");
         ticket("running", "r1", "busy", "group=1");
@@ -1412,6 +1434,9 @@ class BbCoGcIT {
             assertThat(payload(idle)).as(label).exists();
             assertThat(gcWith(atUse(10), "--live", "--days", "3", "--pace", "0").rc()).as(entry.getKey() + ": the lock is free").isZero();
         }
+
+        Thread.sleep(4500);
+        assertThat(late).as("the straggler was killed with the group, it did not wake up after the pass").doesNotExist();
     }
 
     /// A straggler that leaves df's process group (setsid) is outside what the tool can kill, but it must hold neither a wait nor the run lock: df runs
