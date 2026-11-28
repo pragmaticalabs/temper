@@ -293,7 +293,6 @@ read_pressure() {
       *$'\n'*) rest=${out#*$'\n'}; case $rest in *$'\n'*) ;; *) v=$rest ;; esac ;;
     esac
     while [ "${v# }" != "$v" ]; do v=${v# }; done
-    while [ "${v% }" != "$v" ]; do v=${v% }; done
     case $v in
       [0123456789]%|[0123456789][0123456789]%|[0123456789][0123456789][0123456789]%)
         v=${v%\%}
